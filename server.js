@@ -22,8 +22,8 @@ const io = socketIo(server, {
   }
 });
 
-const PORT = 3000;
-const IP_ADDRESS = '192.168.1.30'; // Replace with your actual IP
+const PORT = process.env.PORT || 3000;
+const HOST = '0.0.0.0'; // Bind to all interfaces
 
 const VIDEOS_DIR = path.join(__dirname, 'videos');
 const THUMBS_DIR = path.join(__dirname, 'thumbnails');
@@ -36,7 +36,7 @@ const DEFAULT_THUMB = path.join(__dirname, 'default-thumbnail.webp');
 
 // Create default thumbnail if missing
 if (!fs.existsSync(DEFAULT_THUMB)) {
-  fs.writeFileSync(DEFAULT_THUMB, ''); // Placeholder image (replace with real image)
+  fs.writeFileSync(DEFAULT_THUMB, '');
 }
 
 // Middleware
@@ -161,10 +161,12 @@ app.post('/upload', upload.single('video'), async (req, res) => {
 
     const thumbName = await ensureThumbnailExists(req.file.filename);
 
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+
     res.json({
       message: 'Upload successful',
       filename: req.file.filename,
-      thumbnail: thumbName ? `http://${IP_ADDRESS}:${PORT}/thumbnails/${thumbName}` : null,
+      thumbnail: thumbName ? `${baseUrl}/thumbnails/${thumbName}` : null,
       size: req.file.size
     });
   } catch (err) {
@@ -185,6 +187,8 @@ app.get('/videolist', async (req, res) => {
       ['.mp4', '.mov', '.avi', '.mkv', '.webm'].includes(path.extname(f).toLowerCase())
     );
 
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+
     const videoList = await Promise.all(videoFiles.map(async (file) => {
       const stats = await fs.promises.stat(path.join(VIDEOS_DIR, file));
       const thumbName = `${path.parse(file).name}.webp`;
@@ -192,8 +196,8 @@ app.get('/videolist', async (req, res) => {
       return {
         title: path.parse(file).name,
         filename: file,
-        url: `http://${IP_ADDRESS}:${PORT}/videos/${encodeURIComponent(file)}`,
-        thumbnail: `http://${IP_ADDRESS}:${PORT}/thumbnails/${encodeURIComponent(thumbName)}`,
+        url: `${baseUrl}/videos/${encodeURIComponent(file)}`,
+        thumbnail: `${baseUrl}/thumbnails/${encodeURIComponent(thumbName)}`,
         size: stats.size,
         created: stats.birthtime,
         modified: stats.mtime
@@ -242,7 +246,7 @@ app.get('/videos/:filename', (req, res) => {
   }
 });
 
-// ✅ API: Delete Video + Thumbnail
+// API: Delete Video + Thumbnail
 app.delete('/delete/:filename', async (req, res) => {
   const filename = req.params.filename;
   const videoPath = path.join(VIDEOS_DIR, filename);
@@ -290,15 +294,15 @@ io.on('connection', (socket) => {
 
 // Start server
 generateAllThumbnails().then(() => {
-  server.listen(PORT, IP_ADDRESS, () => {
-    console.log(`🚀 Server running at http://${IP_ADDRESS}:${PORT}`);
+  server.listen(PORT, HOST, () => {
+    console.log(`🚀 Server running on http://localhost:${PORT}`);
     console.log(`📂 Videos directory: ${VIDEOS_DIR}`);
     console.log(`🖼️ Thumbnails directory: ${THUMBS_DIR}`);
-    console.log(`🔌 WebSocket ready at ws://${IP_ADDRESS}:${PORT}`);
+    console.log(`🔌 WebSocket ready`);
   });
 });
 
-// Error handling
+// Global error handling
 process.on('unhandledRejection', (err) => {
   console.error('Unhandled rejection:', err);
 });
