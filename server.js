@@ -165,31 +165,65 @@ const subcategorySchema = new mongoose.Schema({
 }, { timestamps: true });
 const Subcategory = mongoose.model('Subcategory', subcategorySchema);
 
+// New and updated Product schema
 const productSchema = new mongoose.Schema({
+    // Basic Info
     name: String,
-    description: String,
     brand: { type: String, default: 'Unbranded' },
-    originalPrice: Number,
-    price: Number,
+    sku: String, // New field for SKU/Product Code
+    category: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', required: true },
+    subcategory: { type: mongoose.Schema.Types.ObjectId, ref: 'Subcategory', default: null },
+    childCategory: { type: mongoose.Schema.Types.ObjectId, ref: 'Subcategory', default: null }, // New field for child category
+
+    // Pricing & Stock
+    originalPrice: Number, // MRP
+    price: Number, // Selling Price
+    stock: { type: Number, default: 10 },
+    unit: {
+        type: String,
+        enum: ['kg', 'g', 'L', 'ml', 'pcs', 'pack', 'piece', 'bunch', 'packet', 'dozen', 'bag'],
+        required: true,
+        default: 'pcs'
+    },
+    minOrderQty: { type: Number, default: 1 }, // New field for minimum order quantity
+
+    // Description
+    shortDescription: String, // New field for short description
+    fullDescription: String, // New field for full description
+    
+    // Media
     images: [{
         url: String,
         publicId: String
     }],
-    seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-    stock: { type: Number, default: 10 },
-    unit: {
-        type: String,
-        enum: ['kg', 'g', 'L', 'ml', 'pcs', 'pack'],
-        required: true,
-        default: 'pcs'
-    },
-    category: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: 'Category',
-        required: true
-    },
-    subcategory: { type: mongoose.Schema.Types.ObjectId, ref: 'Subcategory', default: null },
+    videoLink: String, // New field for video link
+    
+    // Specifications (category-wise different fields)
     specifications: { type: Map, of: String, default: {} },
+    
+    // Variants (Optional)
+    variants: { type: Map, of: [String], default: {} }, // New field for variants like color, size, storage
+
+    // Shipping Details
+    shippingDetails: { // New nested schema for shipping details
+        weight: Number,
+        dimensions: {
+            length: Number,
+            width: Number,
+            height: Number,
+        },
+        shippingType: { type: String, enum: ['Free', 'Paid', 'COD Available'], default: 'Free' },
+    },
+
+    // Other Information
+    otherInformation: { // New nested schema for other info
+        warranty: String,
+        returnPolicy: String,
+        tags: [String],
+    },
+
+    // General
+    seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     isTrending: { type: Boolean, default: false }
 }, { timestamps: true });
 
@@ -596,13 +630,11 @@ app.post('/api/auth/login', async (req, res) => {
         let user;
         if (email) {
             user = await User.findOne({ email });
-            // Check if the user trying to log in with an email has a role other than 'user'
             if (user && user.role === 'user') {
                 return res.status(403).json({ message: 'Invalid role for email login' });
             }
         } else if (phone) {
             user = await User.findOne({ phone });
-            // Check if the user trying to log in with a phone number has the role 'user'
             if (user && (user.role === 'seller' || user.role === 'admin')) {
                 return res.status(403).json({ message: 'Invalid role for phone number login' });
             }
@@ -622,8 +654,6 @@ app.post('/api/auth/login', async (req, res) => {
     }
 });
 
-
-// New forgot password endpoint
 app.post('/api/auth/forgot-password', async (req, res) => {
     try {
         const { phone } = req.body;
@@ -636,10 +666,10 @@ app.post('/api/auth/forgot-password', async (req, res) => {
 
         const token = crypto.randomBytes(20).toString('hex');
         user.resetPasswordToken = crypto.createHash('sha256').update(token).digest('hex');
-        user.resetPasswordExpire = Date.now() + 3600000; // 1 hour
+        user.resetPasswordExpire = Date.now() + 3600000;
         await user.save();
 
-        const resetUrl = `http://192.168.1.6:5001/api/auth/reset-password/${token}`;
+        const resetUrl = `http://0.0.0.0:5001/api/auth/reset-password/${token}`;
         const message = `Namaste! You have requested a password reset. Please use the following link to reset your password: ${resetUrl}. This link is valid for 1 hour.`;
 
         await sendWhatsApp(user.phone, message);
@@ -651,7 +681,6 @@ app.post('/api/auth/forgot-password', async (req, res) => {
     }
 });
 
-// New reset password endpoint
 app.post('/api/auth/reset-password/:token', async (req, res) => {
     try {
         const { password } = req.body;
@@ -673,8 +702,7 @@ app.post('/api/auth/reset-password/:token', async (req, res) => {
 
         res.status(200).json({ message: 'Password reset successfully' });
     } catch (err) {
-        console.error('Reset password error:', err);
-        res.status(500).json({ message: 'Error resetting password' });
+        console.status(500).json({ message: 'Error resetting password' });
     }
 });
 
@@ -1034,11 +1062,23 @@ app.post('/api/orders', protect, async (req, res) => {
 
 app.get('/api/orders', protect, async (req, res) => {
     try {
+        // Fetch orders and convert them to plain JavaScript objects for modification
         const orders = await Order.find({ user: req.user._id }).populate({
             path: 'orderItems.product',
-            select: 'name images price originalPrice',
-        }).populate('seller', 'name email').sort({ createdAt: -1 });
-        res.json(orders);
+            select: 'name images price originalPrice', // Ensure 'images' is selected
+        }).populate('seller', 'name email').sort({ createdAt: -1 }).lean();
+
+        // Map over orders to add a representative 'displayImage' for the frontend
+        const ordersWithDisplayImage = orders.map(order => {
+            let image = null;
+            // Safely get the first image from the first product in the order
+            if (order.orderItems?.[0]?.product?.images?.[0]?.url) {
+                image = order.orderItems[0].product.images[0].url;
+            }
+            return { ...order, displayImage: image };
+        });
+
+        res.json(ordersWithDisplayImage);
     } catch (err) {
         res.status(500).json({ message: 'Error fetching orders' });
     }
@@ -1281,31 +1321,85 @@ app.get('/api/seller/products', protect, authorizeRole('seller', 'admin'), async
     }
 });
 
-app.post('/api/seller/products', protect, authorizeRole('seller', 'admin'), checkSellerApproved, upload.array('images', 5), async (req, res) => {
+// Updated POST endpoint to handle the new form structure
+app.post('/api/seller/products', protect, authorizeRole('seller', 'admin'), checkSellerApproved, upload.array('images', 10), async (req, res) => {
     try {
-        const { name, description, brand, originalPrice, price, stock, category, subcategory, childSubcategory, specifications, unit } = req.body;
+        const { 
+            productTitle, brand, sku, category, subcategory, childCategory, 
+            mrp, sellingPrice, stockQuantity, unit, minOrderQty, 
+            shortDescription, fullDescription, videoLink,
+            specifications, colors, sizes, storages,
+            shippingWeight, shippingLength, shippingWidth, shippingHeight, shippingType,
+            warranty, returnPolicy, tags
+        } = req.body;
 
-        const parsedPrice = parseFloat(price);
-        const parsedOriginalPrice = originalPrice ? parseFloat(originalPrice) : null;
-        if (parsedOriginalPrice && parsedOriginalPrice < parsedPrice) {
-            return res.status(400).json({ message: 'Original price cannot be less than the discounted price.' });
+        // Validation for required fields
+        if (!productTitle || !sellingPrice || !category || !unit || !stockQuantity) {
+            return res.status(400).json({ message: 'Product title, selling price, stock, category, and unit are required.' });
         }
 
-        if (!name || !price || !category || !unit) {
-            return res.status(400).json({ message: 'Product name, price, category, and unit are required' });
+        const parsedSellingPrice = parseFloat(sellingPrice);
+        const parsedMrp = mrp ? parseFloat(mrp) : null;
+        if (parsedMrp && parsedMrp < parsedSellingPrice) {
+            return res.status(400).json({ message: 'MRP cannot be less than the selling price.' });
         }
-        const newSpecifications = specifications ? JSON.parse(specifications) : {};
-        if (!req.files || req.files.length === 0) return res.status(400).json({ message: 'At least one image is required' });
+
+        // Handle image uploads
+        if (!req.files || req.files.length === 0) {
+            return res.status(400).json({ message: 'At least one image is required.' });
+        }
         const images = req.files.map(file => ({
             url: file.path,
             publicId: file.filename,
         }));
 
-        const finalSubcategory = childSubcategory || subcategory;
+        // Handle dynamic specifications, variants, and other data
+        const parsedSpecifications = specifications ? JSON.parse(specifications) : {};
+        const parsedTags = tags ? JSON.parse(tags) : [];
+        const parsedVariants = {
+            colors: colors ? JSON.parse(colors) : [],
+            sizes: sizes ? JSON.parse(sizes) : [],
+            storages: storages ? JSON.parse(storages) : [],
+        };
+        const parsedShippingDetails = {
+            weight: shippingWeight ? parseFloat(shippingWeight) : null,
+            dimensions: {
+                length: shippingLength ? parseFloat(shippingLength) : null,
+                width: shippingWidth ? parseFloat(shippingWidth) : null,
+                height: shippingHeight ? parseFloat(shippingHeight) : null,
+            },
+            shippingType: shippingType || 'Free',
+        };
+        const parsedOtherInfo = {
+            warranty: warranty || null,
+            returnPolicy: returnPolicy || null,
+            tags: parsedTags,
+        };
 
+        const finalSubcategory = childCategory || subcategory;
+        
         const product = await Product.create({
-            name, description, brand, originalPrice: parsedOriginalPrice, price: parsedPrice, images, seller: req.user._id, stock, category, subcategory: finalSubcategory, specifications: newSpecifications, unit
+            name: productTitle,
+            sku,
+            brand,
+            category,
+            subcategory: finalSubcategory,
+            originalPrice: parsedMrp,
+            price: parsedSellingPrice,
+            stock: parseInt(stockQuantity),
+            unit,
+            minOrderQty: minOrderQty ? parseInt(minOrderQty) : 1,
+            shortDescription,
+            fullDescription,
+            images,
+            videoLink,
+            specifications: parsedSpecifications,
+            variants: parsedVariants,
+            shippingDetails: parsedShippingDetails,
+            otherInformation: parsedOtherInfo,
+            seller: req.user._id,
         });
+
         res.status(201).json(product);
     } catch (err) {
         console.error('Create product error:', err);
