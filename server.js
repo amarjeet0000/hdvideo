@@ -612,7 +612,7 @@ app.post('/api/auth/register', async (req, res) => {
             await notifyAdmin(`🆕 New Seller Registered (pending approval)\n\nName: ${user.name}\nEmail: ${user.email}\nPhone: ${user.phone}`);
         }
 
-        const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '30d' });
+        const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
         res.status(201).json({ token, user: { id: user._id, name: user.name, email: user.email, phone: user.phone, role: user.role, pincodes: user.pincodes, approved: user.approved } });
     } catch (err) {
         console.error('Register error:', err);
@@ -1803,4 +1803,3 @@ const PORT = process.env.PORT || 5001;
 app.listen(PORT, IP, () => {
     console.log(`🚀 Server running on http://${IP}:${PORT}`);
 });
-
