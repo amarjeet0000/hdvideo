@@ -181,7 +181,7 @@ const productSchema = new mongoose.Schema({
     stock: { type: Number, default: 10 },
     unit: {
         type: String,
-        enum: ['kg', 'g', 'L', 'ml', 'pcs', 'pack', 'piece', 'bunch', 'packet', 'dozen', 'bag'],
+        enum: ['kg', '100g', '250g', '500g', 'L', 'ml', 'pcs', 'pack', 'piece', 'bunch', 'packet', 'dozen', 'bag', '50g'],
         required: true,
         default: 'pcs'
     },
@@ -1803,3 +1803,4 @@ const PORT = process.env.PORT || 5001;
 app.listen(PORT, IP, () => {
     console.log(`🚀 Server running on http://${IP}:${PORT}`);
 });
+
