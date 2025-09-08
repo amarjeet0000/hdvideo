@@ -753,26 +753,9 @@ app.post('/api/auth/logout', (req, res) => {
 // --------- Product Routes ----------
 app.get('/api/products', async (req, res) => {
     try {
-        // Step 1: Pincode ko query parameters se nikalein
-        const { search, minPrice, maxPrice, categoryId, brand, subcategoryId, sellerId, excludeProductId, pincode } = req.query;
+        const { search, minPrice, maxPrice, categoryId, brand, subcategoryId, sellerId, excludeProductId } = req.query;
         const filter = {};
 
-        // Step 2: Pincode ke aadhar par sellers ko filter karein
-        if (pincode) {
-            // Unn sabhi sellers ko dhundein jinke 'pincodes' array mein diya gaya pincode hai
-            const serviceableSellers = await User.find({ role: 'seller', pincodes: pincode });
-            const sellerIds = serviceableSellers.map(seller => seller._id);
-
-            // Agar uss pincode par koi seller nahi hai, toh khali array bhej dein
-            if (sellerIds.length === 0) {
-                return res.json([]);
-            }
-
-            // Product filter mein seller IDs ko shaamil karein
-            filter.seller = { $in: sellerIds };
-        }
-
-        // Baaki ke filters jaise hain waise hi rahenge
         if (search) filter.$or = [{ name: { $regex: search, $options: 'i' } }, { description: { $regex: search, $options: 'i' } }];
         if (minPrice || maxPrice) {
             filter.price = {};
@@ -829,9 +812,14 @@ app.get('/api/cart', protect, async (req, res) => {
 
 app.post('/api/cart', protect, async (req, res) => {
     try {
-        const { productId, qty = 1 } = req.body;
-        const product = await Product.findById(productId);
+        const { productId, qty = 1, pincode } = req.body;
+        const product = await Product.findById(productId).populate('seller', 'pincodes');
         if (!product) return res.status(404).json({ message: 'Product not found' });
+
+        if (pincode && !product.seller.pincodes.includes(pincode)) {
+            return res.status(400).json({ message: "Sorry, delivery not available at your location" });
+        }
+
         if (product.stock < qty) return res.status(400).json({ message: 'Insufficient stock' });
 
         let cart = await Cart.findOne({ user: req.user._id });
@@ -977,14 +965,30 @@ app.delete('/api/products/:id/like', protect, async (req, res) => {
 // --------- Orders Routes ----------
 app.post('/api/orders', protect, async (req, res) => {
     try {
-        const { shippingAddressId, paymentMethod, couponCode, pincode } = req.body;
-        const cart = await Cart.findOne({ user: req.user._id }).populate('items.product');
+        const { shippingAddressId, paymentMethod, couponCode } = req.body;
+        
+        const cart = await Cart.findOne({ user: req.user._id }).populate({
+            path: 'items.product',
+            populate: {
+                path: 'seller',
+                select: 'pincodes name' 
+            }
+        });
 
         if (!cart || cart.items.length === 0) {
             return res.status(400).json({ message: 'Cart is empty' });
         }
         const shippingAddress = await Address.findById(shippingAddressId);
         if (!shippingAddress) return res.status(404).json({ message: 'Shipping address not found' });
+
+        for (const item of cart.items) {
+            const product = item.product;
+            if (!product.seller.pincodes.includes(shippingAddress.pincode)) {
+                return res.status(400).json({
+                    message: `Sorry, delivery not available at your location for the product: "${product.name}"`
+                });
+            }
+        }
 
         const ordersBySeller = new Map();
         for (const item of cart.items) {
@@ -993,7 +997,7 @@ app.post('/api/orders', protect, async (req, res) => {
                 return res.status(400).json({ message: `Insufficient stock for product: ${product.name}` });
             }
 
-            const sellerId = product.seller.toString();
+            const sellerId = product.seller._id.toString();
             if (!ordersBySeller.has(sellerId)) {
                 ordersBySeller.set(sellerId, {
                     seller: product.seller,
@@ -1098,16 +1102,13 @@ app.post('/api/orders', protect, async (req, res) => {
 
 app.get('/api/orders', protect, async (req, res) => {
     try {
-        // Fetch orders and convert them to plain JavaScript objects for modification
         const orders = await Order.find({ user: req.user._id }).populate({
             path: 'orderItems.product',
-            select: 'name images price originalPrice unit', // Ensure 'images' and 'unit' is selected
+            select: 'name images price originalPrice unit', 
         }).populate('seller', 'name email').sort({ createdAt: -1 }).lean();
 
-        // Map over orders to add a representative 'displayImage' for the frontend
         const ordersWithDisplayImage = orders.map(order => {
             let image = null;
-            // Safely get the first image from the first product in the order
             if (order.orderItems?.[0]?.product?.images?.[0]?.url) {
                 image = order.orderItems[0].product.images[0].url;
             }
@@ -1437,7 +1438,6 @@ app.post('/api/seller/products', protect, authorizeRole('seller', 'admin'), chec
             warranty, returnPolicy, tags
         } = req.body;
 
-        // Validation for required fields
         if (!productTitle || !sellingPrice || !category || !unit || !stockQuantity) {
             return res.status(400).json({ message: 'Product title, selling price, stock, category, and unit are required.' });
         }
@@ -1448,7 +1448,6 @@ app.post('/api/seller/products', protect, authorizeRole('seller', 'admin'), chec
             return res.status(400).json({ message: 'MRP cannot be less than the selling price.' });
         }
 
-        // Handle image uploads
         if (!req.files || req.files.length === 0) {
             return res.status(400).json({ message: 'At least one image is required.' });
         }
@@ -1457,7 +1456,6 @@ app.post('/api/seller/products', protect, authorizeRole('seller', 'admin'), chec
             publicId: file.filename,
         }));
 
-        // Handle dynamic specifications, variants, and other data
         const parsedSpecifications = specifications ? JSON.parse(specifications) : {};
         const parsedTags = tags ? JSON.parse(tags) : [];
         const parsedVariants = {
@@ -1511,13 +1509,93 @@ app.post('/api/seller/products', protect, authorizeRole('seller', 'admin'), chec
     }
 });
 
+
+// ##################################################################
+// ## NEW BULK PRODUCT UPLOAD ROUTE START
+// ##################################################################
+app.post('/api/seller/products/bulk', protect, authorizeRole('seller', 'admin'), checkSellerApproved, upload.array('images', 100), async (req, res) => {
+    try {
+        const { products } = req.body;
+        if (!products) {
+            return res.status(400).json({ message: 'Products data is missing.' });
+        }
+
+        const productsData = JSON.parse(products);
+
+        if (!Array.isArray(productsData) || productsData.length === 0) {
+            return res.status(400).json({ message: 'Products data must be a non-empty array.' });
+        }
+
+        if (productsData.length > 10) {
+            return res.status(400).json({ message: 'You can upload a maximum of 10 products at a time.' });
+        }
+
+        let fileIndex = 0;
+        const productsToCreate = [];
+
+        for (const productInfo of productsData) {
+            // Basic validation for each product object
+            const { productTitle, sellingPrice, stockQuantity, unit, category, imageCount } = productInfo;
+            if (!productTitle || !sellingPrice || !stockQuantity || !unit || !category || imageCount === undefined) {
+                 return res.status(400).json({ message: `Missing required fields for product "${productTitle || 'Unknown'}". Ensure all products have title, price, stock, unit, category, and imageCount.` });
+            }
+
+            // Slice the files for the current product from the req.files array
+            const productImages = req.files.slice(fileIndex, fileIndex + imageCount).map(file => ({
+                url: file.path,
+                publicId: file.filename
+            }));
+
+            // Update fileIndex for the next iteration
+            fileIndex += imageCount;
+            
+            // Construct the product document for insertion
+            const newProduct = {
+                name: productTitle,
+                price: parseFloat(sellingPrice),
+                stock: parseInt(stockQuantity),
+                unit,
+                category,
+                seller: req.user._id,
+                images: productImages,
+                // Add default or optional fields from productInfo if they exist
+                brand: productInfo.brand || 'Unbranded',
+                sku: productInfo.sku || undefined,
+                originalPrice: productInfo.mrp ? parseFloat(productInfo.mrp) : undefined,
+                shortDescription: productInfo.shortDescription || undefined,
+            };
+            
+            productsToCreate.push(newProduct);
+        }
+        
+        // Use insertMany for efficient bulk insertion
+        const createdProducts = await Product.insertMany(productsToCreate);
+
+        res.status(201).json({ message: `${createdProducts.length} products uploaded successfully.`, products: createdProducts });
+
+    } catch (err) {
+        console.error('Bulk create product error:', err);
+        // Clean up uploaded files if an error occurs during DB insertion
+        if (req.files) {
+            req.files.forEach(file => {
+                cloudinary.uploader.destroy(file.filename);
+            });
+        }
+        res.status(500).json({ message: 'Error creating products in bulk', error: err.message });
+    }
+});
+// ##################################################################
+// ## NEW BULK PRODUCT UPLOAD ROUTE END
+// ##################################################################
+
+
+
 app.put('/api/seller/products/:id', protect, authorizeRole('seller', 'admin'), checkSellerApproved, upload.array('images', 5), async (req, res) => {
     try {
         const { name, description, brand, originalPrice, price, stock, category, subcategory, childSubcategory, specifications, imagesToDelete, unit } = req.body;
         const product = await Product.findById(req.params.id);
         if (!product) return res.status(404).json({ message: 'Product not found' });
         
-        // Admin can edit any product, seller can only edit their own
         if (req.user.role === 'seller' && product.seller.toString() !== req.user._id.toString()) {
             return res.status(403).json({ message: 'Access denied: You do not own this product' });
         }
@@ -1563,7 +1641,6 @@ app.delete('/api/seller/products/:id', protect, authorizeRole('seller', 'admin')
         const product = await Product.findById(req.params.id);
         if (!product) return res.status(404).json({ message: 'Product not found' });
         
-        // ADMIN can bypass the ownership check
         if (req.user.role === 'seller' && product.seller.toString() !== req.user._id.toString()) {
             return res.status(403).json({ message: 'Access denied: You do not own this product' });
         }
@@ -1579,7 +1656,6 @@ app.delete('/api/seller/products/:id', protect, authorizeRole('seller', 'admin')
 
 
 // --------- Admin Routes ----------
-// GET all products (Admin only)
 app.get('/api/admin/products', protect, authorizeRole('admin'), async (req, res) => {
     try {
         const products = await Product.find({})
@@ -1592,10 +1668,8 @@ app.get('/api/admin/products', protect, authorizeRole('admin'), async (req, res)
     }
 });
 
-// UPDATE any product (Admin only)
 app.put('/api/admin/products/:id', protect, authorizeRole('admin'), upload.array('images', 5), async (req, res) => {
     try {
-        // This logic is similar to the seller's update route but without the ownership check
         const { name, description, brand, originalPrice, price, stock, category, subcategory, childSubcategory, specifications, imagesToDelete, unit, isTrending } = req.body;
         const product = await Product.findById(req.params.id);
         if (!product) return res.status(404).json({ message: 'Product not found' });
@@ -1616,7 +1690,6 @@ app.put('/api/admin/products/:id', protect, authorizeRole('admin'), upload.array
             product.images.push(...newImages);
         }
         
-        // Update fields if provided
         if (name) product.name = name;
         if (description) product.description = description;
         if (brand) product.brand = brand;
