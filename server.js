@@ -1,5 +1,5 @@
 // server.js - Full E-Commerce Backend with Dynamic Category and Subcategory Image Management
-// Cloudinary, Razorpay, and Twilio Integrations
+// Cloudinary, Razorpay, Twilio, and Firebase Integrations
 // This code is an expansion of the provided file to include all documented endpoints.
 
 require('dotenv').config();
@@ -17,6 +17,14 @@ const fs = require('fs').promises;
 const cloudinary = require('cloudinary').v2;
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const { log } = require('console');
+
+// ADDED: Firebase Admin SDK setup
+const admin = require('firebase-admin');
+const serviceAccount = require(process.env.FIREBASE_SERVICE_ACCOUNT);
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount)
+});
 
 // Initialize Express app
 const app = express();
@@ -122,6 +130,31 @@ async function sendWhatsApp(to, message) {
     }
 }
 
+// ADDED: Push notification function
+async function sendPushNotification(fcmToken, title, body, data = {}) {
+    if (!fcmToken) {
+        console.log('FCM token is missing, cannot send push notification.');
+        return;
+    }
+    const message = {
+        notification: {
+            title,
+            body
+        },
+        data: {
+            ...data,
+            click_action: 'FLUTTER_NOTIFICATION_CLICK',
+        },
+        token: fcmToken,
+    };
+    try {
+        const response = await admin.messaging().send(message);
+        console.log('Successfully sent push notification:', response);
+    } catch (error) {
+        console.error('Error sending push notification:', error);
+    }
+}
+
 async function notifyAdmin(message) {
     if (process.env.WHATSAPP_ADMIN_NUMBER) await sendWhatsApp(process.env.WHATSAPP_ADMIN_NUMBER, message);
     else console.log('Admin WhatsApp not configured. Message:', message);
@@ -137,7 +170,9 @@ const userSchema = new mongoose.Schema({
     pincodes: { type: [String], default: [] },
     approved: { type: Boolean, default: true },
     resetPasswordToken: String,
-    resetPasswordExpire: Date
+    resetPasswordExpire: Date,
+    // ADDED: Field to store the FCM device token
+    fcmToken: String
 }, { timestamps: true });
 const User = mongoose.model('User', userSchema);
 
@@ -746,6 +781,26 @@ app.put('/api/auth/profile', protect, async (req, res) => {
     }
 });
 
+// ADDED: New endpoint to save FCM token
+app.post('/api/auth/save-fcm-token', protect, async (req, res) => {
+    try {
+        const { fcmToken } = req.body;
+        if (!fcmToken) {
+            return res.status(400).json({ message: 'FCM token is required' });
+        }
+        const user = await User.findById(req.user._id);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+        user.fcmToken = fcmToken;
+        await user.save();
+        res.json({ message: 'FCM token saved successfully' });
+    } catch (err) {
+        console.error('Error saving FCM token:', err);
+        res.status(500).json({ message: 'Error saving FCM token' });
+    }
+});
+
 app.post('/api/auth/logout', (req, res) => {
     res.json({ message: 'Logged out successfully' });
 });
@@ -762,7 +817,8 @@ app.get('/api/products', async (req, res) => {
             if (minPrice) filter.price.$gte = Number(minPrice);
             if (maxPrice) filter.price.$lte = Number(maxPrice);
         }
-        if (categoryId) filter.category = categoryId;
+        // UPDATED: Check for 'null' string to prevent CastError
+        if (categoryId && categoryId !== 'null') filter.category = categoryId;
         if (brand) filter.brand = { $regex: brand, $options: 'i' };
         if (subcategoryId) filter.subcategory = subcategoryId;
         if (sellerId) filter.seller = sellerId;
@@ -971,7 +1027,7 @@ app.post('/api/orders', protect, async (req, res) => {
             path: 'items.product',
             populate: {
                 path: 'seller',
-                select: 'pincodes name' 
+                select: 'pincodes name fcmToken'
             }
         });
 
@@ -982,6 +1038,12 @@ app.post('/api/orders', protect, async (req, res) => {
         if (!shippingAddress) return res.status(404).json({ message: 'Shipping address not found' });
 
         for (const item of cart.items) {
+            // UPDATED: Added a check to ensure product and seller exist
+            if (!item.product || !item.product.seller) {
+                return res.status(400).json({
+                    message: `An item in your cart is no longer available. Please remove it to continue.`
+                });
+            }
             const product = item.product;
             if (!product.seller.pincodes.includes(shippingAddress.pincode)) {
                 return res.status(400).json({
@@ -1056,7 +1118,7 @@ app.post('/api/orders', protect, async (req, res) => {
             razorpayOrder = await razorpay.orders.create({
                 amount: Math.round(finalAmountForPayment * 100),
                 currency: 'INR',
-                receipt: `order_rcpt_${req.user._id}_${Date.now()}`,
+                receipt: `rcpt_${crypto.randomBytes(8).toString('hex')}`,
             });
         }
 
@@ -1077,6 +1139,15 @@ app.post('/api/orders', protect, async (req, res) => {
             });
             await order.save();
             createdOrders.push(order);
+            
+            if (sellerData.seller.fcmToken) {
+                await sendPushNotification(
+                    sellerData.seller.fcmToken,
+                    'New Order Received! 🎉',
+                    `You have a new order (#${order._id.toString().slice(-6)}) from ${req.user.name}.`,
+                    { orderId: order._id.toString(), type: 'newOrder' }
+                );
+            }
 
             for(const item of sellerData.orderItems) {
                 await Product.findByIdAndUpdate(item.product, { $inc: { stock: -item.qty } });
@@ -1088,7 +1159,9 @@ app.post('/api/orders', protect, async (req, res) => {
         res.status(201).json({
             message: 'Orders created successfully',
             orders: createdOrders.map(o => o._id),
-            razorpayOrder: razorpayOrder ? { id: razorpayOrder.id, amount: razorpayOrder.amount } : undefined
+            razorpayOrder: razorpayOrder ? { id: razorpayOrder.id, amount: razorpayOrder.amount } : undefined,
+            key_id: process.env.RAZORPAY_KEY_ID,
+            user: { name: req.user.name, email: req.user.email, phone: req.user.phone }
         });
 
     } catch (err) {
@@ -1102,10 +1175,18 @@ app.post('/api/orders', protect, async (req, res) => {
 
 app.get('/api/orders', protect, async (req, res) => {
     try {
-        const orders = await Order.find({ user: req.user._id }).populate({
-            path: 'orderItems.product',
-            select: 'name images price originalPrice unit', 
-        }).populate('seller', 'name email').sort({ createdAt: -1 }).lean();
+        const orders = await Order.find({ user: req.user._id })
+            .populate({
+                path: 'orderItems.product',
+                select: 'name images price originalPrice unit category',
+                populate: {
+                    path: 'category',
+                    select: 'name'
+                }
+            })
+            .populate('seller', 'name email')
+            .sort({ createdAt: -1 })
+            .lean();
 
         const ordersWithDisplayImage = orders.map(order => {
             let image = null;
@@ -1150,6 +1231,16 @@ app.put('/api/orders/:id/cancel', protect, async (req, res) => {
 
         for(const item of order.orderItems) {
             await Product.findByIdAndUpdate(item.product, { $inc: { stock: item.qty } });
+        }
+        
+        const user = await User.findById(order.user);
+        if (user && user.fcmToken) {
+            await sendPushNotification(
+                user.fcmToken,
+                'Order Cancelled',
+                `Your order (#${order._id.toString().slice(-6)}) has been cancelled successfully.`,
+                { orderId: order._id.toString(), type: 'orderStatus' }
+            );
         }
 
         res.json({ message: 'Order cancelled successfully', order });
@@ -1537,7 +1628,7 @@ app.post('/api/seller/products/bulk', protect, authorizeRole('seller', 'admin'),
             // Basic validation for each product object
             const { productTitle, sellingPrice, stockQuantity, unit, category, imageCount } = productInfo;
             if (!productTitle || !sellingPrice || !stockQuantity || !unit || !category || imageCount === undefined) {
-                 return res.status(400).json({ message: `Missing required fields for product "${productTitle || 'Unknown'}". Ensure all products have title, price, stock, unit, category, and imageCount.` });
+               return res.status(400).json({ message: `Missing required fields for product "${productTitle || 'Unknown'}". Ensure all products have title, price, stock, unit, category, and imageCount.` });
             }
 
             // Slice the files for the current product from the req.files array
@@ -1776,7 +1867,7 @@ app.get('/api/admin/orders', protect, authorizeRole('admin', 'seller'), async (r
 app.put('/api/admin/orders/:id/status', protect, authorizeRole('admin', 'seller'), async (req, res) => {
     try {
         const { status } = req.body;
-        const order = await Order.findById(req.params.id);
+        const order = await Order.findById(req.params.id).populate('user', 'fcmToken'); // UPDATED: Populated user to get fcmToken
         if (!order) return res.status(404).json({ message: 'Order not found' });
         if (req.user.role === 'seller' && order.seller.toString() !== req.user._id.toString()) {
             return res.status(403).json({ message: 'Access denied' });
@@ -1784,6 +1875,17 @@ app.put('/api/admin/orders/:id/status', protect, authorizeRole('admin', 'seller'
         order.deliveryStatus = status;
         order.history.push({ status: status });
         await order.save();
+        
+        // ADDED: Send push notification to the user about the order status change
+        if (order.user && order.user.fcmToken) {
+            await sendPushNotification(
+                order.user.fcmToken,
+                'Order Status Updated',
+                `Your order (#${order._id.toString().slice(-6)}) is now ${status}.`,
+                { orderId: order._id.toString(), type: 'orderStatus' }
+            );
+        }
+
         res.json(order);
     } catch (err) {
         res.status(500).json({ message: 'Error updating order status', error: err.message });
@@ -2046,3 +2148,4 @@ const PORT = process.env.PORT || 5001;
 app.listen(PORT, IP, () => {
     console.log(`🚀 Server running on http://${IP}:${PORT}`);
 });
+
