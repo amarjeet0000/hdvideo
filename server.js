@@ -1,5 +1,5 @@
 // server.js - Full E-Commerce Backend with Dynamic Category and Subcategory Image Management
-// Cloudinary, Razorpay, Twilio, and Firebase Integrations
+// amarjeet
 // This code is an expansion of the provided file to include all documented endpoints.
 
 require('dotenv').config();
