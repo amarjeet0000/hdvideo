@@ -1,6 +1,6 @@
-// server.js - Full E-Commerce Backend with Dynamic Category and Subcategory Image Management
+// server.js - Full E-Commerce Backend with OTP Reset and Enhanced Notifications
 // amarjeet
-// This code is an expansion of the provided file to include all documented endpoints.
+// This code has been updated to include an OTP-based password reset and a comprehensive notification system.
 
 require('dotenv').config();
 const express = require('express');
@@ -108,7 +108,10 @@ const uploadSingleMedia = upload.single('media');
 // --------- Notifications ----------
 async function sendWhatsApp(to, message) {
     try {
-        if (!to) return;
+        if (!to || !process.env.TWILIO_ACCOUNT_SID) {
+            console.log(`WhatsApp not configured. Message for ${to}: ${message}`);
+            return;
+        }
         const normalized = to.replace(/\D/g, '');
         const toNumber = (normalized.length === 12 && normalized.startsWith('91')) ? `whatsapp:+${normalized}` : `whatsapp:+91${normalized}`;
         await twilioClient.messages.create({
@@ -136,8 +139,9 @@ const userSchema = new mongoose.Schema({
     role: { type: String, enum: ['user', 'seller', 'admin'], default: 'user' },
     pincodes: { type: [String], default: [] },
     approved: { type: Boolean, default: true },
-    resetPasswordToken: String,
-    resetPasswordExpire: Date,
+    // UPDATED: Fields for OTP-based password reset
+    passwordResetOTP: String,
+    passwordResetOTPExpire: Date,
 }, { timestamps: true });
 const User = mongoose.model('User', userSchema);
 
@@ -672,6 +676,7 @@ app.post('/api/auth/login', async (req, res) => {
     }
 });
 
+// UPDATED: Changed to send OTP instead of a reset link
 app.post('/api/auth/forgot-password', async (req, res) => {
     try {
         const { phone } = req.body;
@@ -682,45 +687,57 @@ app.post('/api/auth/forgot-password', async (req, res) => {
             return res.status(404).json({ message: 'User not found with this phone number' });
         }
 
-        const token = crypto.randomBytes(20).toString('hex');
-        user.resetPasswordToken = crypto.createHash('sha256').update(token).digest('hex');
-        user.resetPasswordExpire = Date.now() + 3600000;
+        // Generate 6-digit OTP
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        
+        // Hash the OTP before saving
+        user.passwordResetOTP = await bcrypt.hash(otp, 10);
+        // Set OTP expiry to 10 minutes from now
+        user.passwordResetOTPExpire = Date.now() + 10 * 60 * 1000;
         await user.save();
-
-        const resetUrl = `http://0.0.0.0:5001/api/auth/reset-password/${token}`;
-        const message = `Namaste! You have requested a password reset. Please use the following link to reset your password: ${resetUrl}. This link is valid for 1 hour.`;
+        
+        const message = `Namaste! Your OTP for password reset is ${otp}. This OTP is valid for 10 minutes.`;
 
         await sendWhatsApp(user.phone, message);
 
-        res.status(200).json({ message: 'Password reset link sent to your WhatsApp number' });
+        res.status(200).json({ message: 'OTP sent to your WhatsApp number' });
     } catch (err) {
         console.error('Forgot password error:', err);
         res.status(500).json({ message: 'Error processing forgot password request' });
     }
 });
 
-app.post('/api/auth/reset-password/:token', async (req, res) => {
+// UPDATED: New route to reset password using OTP
+app.post('/api/auth/reset-password-with-otp', async (req, res) => {
     try {
-        const { password } = req.body;
-        const resetPasswordToken = crypto.createHash('sha256').update(req.params.token).digest('hex');
+        const { phone, otp, newPassword } = req.body;
+        if (!phone || !otp || !newPassword) {
+            return res.status(400).json({ message: 'Phone, OTP, and new password are required' });
+        }
 
         const user = await User.findOne({
-            resetPasswordToken,
-            resetPasswordExpire: { $gt: Date.now() },
+            phone,
+            passwordResetOTPExpire: { $gt: Date.now() },
         });
 
         if (!user) {
-            return res.status(400).json({ message: 'Invalid or expired token' });
+            return res.status(400).json({ message: 'User not found or OTP has expired' });
+        }
+        
+        const isMatch = await bcrypt.compare(otp, user.passwordResetOTP);
+
+        if (!isMatch) {
+            return res.status(400).json({ message: 'Invalid OTP' });
         }
 
-        user.password = await bcrypt.hash(password, 10);
-        user.resetPasswordToken = undefined;
-        user.resetPasswordExpire = undefined;
+        user.password = await bcrypt.hash(newPassword, 10);
+        user.passwordResetOTP = undefined;
+        user.passwordResetOTPExpire = undefined;
         await user.save();
 
-        res.status(200).json({ message: 'Password reset successfully' });
+        res.status(200).json({ message: 'Password has been reset successfully' });
     } catch (err) {
-        console.error('Error resetting password:', err);
+        console.error('Error resetting password with OTP:', err);
         res.status(500).json({ message: 'Error resetting password' });
     }
 });
@@ -973,7 +990,7 @@ app.post('/api/orders', protect, async (req, res) => {
             path: 'items.product',
             populate: {
                 path: 'seller',
-                select: 'pincodes name'
+                select: 'pincodes name phone'
             }
         });
 
@@ -984,7 +1001,6 @@ app.post('/api/orders', protect, async (req, res) => {
         if (!shippingAddress) return res.status(404).json({ message: 'Shipping address not found' });
 
         for (const item of cart.items) {
-            // UPDATED: Added a check to ensure product and seller exist
             if (!item.product || !item.product.seller) {
                 return res.status(400).json({
                     message: `An item in your cart is no longer available. Please remove it to continue.`
@@ -1086,6 +1102,15 @@ app.post('/api/orders', protect, async (req, res) => {
             await order.save();
             createdOrders.push(order);
             
+            // Send notifications
+            const orderIdShort = order._id.toString().slice(-6);
+            const userMessage = `✅ Your order #${orderIdShort} has been successfully placed! You will be notified once it's shipped.`;
+            const sellerMessage = `🎉 New Order!\nYou've received a new order #${orderIdShort} from ${req.user.name}. Please process it soon.`;
+            
+            await sendWhatsApp(req.user.phone, userMessage);
+            await sendWhatsApp(sellerData.seller.phone, sellerMessage);
+            await notifyAdmin(`Admin Alert: New order #${orderIdShort} placed.`);
+
             for(const item of sellerData.orderItems) {
                 await Product.findByIdAndUpdate(item.product, { $inc: { stock: -item.qty } });
             }
@@ -1156,7 +1181,7 @@ app.get('/api/orders/:id', protect, async (req, res) => {
 
 app.put('/api/orders/:id/cancel', protect, async (req, res) => {
     try {
-        const order = await Order.findOne({ _id: req.params.id, user: req.user._id });
+        const order = await Order.findOne({ _id: req.params.id, user: req.user._id }).populate('seller', 'phone');
         if (!order) return res.status(404).json({ message: 'Order not found or you do not have permission' });
         if (order.deliveryStatus === 'Cancelled' || order.deliveryStatus === 'Delivered' || order.deliveryStatus === 'Shipped') {
             return res.status(400).json({ message: `Cannot cancel an order that is already ${order.deliveryStatus}` });
@@ -1170,7 +1195,11 @@ app.put('/api/orders/:id/cancel', protect, async (req, res) => {
             await Product.findByIdAndUpdate(item.product, { $inc: { stock: item.qty } });
         }
         
-        // You can add a WhatsApp notification for cancellation here if needed
+        // Notification for cancellation
+        const orderIdShort = order._id.toString().slice(-6);
+        const sellerMessage = `Order Cancellation: Order #${orderIdShort} has been cancelled by the customer.`;
+        await sendWhatsApp(order.seller.phone, sellerMessage);
+        await notifyAdmin(`Admin Alert: Order #${orderIdShort} cancelled by user.`);
         
         res.json({ message: 'Order cancelled successfully', order });
     } catch (err) {
@@ -1757,7 +1786,13 @@ app.put('/api/admin/users/:id/role', protect, authorizeRole('admin'), async (req
         const user = await User.findById(req.params.id);
         if (!user) return res.status(404).json({ message: 'User not found' });
         if (role) user.role = role;
-        if (typeof approved !== 'undefined') user.approved = approved;
+        if (typeof approved !== 'undefined') {
+            // Send notification if seller is approved
+            if(user.role === 'seller' && approved === true && user.approved === false) {
+                await sendWhatsApp(user.phone, "Congratulations! Your seller account has been approved. You can now log in and start selling.");
+            }
+            user.approved = approved;
+        }
         await user.save();
         res.json({ message: 'User role updated successfully', user });
     } catch (err) {
@@ -1806,12 +1841,49 @@ app.put('/api/admin/orders/:id/status', protect, authorizeRole('admin', 'seller'
         order.history.push({ status: status });
         await order.save();
         
-        // You can add a WhatsApp notification for status update here if needed
-        // await sendWhatsApp(order.user.phone, `Your order status has been updated to ${status}.`);
+        // Send notification to user on status change
+        const orderIdShort = order._id.toString().slice(-6);
+        const userMessage = `Order Update: Your order #${orderIdShort} has been updated to: ${status}.`;
+        await sendWhatsApp(order.user.phone, userMessage);
 
         res.json(order);
     } catch (err) {
         res.status(500).json({ message: 'Error updating order status', error: err.message });
+    }
+});
+
+// NEW: Endpoint for admins to broadcast messages
+app.post('/api/admin/broadcast', protect, authorizeRole('admin'), async (req, res) => {
+    try {
+        const { message, target } = req.body; // target can be 'users', 'sellers', or 'all'
+        if (!message || !target) {
+            return res.status(400).json({ message: 'Message and target audience are required.' });
+        }
+
+        let query = {};
+        if (target === 'users') {
+            query = { role: 'user' };
+        } else if (target === 'sellers') {
+            query = { role: 'seller', approved: true };
+        } else if (target !== 'all') {
+            return res.status(400).json({ message: "Invalid target. Must be 'users', 'sellers', or 'all'." });
+        }
+
+        const recipients = await User.find(query).select('phone');
+        let successCount = 0;
+        
+        for (const recipient of recipients) {
+            if (recipient.phone) {
+                await sendWhatsApp(recipient.phone, message);
+                successCount++;
+            }
+        }
+        
+        res.json({ message: `Broadcast sent successfully to ${successCount} recipients.` });
+
+    } catch (err) {
+        console.error('Broadcast error:', err);
+        res.status(500).json({ message: 'Error sending broadcast message', error: err.message });
     }
 });
 
