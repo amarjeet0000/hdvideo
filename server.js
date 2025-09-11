@@ -755,7 +755,8 @@ app.post('/api/auth/reset-password/:token', async (req, res) => {
 
         res.status(200).json({ message: 'Password reset successfully' });
     } catch (err) {
-        console.status(500).json({ message: 'Error resetting password' });
+        console.error('Error resetting password:', err);
+        res.status(500).json({ message: 'Error resetting password' });
     }
 });
 
@@ -1599,6 +1600,7 @@ app.post('/api/seller/products', protect, authorizeRole('seller', 'admin'), chec
         res.status(500).json({ message: 'Error creating product', error: err.message });
     }
 });
+
 
 
 // ##################################################################
