@@ -18,14 +18,6 @@ const cloudinary = require('cloudinary').v2;
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const { log } = require('console');
 
-// ADDED: Firebase Admin SDK setup
-const admin = require('firebase-admin');
-const serviceAccount = require(process.env.FIREBASE_SERVICE_ACCOUNT);
-
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount)
-});
-
 // Initialize Express app
 const app = express();
 app.use(cors());
@@ -130,31 +122,6 @@ async function sendWhatsApp(to, message) {
     }
 }
 
-// ADDED: Push notification function
-async function sendPushNotification(fcmToken, title, body, data = {}) {
-    if (!fcmToken) {
-        console.log('FCM token is missing, cannot send push notification.');
-        return;
-    }
-    const message = {
-        notification: {
-            title,
-            body
-        },
-        data: {
-            ...data,
-            click_action: 'FLUTTER_NOTIFICATION_CLICK',
-        },
-        token: fcmToken,
-    };
-    try {
-        const response = await admin.messaging().send(message);
-        console.log('Successfully sent push notification:', response);
-    } catch (error) {
-        console.error('Error sending push notification:', error);
-    }
-}
-
 async function notifyAdmin(message) {
     if (process.env.WHATSAPP_ADMIN_NUMBER) await sendWhatsApp(process.env.WHATSAPP_ADMIN_NUMBER, message);
     else console.log('Admin WhatsApp not configured. Message:', message);
@@ -171,8 +138,6 @@ const userSchema = new mongoose.Schema({
     approved: { type: Boolean, default: true },
     resetPasswordToken: String,
     resetPasswordExpire: Date,
-    // ADDED: Field to store the FCM device token
-    fcmToken: String
 }, { timestamps: true });
 const User = mongoose.model('User', userSchema);
 
@@ -782,26 +747,6 @@ app.put('/api/auth/profile', protect, async (req, res) => {
     }
 });
 
-// ADDED: New endpoint to save FCM token
-app.post('/api/auth/save-fcm-token', protect, async (req, res) => {
-    try {
-        const { fcmToken } = req.body;
-        if (!fcmToken) {
-            return res.status(400).json({ message: 'FCM token is required' });
-        }
-        const user = await User.findById(req.user._id);
-        if (!user) {
-            return res.status(404).json({ message: 'User not found' });
-        }
-        user.fcmToken = fcmToken;
-        await user.save();
-        res.json({ message: 'FCM token saved successfully' });
-    } catch (err) {
-        console.error('Error saving FCM token:', err);
-        res.status(500).json({ message: 'Error saving FCM token' });
-    }
-});
-
 app.post('/api/auth/logout', (req, res) => {
     res.json({ message: 'Logged out successfully' });
 });
@@ -1028,7 +973,7 @@ app.post('/api/orders', protect, async (req, res) => {
             path: 'items.product',
             populate: {
                 path: 'seller',
-                select: 'pincodes name fcmToken'
+                select: 'pincodes name'
             }
         });
 
@@ -1141,15 +1086,6 @@ app.post('/api/orders', protect, async (req, res) => {
             await order.save();
             createdOrders.push(order);
             
-            if (sellerData.seller.fcmToken) {
-                await sendPushNotification(
-                    sellerData.seller.fcmToken,
-                    'New Order Received! 🎉',
-                    `You have a new order (#${order._id.toString().slice(-6)}) from ${req.user.name}.`,
-                    { orderId: order._id.toString(), type: 'newOrder' }
-                );
-            }
-
             for(const item of sellerData.orderItems) {
                 await Product.findByIdAndUpdate(item.product, { $inc: { stock: -item.qty } });
             }
@@ -1234,16 +1170,8 @@ app.put('/api/orders/:id/cancel', protect, async (req, res) => {
             await Product.findByIdAndUpdate(item.product, { $inc: { stock: item.qty } });
         }
         
-        const user = await User.findById(order.user);
-        if (user && user.fcmToken) {
-            await sendPushNotification(
-                user.fcmToken,
-                'Order Cancelled',
-                `Your order (#${order._id.toString().slice(-6)}) has been cancelled successfully.`,
-                { orderId: order._id.toString(), type: 'orderStatus' }
-            );
-        }
-
+        // You can add a WhatsApp notification for cancellation here if needed
+        
         res.json({ message: 'Order cancelled successfully', order });
     } catch (err) {
         res.status(500).json({ message: 'Error cancelling order' });
@@ -1869,7 +1797,7 @@ app.get('/api/admin/orders', protect, authorizeRole('admin', 'seller'), async (r
 app.put('/api/admin/orders/:id/status', protect, authorizeRole('admin', 'seller'), async (req, res) => {
     try {
         const { status } = req.body;
-        const order = await Order.findById(req.params.id).populate('user', 'fcmToken'); // UPDATED: Populated user to get fcmToken
+        const order = await Order.findById(req.params.id).populate('user');
         if (!order) return res.status(404).json({ message: 'Order not found' });
         if (req.user.role === 'seller' && order.seller.toString() !== req.user._id.toString()) {
             return res.status(403).json({ message: 'Access denied' });
@@ -1878,15 +1806,8 @@ app.put('/api/admin/orders/:id/status', protect, authorizeRole('admin', 'seller'
         order.history.push({ status: status });
         await order.save();
         
-        // ADDED: Send push notification to the user about the order status change
-        if (order.user && order.user.fcmToken) {
-            await sendPushNotification(
-                order.user.fcmToken,
-                'Order Status Updated',
-                `Your order (#${order._id.toString().slice(-6)}) is now ${status}.`,
-                { orderId: order._id.toString(), type: 'orderStatus' }
-            );
-        }
+        // You can add a WhatsApp notification for status update here if needed
+        // await sendWhatsApp(order.user.phone, `Your order status has been updated to ${status}.`);
 
         res.json(order);
     } catch (err) {
@@ -2150,4 +2071,3 @@ const PORT = process.env.PORT || 5001;
 app.listen(PORT, IP, () => {
     console.log(`🚀 Server running on http://${IP}:${PORT}`);
 });
-
