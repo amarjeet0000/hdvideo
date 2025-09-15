@@ -1,6 +1,7 @@
-// server.js - Full E-Commerce Backend with OTP Reset and Enhanced Notifications
-// amarjeet
-// This code has been updated to include an OTP-based password reset and a comprehensive notification system.
+// server.js - Full E-Commerce Backend (Patched with Time Slot Availability)
+// ... (previous features)
+// 9. ### NEW: Added comprehensive Admin Dashboard Statistics endpoint.
+// 10. ### NEW: Added Payment Method statistics (COD vs Online) to the dashboard API.
 
 require('dotenv').config();
 const express = require('express');
@@ -24,12 +25,9 @@ app.use(cors());
 app.use(express.json());
 
 // --------- Setup & Clients ----------
-// Twilio for WhatsApp notifications
 const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-// Razorpay for online payments
 const razorpay = new Razorpay({ key_id: process.env.RAZORPAY_KEY_ID, key_secret: process.env.RAZORPAY_KEY_SECRET });
 
-// Configure Cloudinary for image and video storage
 cloudinary.config({
     cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
     api_key: process.env.CLOUDINARY_API_KEY,
@@ -42,15 +40,16 @@ mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopol
     .then(async () => {
         console.log('✅ MongoDB connected');
 
-        // Initial check to create default categories if the database is empty
         try {
             const categoryCount = await Category.countDocuments();
             if (categoryCount === 0) {
                 console.log('No categories found. Creating default categories...');
                 const defaultCategories = [
-                    { name: 'Fruits', slug: 'fruits' },
-                    { name: 'Vegetables', slug: 'vegetables' },
-                    { name: 'Clothing', slug: 'clothing' },
+                    { name: 'Fruits', slug: 'fruits', type: 'product' },
+                    { name: 'Vegetables', slug: 'vegetables', type: 'product' },
+                    { name: 'Clothing', slug: 'clothing', type: 'product' },
+                    { name: 'Home Services', slug: 'home-services', type: 'service' },
+                    { name: 'Transport', slug: 'transport', type: 'service' },
                 ];
                 const createdCategories = await Category.insertMany(defaultCategories);
                 console.log('Default categories created:', createdCategories.map(c => c.name));
@@ -78,10 +77,10 @@ mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopol
                 console.log('3-level subcategory created for Neelam Mango.');
             }
         } catch (err) {
-            console.error('Error creating default categories:', err);
+            console.error('Error creating default categories:', err.message); 
         }
     })
-    .catch(err => console.error('❌ MongoDB connection error:', err));
+    .catch(err => console.error('❌ MongoDB connection error:', err.message)); 
 
 // --------- Multer with Cloudinary Storage ----------
 const storage = new CloudinaryStorage({
@@ -104,6 +103,11 @@ const storage = new CloudinaryStorage({
 });
 const upload = multer({ storage });
 const uploadSingleMedia = upload.single('media');
+
+const productUpload = upload.fields([
+    { name: 'images', maxCount: 10 },
+    { name: 'video', maxCount: 1 } 
+]);
 
 // --------- Notifications ----------
 async function sendWhatsApp(to, message) {
@@ -130,6 +134,26 @@ async function notifyAdmin(message) {
     else console.log('Admin WhatsApp not configured. Message:', message);
 }
 
+
+// #############################################
+// ## NEW HELPER FUNCTION ADDED HERE
+// #############################################
+/**
+ * NEW HELPER FUNCTION
+ * Generates a unique SKU based on category, product name, and random characters.
+ */
+function generateUniqueSku(categoryId, productName) {
+    const catPart = categoryId.toString().slice(-4).toUpperCase(); // Use last 4 chars of Category ID
+    let prodPart = productName.substring(0, 3).toUpperCase();
+    prodPart = prodPart.replace(/[^A-Z0-9]/g, 'X'); // Clean any special characters
+    
+    // Use the crypto module (already imported) to add 6 random hex characters
+    const randomPart = crypto.randomBytes(3).toString('hex').toUpperCase(); 
+    
+    return `${catPart}-${prodPart}-${randomPart}`;
+}
+
+
 // --------- Models ----------
 const userSchema = new mongoose.Schema({
     name: String,
@@ -139,7 +163,6 @@ const userSchema = new mongoose.Schema({
     role: { type: String, enum: ['user', 'seller', 'admin'], default: 'user' },
     pincodes: { type: [String], default: [] },
     approved: { type: Boolean, default: true },
-    // UPDATED: Fields for OTP-based password reset
     passwordResetOTP: String,
     passwordResetOTPExpire: Date,
 }, { timestamps: true });
@@ -148,6 +171,7 @@ const User = mongoose.model('User', userSchema);
 const categorySchema = new mongoose.Schema({
     name: { type: String, required: true, unique: true },
     slug: { type: String, required: true, unique: true },
+    type: { type: String, enum: ['product', 'service'], default: 'product' }, 
     isActive: { type: Boolean, default: true },
     image: {
         url: String,
@@ -169,47 +193,36 @@ const subcategorySchema = new mongoose.Schema({
 }, { timestamps: true });
 const Subcategory = mongoose.model('Subcategory', subcategorySchema);
 
-// New and updated Product schema
 const productSchema = new mongoose.Schema({
-    // Basic Info
     name: String,
     brand: { type: String, default: 'Unbranded' },
-    sku: String, // New field for SKU/Product Code
+    sku: String, 
     category: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', required: true },
     subcategory: { type: mongoose.Schema.Types.ObjectId, ref: 'Subcategory', default: null },
-    childCategory: { type: mongoose.Schema.Types.ObjectId, ref: 'Subcategory', default: null }, // New field for child category
-
-    // Pricing & Stock
-    originalPrice: Number, // MRP
-    price: Number, // Selling Price
+    childCategory: { type: mongoose.Schema.Types.ObjectId, ref: 'Subcategory', default: null }, 
+    originalPrice: Number, 
+    price: Number, 
     stock: { type: Number, default: 10 },
     unit: {
         type: String,
         enum: ['kg', '100g', '250g', '500g', 'L', 'ml', 'pcs', 'pack', 'piece', 'bunch', 'packet', 'dozen', 'bag', '50g'],
-        required: true,
-        default: 'pcs'
+        required: false, // No longer required globally since services don't have it
     },
-    minOrderQty: { type: Number, default: 1 }, // New field for minimum order quantity
-
-    // Description
-    shortDescription: String, // New field for short description
-    fullDescription: String, // New field for full description
-    
-    // Media
+    minOrderQty: { type: Number, default: 1 }, 
+    shortDescription: String, 
+    fullDescription: String, 
     images: [{
         url: String,
         publicId: String
     }],
-    videoLink: String, // New field for video link
-    
-    // Specifications (category-wise different fields)
+    videoLink: String, 
+    uploadedVideo: {
+        url: String,
+        publicId: String
+    },
     specifications: { type: Map, of: String, default: {} },
-    
-    // Variants (Optional)
-    variants: { type: Map, of: [String], default: {} }, // New field for variants like color, size, storage
-
-    // Shipping Details
-    shippingDetails: { // New nested schema for shipping details
+    variants: { type: Map, of: [String], default: {} },
+    shippingDetails: { 
         weight: Number,
         dimensions: {
             length: Number,
@@ -218,15 +231,16 @@ const productSchema = new mongoose.Schema({
         },
         shippingType: { type: String, enum: ['Free', 'Paid', 'COD Available'], default: 'Free' },
     },
-
-    // Other Information
-    otherInformation: { // New nested schema for other info
+    otherInformation: { 
         warranty: String,
-        returnPolicy: String,
+        returnPolicy: {
+            type: String,
+            enum: ['Non-Returnable', 'Returnable', 'Replacement'],
+            default: 'Non-Returnable'
+        },
         tags: [String],
     },
-
-    // General
+    serviceDurationMinutes: { type: Number },
     seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     isTrending: { type: Boolean, default: false }
 }, { timestamps: true });
@@ -365,12 +379,14 @@ const paymentHistorySchema = new mongoose.Schema({
 });
 const PaymentHistory = mongoose.model('PaymentHistory', paymentHistorySchema);
 
-// New Booking Schema
+
+// ### MODIFIED: Booking Schema for Time Slots ###
 const bookingSchema = new mongoose.Schema({
     user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     provider: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     service: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
-    bookingDate: { type: Date, required: true },
+    bookingStart: { type: Date, required: true }, 
+    bookingEnd: { type: Date, required: true },  
     address: { type: String, required: true },
     status: {
         type: String,
@@ -380,6 +396,39 @@ const bookingSchema = new mongoose.Schema({
     notes: String,
 }, { timestamps: true });
 const Booking = mongoose.model('Booking', bookingSchema);
+
+
+// ### NEW: AVAILABILITY SCHEMA ###
+const timeSlotSchema = new mongoose.Schema({
+    start: { type: String, required: true }, // e.g., "09:00"
+    end: { type: String, required: true },   // e.g., "17:00"
+}, { _id: false });
+
+const dailyAvailabilitySchema = new mongoose.Schema({
+    isActive: { type: Boolean, default: false },
+    slots: [timeSlotSchema] 
+}, { _id: false });
+
+const customDateAvailabilitySchema = new mongoose.Schema({
+    date: { type: Date, required: true }, 
+    isActive: { type: Boolean, default: false }, 
+    slots: [timeSlotSchema]
+}, { _id: false });
+
+const availabilitySchema = new mongoose.Schema({
+    provider: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
+    days: {
+        monday:    dailyAvailabilitySchema,
+        tuesday:   dailyAvailabilitySchema,
+        wednesday: dailyAvailabilitySchema,
+        thursday:  dailyAvailabilitySchema,
+        friday:    dailyAvailabilitySchema,
+        saturday:  dailyAvailabilitySchema,
+        sunday:    dailyAvailabilitySchema,
+    },
+    customDates: [customDateAvailabilitySchema]
+}, { timestamps: true });
+const Availability = mongoose.model('Availability', availabilitySchema);
 
 
 // --------- Middleware ----------
@@ -406,13 +455,13 @@ function checkSellerApproved(req, res, next) {
     next();
 }
 
-// --------- Category Routes (Handles Level 1 CRUD) ----------
+// --------- Category Routes ----------
 app.get('/api/categories', async (req, res) => {
     try {
         const { active } = req.query;
         const filter = {};
         if (typeof active !== 'undefined') filter.isActive = active === 'true';
-        const categories = await Category.find(filter).sort({ name: 1 }).select('name slug isActive image');
+        const categories = await Category.find(filter).sort({ name: 1 }).select('name slug isActive image type');
         res.json(categories);
     } catch (err) {
         res.status(500).json({ message: 'Error fetching categories', error: err.message });
@@ -434,7 +483,7 @@ app.get('/api/admin/categories', protect, authorizeRole('admin'), async (req, re
         const { active } = req.query;
         const filter = {};
         if (typeof active !== 'undefined') filter.isActive = active === 'true';
-        const categories = await Category.find(filter).sort({ name: 1 }).select('name slug isActive image');
+        const categories = await Category.find(filter).sort({ name: 1 }).select('name slug isActive image type');
         res.json(categories);
     } catch (err) {
         res.status(500).json({ message: 'Error fetching categories', error: err.message });
@@ -443,11 +492,13 @@ app.get('/api/admin/categories', protect, authorizeRole('admin'), async (req, re
 
 app.post('/api/admin/categories', protect, authorizeRole('admin'), upload.single('image'), async (req, res) => {
     try {
-        const { name } = req.body;
+        const { name, type } = req.body; 
         if (!name) return res.status(400).json({ message: 'Category name is required' });
-        const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+        const slug = name.toLowerCase().replace(/[^a-z09]+/g, '-').replace(/^-+|-+$/g, '');
         const category = await Category.create({
-            name, slug,
+            name, 
+            slug,
+            type: type || 'product', 
             image: {
                 url: req.file ? req.file.path : undefined,
                 publicId: req.file ? req.file.filename : undefined,
@@ -462,7 +513,7 @@ app.post('/api/admin/categories', protect, authorizeRole('admin'), upload.single
 
 app.put('/api/admin/categories/:id', protect, authorizeRole('admin'), upload.single('image'), async (req, res) => {
     try {
-        const { name, isActive } = req.body;
+        const { name, isActive, type } = req.body; 
         const category = await Category.findById(req.params.id);
         if (!category) return res.status(404).json({ message: 'Category not found' });
         if (req.file) {
@@ -474,6 +525,8 @@ app.put('/api/admin/categories/:id', protect, authorizeRole('admin'), upload.sin
             category.slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
         }
         if (typeof isActive !== 'undefined') category.isActive = isActive;
+        if (type) category.type = type; 
+        
         await category.save();
         res.json(category);
     } catch (err) {
@@ -498,7 +551,8 @@ app.delete('/api/admin/categories/:id', protect, authorizeRole('admin'), async (
     }
 });
 
-// --------- Subcategory Routes (Handles Level 2 & 3 CRUD) ----------
+
+// --------- Subcategory Routes ----------
 app.get('/api/subcategories', async (req, res) => {
     try {
         const { active, categoryId, parentId } = req.query;
@@ -613,6 +667,7 @@ app.delete('/api/admin/subcategories/:id', protect, authorizeRole('admin'), asyn
     }
 });
 
+
 // --------- Auth Routes ----------
 app.post('/api/auth/register', async (req, res) => {
     try {
@@ -635,7 +690,7 @@ app.post('/api/auth/register', async (req, res) => {
         const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
         res.status(201).json({ token, user: { id: user._id, name: user.name, email: user.email, phone: user.phone, role: user.role, pincodes: user.pincodes, approved: user.approved } });
     } catch (err) {
-        console.error('Register error:', err);
+        console.error('Register error:', err.message); 
         res.status(500).json({ message: 'Server error' });
     }
 });
@@ -650,13 +705,11 @@ app.post('/api/auth/login', async (req, res) => {
         let user;
         if (email) {
             user = await User.findOne({ email });
-            // Admin and seller can log in via email
             if (user && user.role === 'user') {
                 return res.status(403).json({ message: 'User role cannot log in with email. Please use phone number.' });
             }
         } else if (phone) {
             user = await User.findOne({ phone });
-            // User can log in via phone
             if (user && (user.role === 'seller' || user.role === 'admin')) {
                 return res.status(403).json({ message: 'Seller/Admin roles must log in with email.' });
             }
@@ -671,12 +724,11 @@ app.post('/api/auth/login', async (req, res) => {
         const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
         res.json({ token, user: { id: user._id, name: user.name, email: user.email, phone: user.phone, role: user.role, pincodes: user.pincodes, approved: user.approved } });
     } catch (err) {
-        console.error('Login error:', err);
+        console.error('Login error:', err.message); 
         res.status(500).json({ message: 'Login error' });
     }
 });
 
-// UPDATED: Changed to send OTP instead of a reset link
 app.post('/api/auth/forgot-password', async (req, res) => {
     try {
         const { phone } = req.body;
@@ -686,28 +738,22 @@ app.post('/api/auth/forgot-password', async (req, res) => {
         if (!user) {
             return res.status(404).json({ message: 'User not found with this phone number' });
         }
-
-        // Generate 6-digit OTP
-        const otp = Math.floor(100000 + Math.random() * 900000).toString();
         
-        // Hash the OTP before saving
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
         user.passwordResetOTP = await bcrypt.hash(otp, 10);
-        // Set OTP expiry to 10 minutes from now
         user.passwordResetOTPExpire = Date.now() + 10 * 60 * 1000;
         await user.save();
         
         const message = `Namaste! Your OTP for password reset is ${otp}. This OTP is valid for 10 minutes.`;
-
         await sendWhatsApp(user.phone, message);
 
         res.status(200).json({ message: 'OTP sent to your WhatsApp number' });
     } catch (err) {
-        console.error('Forgot password error:', err);
+        console.error('Forgot password error:', err.message); 
         res.status(500).json({ message: 'Error processing forgot password request' });
     }
 });
 
-// UPDATED: New route to reset password using OTP
 app.post('/api/auth/reset-password-with-otp', async (req, res) => {
     try {
         const { phone, otp, newPassword } = req.body;
@@ -737,7 +783,7 @@ app.post('/api/auth/reset-password-with-otp', async (req, res) => {
 
         res.status(200).json({ message: 'Password has been reset successfully' });
     } catch (err) {
-        console.error('Error resetting password with OTP:', err);
+        console.error('Error resetting password with OTP:', err.message);
         res.status(500).json({ message: 'Error resetting password' });
     }
 });
@@ -768,6 +814,7 @@ app.post('/api/auth/logout', (req, res) => {
     res.json({ message: 'Logged out successfully' });
 });
 
+
 // --------- Product Routes ----------
 app.get('/api/products', async (req, res) => {
     try {
@@ -780,7 +827,6 @@ app.get('/api/products', async (req, res) => {
             if (minPrice) filter.price.$gte = Number(minPrice);
             if (maxPrice) filter.price.$lte = Number(maxPrice);
         }
-        // UPDATED: Check for 'null' string to prevent CastError
         if (categoryId && categoryId !== 'null') filter.category = categoryId;
         if (brand) filter.brand = { $regex: brand, $options: 'i' };
         if (subcategoryId) filter.subcategory = subcategoryId;
@@ -790,7 +836,7 @@ app.get('/api/products', async (req, res) => {
         const products = await Product.find(filter).populate('seller', 'name email phone pincodes').populate('subcategory', 'name image').populate('category', 'name image');
         res.json(products);
     } catch (err) {
-        console.error("Get Products Error:", err);
+        console.error("Get Products Error:", err.message); 
         res.status(500).json({ message: 'Error fetching products' });
     }
 });
@@ -800,7 +846,7 @@ app.get('/api/products/trending', async (req, res) => {
         const trendingProducts = await Product.find({ isTrending: true }).limit(10).populate('seller', 'name email').populate('category', 'name').populate('subcategory', 'name');
         res.json(trendingProducts);
     } catch (err) {
-        console.error("Get Trending Products Error:", err);
+        console.error("Get Trending Products Error:", err.message); 
         res.status(500).json({ message: 'Error fetching trending products' });
     }
 });
@@ -818,7 +864,8 @@ app.get('/api/products/:id', async (req, res) => {
     }
 });
 
-// --------- Cart Routes ----------
+
+// --------- Cart, Wishlist, Likes, Orders Routes ----------
 app.get('/api/cart', protect, async (req, res) => {
     try {
         const cart = await Cart.findOne({ user: req.user._id }).populate('items.product');
@@ -895,7 +942,6 @@ app.delete('/api/cart/:itemId', protect, async (req, res) => {
     }
 });
 
-// --------- Wishlist Routes ----------
 app.get('/api/wishlist', protect, async (req, res) => {
     try {
         const wishlist = await Wishlist.findOne({ user: req.user._id }).populate('products');
@@ -937,7 +983,6 @@ app.delete('/api/wishlist/:id', protect, async (req, res) => {
     }
 });
 
-// --------- Likes Routes ----------
 app.post('/api/products/:id/like', protect, async (req, res) => {
     try {
         const productId = req.params.id;
@@ -958,7 +1003,7 @@ app.post('/api/products/:id/like', protect, async (req, res) => {
 
         res.status(201).json({ message: 'Product liked successfully' });
     } catch (err) {
-        console.error('Like product error:', err);
+        console.error('Like product error:', err.message); 
         res.status(500).json({ message: 'Error liking product' });
     }
 });
@@ -975,13 +1020,11 @@ app.delete('/api/products/:id/like', protect, async (req, res) => {
 
         res.json({ message: 'Product unliked successfully' });
     } catch (err) {
-        console.error('Unlike product error:', err);
+        console.error('Unlike product error:', err.message); 
         res.status(500).json({ message: 'Error unliking product' });
     }
 });
 
-
-// --------- Orders Routes ----------
 app.post('/api/orders', protect, async (req, res) => {
     try {
         const { shippingAddressId, paymentMethod, couponCode } = req.body;
@@ -1102,7 +1145,6 @@ app.post('/api/orders', protect, async (req, res) => {
             await order.save();
             createdOrders.push(order);
             
-            // Send notifications
             const orderIdShort = order._id.toString().slice(-6);
             const userMessage = `✅ Your order #${orderIdShort} has been successfully placed! You will be notified once it's shipped.`;
             const sellerMessage = `🎉 New Order!\nYou've received a new order #${orderIdShort} from ${req.user.name}. Please process it soon.`;
@@ -1127,7 +1169,7 @@ app.post('/api/orders', protect, async (req, res) => {
         });
 
     } catch (err) {
-        console.error('Create order error:', err);
+        console.error('Create order error:', err.message); 
         if (err.name === 'ValidationError') {
             return res.status(400).json({ message: err.message });
         }
@@ -1195,7 +1237,6 @@ app.put('/api/orders/:id/cancel', protect, async (req, res) => {
             await Product.findByIdAndUpdate(item.product, { $inc: { stock: item.qty } });
         }
         
-        // Notification for cancellation
         const orderIdShort = order._id.toString().slice(-6);
         const sellerMessage = `Order Cancellation: Order #${orderIdShort} has been cancelled by the customer.`;
         await sendWhatsApp(order.seller.phone, sellerMessage);
@@ -1208,29 +1249,203 @@ app.put('/api/orders/:id/cancel', protect, async (req, res) => {
 });
 
 
-// --------- Bookings Routes ----------
+// ##################################################################
+// ## BOOKING & AVAILABILITY ROUTES
+// ##################################################################
+app.get('/api/seller/availability', protect, authorizeRole('seller', 'admin'), async (req, res) => {
+    try {
+        let availability = await Availability.findOne({ provider: req.user._id });
+
+        if (!availability) {
+            const defaultDay = { isActive: false, slots: [{ start: "09:00", end: "17:00" }] };
+            availability = await Availability.create({
+                provider: req.user._id,
+                days: {
+                    monday: defaultDay,
+                    tuesday: defaultDay,
+                    wednesday: defaultDay,
+                    thursday: defaultDay,
+                    friday: defaultDay,
+                    saturday: defaultDay,
+                    sunday: defaultDay,
+                }
+            });
+        }
+        res.json(availability);
+    } catch (err) {
+        console.error('Get availability error:', err.message);
+        res.status(500).json({ message: 'Error fetching availability', error: err.message });
+    }
+});
+
+app.put('/api/seller/availability', protect, authorizeRole('seller', 'admin'), async (req, res) => {
+    try {
+        const { days, customDates } = req.body;
+        const availability = await Availability.findOneAndUpdate(
+            { provider: req.user._id },
+            { 
+                provider: req.user._id,
+                days: days, 
+                customDates: customDates || [] 
+            },
+            { new: true, upsert: true, runValidators: true }
+        );
+        res.status(200).json(availability);
+    } catch (err) {
+        console.error('Update availability error:', err.message);
+        if (err.name === 'ValidationError') {
+            return res.status(400).json({ message: 'Validation error: Invalid slot data', error: err.message });
+        }
+        res.status(500).json({ message: 'Error updating availability', error: err.message });
+    }
+});
+
+app.get('/api/services/:id/availability', async (req, res) => {
+    try {
+        const { date } = req.query; 
+        if (!date) {
+            return res.status(400).json({ message: 'Date query parameter (YYYY-MM-DD) is required.' });
+        }
+
+        const service = await Product.findById(req.params.id).populate('category'); // <<< Populate category here
+        if (!service || !service.seller) {
+            return res.status(404).json({ message: 'Service or service provider not found.' });
+        }
+
+        if (service.category.type !== 'service' || !service.serviceDurationMinutes) {
+            return res.status(400).json({ message: 'This product is not a bookable service with a valid duration.' });
+        }
+
+        const providerId = service.seller;
+        const duration = service.serviceDurationMinutes;
+        const requestedDate = new Date(`${date}T00:00:00.000Z`); 
+        const dayOfWeek = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'][requestedDate.getUTCDay()];
+
+        const availability = await Availability.findOne({ provider: providerId });
+        if (!availability) {
+            return res.status(404).json({ message: 'This provider has not set up their availability.' });
+        }
+
+        let scheduleForDay = availability.days[dayOfWeek]; 
+        const customDate = availability.customDates.find(d => new Date(d.date).toDateString() === requestedDate.toDateString());
+
+        if (customDate) {
+            scheduleForDay = customDate; 
+        }
+
+        if (!scheduleForDay || !scheduleForDay.isActive) {
+            return res.json([]); 
+        }
+
+        const allPossibleSlots = [];
+        const slotDurationMillis = duration * 60 * 1000;
+
+        for (const block of scheduleForDay.slots) {
+            const [startHour, startMin] = block.start.split(':').map(Number);
+            const [endHour, endMin] = block.end.split(':').map(Number);
+
+            let currentSlotTime = new Date(requestedDate);
+            currentSlotTime.setUTCHours(startHour, startMin, 0, 0);
+
+            let blockEndTime = new Date(requestedDate);
+            blockEndTime.setUTCHours(endHour, endMin, 0, 0);
+
+            while (true) {
+                const slotEndTime = new Date(currentSlotTime.getTime() + slotDurationMillis);
+                
+                if (slotEndTime > blockEndTime) {
+                    break;
+                }
+                
+                allPossibleSlots.push(new Date(currentSlotTime)); 
+                currentSlotTime = slotEndTime; 
+            }
+        }
+
+        const dayStart = new Date(requestedDate);
+        const dayEnd = new Date(requestedDate);
+        dayEnd.setUTCDate(dayEnd.getUTCDate() + 1); 
+
+        const existingBookings = await Booking.find({
+            provider: providerId,
+            status: { $nin: ['Rejected', 'Cancelled'] }, 
+            bookingStart: {
+                $gte: dayStart,
+                $lt: dayEnd
+            }
+        }).select('bookingStart bookingEnd');
+        
+        const availableSlots = allPossibleSlots.filter(slotStart => {
+            const slotEnd = new Date(slotStart.getTime() + slotDurationMillis);
+            
+            const isBooked = existingBookings.some(booking => {
+                return (booking.bookingStart < slotEnd) && (booking.bookingEnd > slotStart);
+            });
+
+            return !isBooked; 
+        });
+
+        res.json(availableSlots.map(date => date.toISOString()));
+
+    } catch (err) {
+        console.error('Get availability slots error:', err.message);
+        res.status(500).json({ message: 'Error calculating available slots', error: err.message });
+    }
+});
+
+
 app.post('/api/bookings', protect, async (req, res) => {
     try {
-        const { serviceId, bookingDate, address, notes } = req.body;
-        const service = await Product.findById(serviceId).populate('seller');
-        if (!service) return res.status(404).json({ message: 'Service not found.' });
+        const { serviceId, bookingStartISO, address, notes } = req.body;
+        
+        if (!serviceId || !bookingStartISO || !address) {
+            return res.status(400).json({ message: 'Service ID, booking start time, and address are required.' });
+        }
 
+        const service = await Product.findById(serviceId).populate('seller').populate('category'); // Need category to check type
+        if (!service) return res.status(404).json({ message: 'Service not found.' });
+        if (service.category.type !== 'service' || !service.serviceDurationMinutes) {
+             return res.status(400).json({ message: 'This product is not a bookable service.' });
+        }
+        if (!service.seller) return res.status(404).json({ message: 'Service provider not found.' });
+
+        const providerId = service.seller._id;
+        const duration = service.serviceDurationMinutes;
+        const bookingStart = new Date(bookingStartISO);
+        const bookingEnd = new Date(bookingStart.getTime() + duration * 60 * 1000);
+
+        const conflictingBooking = await Booking.findOne({
+            provider: providerId,
+            status: { $nin: ['Rejected', 'Cancelled'] },
+            $or: [
+                { bookingStart: { $gte: bookingStart, $lt: bookingEnd } },
+                { bookingEnd: { $gt: bookingStart, $lte: bookingEnd } },
+                { bookingStart: { $lte: bookingStart }, bookingEnd: { $gte: bookingEnd } }
+            ]
+        });
+
+        if (conflictingBooking) {
+            return res.status(409).json({ message: 'Sorry, this time slot has just been booked. Please select another slot.' });
+        }
+        
         const newBooking = await Booking.create({
             user: req.user._id,
-            provider: service.seller._id,
+            provider: providerId,
             service: serviceId,
-            bookingDate,
+            bookingStart: bookingStart,
+            bookingEnd: bookingEnd,
             address,
             notes,
         });
 
         const providerPhone = service.seller.phone;
-        const message = `🎉 New Booking Request!\n\nService: ${service.name}\nUser: ${req.user.name}\nDate: ${new Date(bookingDate).toLocaleDateString()}.\nPlease log in to your panel to accept or reject.`;
+        const formattedDate = bookingStart.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' });
+        const message = `🎉 New Booking Request!\n\nService: ${service.name}\nUser: ${req.user.name}\nSlot: ${formattedDate}.\nPlease log in to your panel to accept or reject.`;
         await sendWhatsApp(providerPhone, message);
 
         res.status(201).json(newBooking);
     } catch (err) {
-        console.error('Create booking error:', err);
+        console.error('Create booking error:', err.message); 
         res.status(500).json({ message: 'Error creating booking.' });
     }
 });
@@ -1241,15 +1456,16 @@ app.put('/api/bookings/:id/status', protect, authorizeRole('seller', 'admin'), a
         const booking = await Booking.findById(req.params.id).populate('user service');
         if (!booking) return res.status(404).json({ message: 'Booking not found.' });
 
-        if (booking.provider.toString() !== req.user._id.toString()) {
-            return res.status(403).json({ message: 'Access denied.' });
+        if (req.user.role === 'seller' && booking.provider.toString() !== req.user._id.toString()) {
+             return res.status(403).json({ message: 'Access denied.' });
         }
 
         booking.status = status;
         await booking.save();
         
         const userPhone = booking.user.phone;
-        const message = `Booking Update!\n\nYour booking for "${booking.service.name}" has been ${status}.`;
+        const formattedDate = booking.bookingStart.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' });
+        const message = `Booking Update!\n\nYour booking for "${booking.service.name}" on ${formattedDate} has been ${status}.`;
         await sendWhatsApp(userPhone, message);
 
         res.json(booking);
@@ -1275,6 +1491,7 @@ app.get('/api/provider-bookings', protect, authorizeRole('seller', 'admin'), asy
         res.status(500).json({ message: 'Error fetching provider bookings.' });
     }
 });
+
 
 // --------- Payments Routes ----------
 app.post('/api/payment/create-order', protect, async (req, res) => {
@@ -1319,7 +1536,7 @@ app.get('/api/payment/history', protect, async (req, res) => {
     }
 });
 
-// --------- Reviews Routes ----------
+// --------- Reviews & Addresses Routes ----------
 app.get('/api/products/:id/reviews', async (req, res) => {
     try {
         const reviews = await Review.find({ product: req.params.id }).populate('user', 'name');
@@ -1374,7 +1591,6 @@ app.delete('/api/products/:id/reviews/:reviewId', protect, authorizeRole('admin'
     }
 });
 
-// --------- Addresses Routes ----------
 app.get('/api/addresses', protect, async (req, res) => {
     try {
         const addresses = await Address.find({ user: req.user._id }).sort({ isDefault: -1 });
@@ -1430,6 +1646,7 @@ app.delete('/api/addresses/:id', protect, async (req, res) => {
     }
 });
 
+
 // --------- Seller Routes ----------
 app.get('/api/seller/categories-and-subcategories', protect, authorizeRole('seller', 'admin'), async (req, res) => {
     try {
@@ -1460,36 +1677,60 @@ app.get('/api/seller/categories-and-subcategories', protect, authorizeRole('sell
 
         res.json(responseData);
     } catch (err) {
-        console.error("Error fetching categories and subcategories for seller:", err);
+        console.error("Error fetching categories and subcategories for seller:", err.message); 
         res.status(500).json({ message: 'Error fetching categories and subcategories', error: err.message });
     }
 });
 
+// ### ROUTE 1: FIX APPLIED HERE ###
 app.get('/api/seller/products', protect, authorizeRole('seller', 'admin'), async (req, res) => {
     try {
-        const products = await Product.find({ seller: req.user._id }).populate('seller', 'name email phone pincodes').populate('subcategory', 'name image').populate('category', 'name image');
+        const products = await Product.find({ seller: req.user._id })
+            .populate('seller', 'name email phone pincodes')
+            .populate('subcategory', 'name image')
+            // <<< FIX: Added 'type', 'slug', 'isActive' so frontend model doesn't crash
+            .populate('category', 'name slug type isActive image'); 
         res.json(products);
     } catch (error) {
-        console.error("Seller products error:", error);
+        console.error("Seller products error:", error.message); 
         res.status(500).json({ message: 'Error fetching seller products' });
     }
 });
 
-// Updated POST endpoint to handle the new form structure
-app.post('/api/seller/products', protect, authorizeRole('seller', 'admin'), checkSellerApproved, upload.array('images', 10), async (req, res) => {
+
+// ... (POST /api/seller/products, POST /api/seller/products/bulk, PUT /api/seller/products/:id, DELETE /api/seller/products/:id are unchanged from last version) ...
+app.post('/api/seller/products', protect, authorizeRole('seller', 'admin'), checkSellerApproved, productUpload, async (req, res) => {
     try {
         const { 
-            productTitle, brand, sku, category, subcategory, childCategory, 
+            productTitle, brand, category, subcategory, childCategory, 
             mrp, sellingPrice, stockQuantity, unit, minOrderQty, 
             shortDescription, fullDescription, videoLink,
             specifications, colors, sizes, storages,
             shippingWeight, shippingLength, shippingWidth, shippingHeight, shippingType,
-            warranty, returnPolicy, tags
+            warranty, returnPolicy, tags,
+            serviceDurationMinutes 
         } = req.body;
 
-        if (!productTitle || !sellingPrice || !category || !unit || !stockQuantity) {
-            return res.status(400).json({ message: 'Product title, selling price, stock, category, and unit are required.' });
+        if (!productTitle || !sellingPrice || !category || !stockQuantity) {
+            return res.status(400).json({ message: 'Product title, selling price, stock, and category are required.' });
         }
+        
+        const parentCategory = await Category.findById(category);
+        if (!parentCategory) {
+            return res.status(404).json({ message: 'Selected category not found.' });
+        }
+
+        if (parentCategory.type === 'service') {
+            if (!serviceDurationMinutes || parseInt(serviceDurationMinutes) <= 0) {
+                return res.status(400).json({ message: 'Services must have a valid "Service Duration (in minutes)".' });
+            }
+        } else if (parentCategory.type === 'product') {
+             if (!unit) {
+                return res.status(400).json({ message: 'Products must have a "Unit" (e.g., kg, pcs).' });
+            }
+        }
+
+        const newSku = generateUniqueSku(category, productTitle);
 
         const parsedSellingPrice = parseFloat(sellingPrice);
         const parsedMrp = mrp ? parseFloat(mrp) : null;
@@ -1497,13 +1738,22 @@ app.post('/api/seller/products', protect, authorizeRole('seller', 'admin'), chec
             return res.status(400).json({ message: 'MRP cannot be less than the selling price.' });
         }
 
-        if (!req.files || req.files.length === 0) {
+        if (!req.files.images || req.files.images.length === 0) {
             return res.status(400).json({ message: 'At least one image is required.' });
         }
-        const images = req.files.map(file => ({
+        const images = req.files.images.map(file => ({
             url: file.path,
             publicId: file.filename,
         }));
+
+        let uploadedVideo = null;
+        if (req.files.video && req.files.video.length > 0) {
+            const videoFile = req.files.video[0];
+            uploadedVideo = {
+                url: videoFile.path,
+                publicId: videoFile.filename
+            };
+        }
 
         const parsedSpecifications = specifications ? JSON.parse(specifications) : {};
         const parsedTags = tags ? JSON.parse(tags) : [];
@@ -1517,13 +1767,12 @@ app.post('/api/seller/products', protect, authorizeRole('seller', 'admin'), chec
             dimensions: {
                 length: shippingLength ? parseFloat(shippingLength) : null,
                 width: shippingWidth ? parseFloat(shippingWidth) : null,
-                height: shippingHeight ? parseFloat(shippingHeight) : null,
             },
             shippingType: shippingType || 'Free',
         };
         const parsedOtherInfo = {
             warranty: warranty || null,
-            returnPolicy: returnPolicy || null,
+            returnPolicy: returnPolicy || 'Non-Returnable',
             tags: parsedTags,
         };
 
@@ -1531,38 +1780,38 @@ app.post('/api/seller/products', protect, authorizeRole('seller', 'admin'), chec
         
         const product = await Product.create({
             name: productTitle,
-            sku,
+            sku: newSku, 
             brand,
             category,
             subcategory: finalSubcategory,
             originalPrice: parsedMrp,
             price: parsedSellingPrice,
             stock: parseInt(stockQuantity),
-            unit,
+            unit: parentCategory.type === 'product' ? unit : undefined, 
             minOrderQty: minOrderQty ? parseInt(minOrderQty) : 1,
             shortDescription,
             fullDescription,
             images,
             videoLink,
+            uploadedVideo: uploadedVideo,
             specifications: parsedSpecifications,
             variants: parsedVariants,
             shippingDetails: parsedShippingDetails,
             otherInformation: parsedOtherInfo,
             seller: req.user._id,
+            serviceDurationMinutes: parentCategory.type === 'service' ? parseInt(serviceDurationMinutes) : undefined, 
         });
 
         res.status(201).json(product);
     } catch (err) {
-        console.error('Create product error:', err);
+        console.error('Create product error:', err.message); 
+        if (err.name === 'ValidationError') {
+             return res.status(400).json({ message: 'Validation failed', error: err.message });
+        }
         res.status(500).json({ message: 'Error creating product', error: err.message });
     }
 });
 
-
-
-// ##################################################################
-// ## NEW BULK PRODUCT UPLOAD ROUTE START
-// ##################################################################
 app.post('/api/seller/products/bulk', protect, authorizeRole('seller', 'admin'), checkSellerApproved, upload.array('images', 100), async (req, res) => {
     try {
         const { products } = req.body;
@@ -1584,65 +1833,61 @@ app.post('/api/seller/products/bulk', protect, authorizeRole('seller', 'admin'),
         const productsToCreate = [];
 
         for (const productInfo of productsData) {
-            // Basic validation for each product object
             const { productTitle, sellingPrice, stockQuantity, unit, category, imageCount } = productInfo;
             if (!productTitle || !sellingPrice || !stockQuantity || !unit || !category || imageCount === undefined) {
                return res.status(400).json({ message: `Missing required fields for product "${productTitle || 'Unknown'}". Ensure all products have title, price, stock, unit, category, and imageCount.` });
             }
 
-            // Slice the files for the current product from the req.files array
             const productImages = req.files.slice(fileIndex, fileIndex + imageCount).map(file => ({
                 url: file.path,
                 publicId: file.filename
             }));
-
-            // Update fileIndex for the next iteration
+            
             fileIndex += imageCount;
             
-            // Construct the product document for insertion
             const newProduct = {
                 name: productTitle,
                 price: parseFloat(sellingPrice),
+                sku: generateUniqueSku(category, productTitle), 
                 stock: parseInt(stockQuantity),
                 unit,
                 category,
                 seller: req.user._id,
                 images: productImages,
-                // Add default or optional fields from productInfo if they exist
                 brand: productInfo.brand || 'Unbranded',
-                sku: productInfo.sku || undefined,
                 originalPrice: productInfo.mrp ? parseFloat(productInfo.mrp) : undefined,
                 shortDescription: productInfo.shortDescription || undefined,
+                otherInformation: {
+                    warranty: productInfo.warranty || null,
+                    returnPolicy: productInfo.returnPolicy || 'Non-Returnable',
+                    tags: productInfo.tags || []
+                }
             };
             
             productsToCreate.push(newProduct);
         }
         
-        // Use insertMany for efficient bulk insertion
         const createdProducts = await Product.insertMany(productsToCreate);
 
         res.status(201).json({ message: `${createdProducts.length} products uploaded successfully.`, products: createdProducts });
 
     } catch (err) {
-        console.error('Bulk create product error:', err);
-        // Clean up uploaded files if an error occurs during DB insertion
+        console.error('Bulk create product error:', err.message); 
         if (req.files) {
             req.files.forEach(file => {
                 cloudinary.uploader.destroy(file.filename);
             });
         }
+        if (err.name === 'ValidationError') {
+             return res.status(400).json({ message: 'Validation failed (perhaps an invalid returnPolicy value was used?).', error: err.message });
+        }
         res.status(500).json({ message: 'Error creating products in bulk', error: err.message });
     }
 });
-// ##################################################################
-// ## NEW BULK PRODUCT UPLOAD ROUTE END
-// ##################################################################
 
-
-
-app.put('/api/seller/products/:id', protect, authorizeRole('seller', 'admin'), checkSellerApproved, upload.array('images', 5), async (req, res) => {
+app.put('/api/seller/products/:id', protect, authorizeRole('seller', 'admin'), checkSellerApproved, productUpload, async (req, res) => {
     try {
-        const { name, description, brand, originalPrice, price, stock, category, subcategory, childSubcategory, specifications, imagesToDelete, unit } = req.body;
+        const { name, description, brand, originalPrice, price, stock, category, subcategory, childSubcategory, specifications, imagesToDelete, unit, serviceDurationMinutes, returnPolicy } = req.body;
         const product = await Product.findById(req.params.id);
         if (!product) return res.status(404).json({ message: 'Product not found' });
         
@@ -1661,10 +1906,23 @@ app.put('/api/seller/products/:id', protect, authorizeRole('seller', 'admin'), c
             await Promise.all(idsToDelete.map(publicId => cloudinary.uploader.destroy(publicId)));
             product.images = product.images.filter(img => !idsToDelete.includes(img.publicId));
         }
-        if (req.files && req.files.length > 0) {
-            const newImages = req.files.map(file => ({ url: file.path, publicId: file.filename }));
+
+        if (req.files.images && req.files.images.length > 0) {
+            const newImages = req.files.images.map(file => ({ url: file.path, publicId: file.filename }));
             product.images.push(...newImages);
         }
+        
+        if (req.files.video && req.files.video.length > 0) {
+            const newVideoFile = req.files.video[0];
+            if (product.uploadedVideo && product.uploadedVideo.publicId) {
+                await cloudinary.uploader.destroy(product.uploadedVideo.publicId, { resource_type: 'video' });
+            }
+            product.uploadedVideo = {
+                url: newVideoFile.path,
+                publicId: newVideoFile.filename
+            };
+        }
+
         if (name) product.name = name;
         if (description) product.description = description;
         if (brand) product.brand = brand;
@@ -1673,6 +1931,8 @@ app.put('/api/seller/products/:id', protect, authorizeRole('seller', 'admin'), c
         if (stock) product.stock = stock;
         if (unit) product.unit = unit;
         if (category) product.category = category;
+        if (returnPolicy) product.otherInformation.returnPolicy = returnPolicy;
+        if (serviceDurationMinutes) product.serviceDurationMinutes = parseInt(serviceDurationMinutes);
 
         const finalSubcategory = childSubcategory || subcategory;
         if (finalSubcategory) product.subcategory = finalSubcategory;
@@ -1681,7 +1941,7 @@ app.put('/api/seller/products/:id', protect, authorizeRole('seller', 'admin'), c
         await product.save();
         res.json(product);
     } catch (err) {
-        console.error('Update product error:', err);
+        console.error('Update product error:', err.message); 
         res.status(500).json({ message: 'Error updating product', error: err.message });
     }
 });
@@ -1696,21 +1956,29 @@ app.delete('/api/seller/products/:id', protect, authorizeRole('seller', 'admin')
         }
         
         await Promise.all(product.images.map(img => cloudinary.uploader.destroy(img.publicId)));
+        if (product.uploadedVideo && product.uploadedVideo.publicId) {
+            await cloudinary.uploader.destroy(product.uploadedVideo.publicId, { resource_type: 'video' });
+        }
+        
         await product.deleteOne();
         res.json({ message: 'Product deleted successfully' });
     } catch (err) {
-        console.error('Delete product error:', err);
+        console.error('Delete product error:', err.message); 
         res.status(500).json({ message: 'Error deleting product' });
     }
 });
 
 
+
 // --------- Admin Routes ----------
+
+// ### ROUTE 2: FIX APPLIED HERE ###
 app.get('/api/admin/products', protect, authorizeRole('admin'), async (req, res) => {
     try {
         const products = await Product.find({})
             .populate('seller', 'name email')
-            .populate('category', 'name')
+             // <<< FIX: Added 'type', 'slug', 'isActive' so frontend model doesn't crash
+            .populate('category', 'name slug type isActive')
             .populate('subcategory', 'name');
         res.json(products);
     } catch (err) {
@@ -1718,9 +1986,10 @@ app.get('/api/admin/products', protect, authorizeRole('admin'), async (req, res)
     }
 });
 
-app.put('/api/admin/products/:id', protect, authorizeRole('admin'), upload.array('images', 5), async (req, res) => {
+
+app.put('/api/admin/products/:id', protect, authorizeRole('admin'), productUpload, async (req, res) => {
     try {
-        const { name, description, brand, originalPrice, price, stock, category, subcategory, childSubcategory, specifications, imagesToDelete, unit, isTrending } = req.body;
+        const { name, description, brand, originalPrice, price, stock, category, subcategory, childSubcategory, specifications, imagesToDelete, unit, isTrending, serviceDurationMinutes, returnPolicy } = req.body;
         const product = await Product.findById(req.params.id);
         if (!product) return res.status(404).json({ message: 'Product not found' });
 
@@ -1735,9 +2004,21 @@ app.put('/api/admin/products/:id', protect, authorizeRole('admin'), upload.array
             await Promise.all(idsToDelete.map(publicId => cloudinary.uploader.destroy(publicId)));
             product.images = product.images.filter(img => !idsToDelete.includes(img.publicId));
         }
-        if (req.files && req.files.length > 0) {
-            const newImages = req.files.map(file => ({ url: file.path, publicId: file.filename }));
+        
+        if (req.files.images && req.files.images.length > 0) {
+            const newImages = req.files.images.map(file => ({ url: file.path, publicId: file.filename }));
             product.images.push(...newImages);
+        }
+        
+        if (req.files.video && req.files.video.length > 0) {
+            const newVideoFile = req.files.video[0];
+            if (product.uploadedVideo && product.uploadedVideo.publicId) {
+                await cloudinary.uploader.destroy(product.uploadedVideo.publicId, { resource_type: 'video' });
+            }
+            product.uploadedVideo = {
+                url: newVideoFile.path,
+                publicId: newVideoFile.filename
+            };
         }
         
         if (name) product.name = name;
@@ -1748,20 +2029,24 @@ app.put('/api/admin/products/:id', protect, authorizeRole('admin'), upload.array
         if (stock) product.stock = stock;
         if (unit) product.unit = unit;
         if (category) product.category = category;
+        if (returnPolicy) product.otherInformation.returnPolicy = returnPolicy;
+        if (serviceDurationMinutes) product.serviceDurationMinutes = parseInt(serviceDurationMinutes);
+        if (typeof isTrending !== 'undefined') product.isTrending = isTrending;
+
         const finalSubcategory = childSubcategory || subcategory;
         if (finalSubcategory) product.subcategory = finalSubcategory;
         if (specifications) product.specifications = JSON.parse(specifications);
-        if (typeof isTrending !== 'undefined') product.isTrending = isTrending;
         
         await product.save();
         res.json(product);
     } catch (err) {
-        console.error('Admin update product error:', err);
+        console.error('Admin update product error:', err.message); 
         res.status(500).json({ message: 'Error updating product', error: err.message });
     }
 });
 
 
+// ... (Admin User/Seller/Order Management) ...
 app.get('/api/admin/users', protect, authorizeRole('admin'), async (req, res) => {
     try {
         const users = await User.find({ role: 'user' }).select('-password');
@@ -1787,7 +2072,6 @@ app.put('/api/admin/users/:id/role', protect, authorizeRole('admin'), async (req
         if (!user) return res.status(404).json({ message: 'User not found' });
         if (role) user.role = role;
         if (typeof approved !== 'undefined') {
-            // Send notification if seller is approved
             if(user.role === 'seller' && approved === true && user.approved === false) {
                 await sendWhatsApp(user.phone, "Congratulations! Your seller account has been approved. You can now log in and start selling.");
             }
@@ -1841,7 +2125,6 @@ app.put('/api/admin/orders/:id/status', protect, authorizeRole('admin', 'seller'
         order.history.push({ status: status });
         await order.save();
         
-        // Send notification to user on status change
         const orderIdShort = order._id.toString().slice(-6);
         const userMessage = `Order Update: Your order #${orderIdShort} has been updated to: ${status}.`;
         await sendWhatsApp(order.user.phone, userMessage);
@@ -1852,10 +2135,9 @@ app.put('/api/admin/orders/:id/status', protect, authorizeRole('admin', 'seller'
     }
 });
 
-// NEW: Endpoint for admins to broadcast messages
 app.post('/api/admin/broadcast', protect, authorizeRole('admin'), async (req, res) => {
     try {
-        const { message, target } = req.body; // target can be 'users', 'sellers', or 'all'
+        const { message, target } = req.body; 
         if (!message || !target) {
             return res.status(400).json({ message: 'Message and target audience are required.' });
         }
@@ -1882,12 +2164,13 @@ app.post('/api/admin/broadcast', protect, authorizeRole('admin'), async (req, re
         res.json({ message: `Broadcast sent successfully to ${successCount} recipients.` });
 
     } catch (err) {
-        console.error('Broadcast error:', err);
+        console.error('Broadcast error:', err.message); 
         res.status(500).json({ message: 'Error sending broadcast message', error: err.message });
     }
 });
 
-// New Banner Routes
+
+// --------- Banner & Splash Routes ----------
 app.post('/api/admin/banners', protect, authorizeRole('admin'), uploadSingleMedia, async (req, res) => {
     try {
         const { title, link, isActive, position, type } = req.body;
@@ -1910,7 +2193,7 @@ app.post('/api/admin/banners', protect, authorizeRole('admin'), uploadSingleMedi
         const newBanner = await Banner.create(bannerData);
         res.status(201).json(newBanner);
     } catch (err) {
-        console.error('Create banner error:', err);
+        console.error('Create banner error:', err.message); 
         res.status(500).json({ message: 'Error creating banner', error: err.message });
     }
 });
@@ -1920,7 +2203,7 @@ app.get('/api/banners/hero', async (req, res) => {
         const banners = await Banner.find({ isActive: true, position: 'top' }).sort({ createdAt: -1 });
         res.json(banners);
     } catch (err) {
-        console.error('Error fetching hero banners:', err);
+        console.error('Error fetching hero banners:', err.message); 
         res.status(500).json({ message: 'Error fetching hero banners' });
     }
 });
@@ -1930,7 +2213,7 @@ app.get('/api/banners/dynamic', async (req, res) => {
         const banners = await Banner.find({ isActive: true, position: { $in: ['middle', 'bottom'] } }).sort({ createdAt: -1 });
         res.json(banners);
     } catch (err) {
-        console.error('Error fetching dynamic banners:', err);
+        console.error('Error fetching dynamic banners:', err.message); 
         res.status(500).json({ message: 'Error fetching dynamic banners' });
     }
 });
@@ -1974,7 +2257,7 @@ app.put('/api/admin/banners/:id', protect, authorizeRole('admin'), uploadSingleM
         await banner.save();
         res.json(banner);
     } catch (err) {
-        console.error('Update banner error:', err);
+        console.error('Update banner error:', err.message); 
         res.status(500).json({ message: 'Error updating banner', error: err.message });
     }
 });
@@ -1988,12 +2271,11 @@ app.delete('/api/admin/banners/:id', protect, authorizeRole('admin'), async (req
         await banner.deleteOne();
         res.json({ message: 'Banner deleted successfully' });
     } catch (err) {
-        console.error('Delete banner error:', err);
+        console.error('Delete banner error:', err.message); 
         res.status(500).json({ message: 'Error deleting banner', error: err.message });
     }
 });
 
-// New Splash Routes
 app.post('/api/admin/splash', protect, authorizeRole('admin'), uploadSingleMedia, async (req, res) => {
     try {
         const { title, link, type, startDate, endDate, isActive } = req.body;
@@ -2010,15 +2292,17 @@ app.post('/api/admin/splash', protect, authorizeRole('admin'), uploadSingleMedia
             type: type || 'default',
             isActive: isActive === 'true',
         };
-        if (splashData.type === 'video') {
+        
+        if (file.mimetype.startsWith('video')) {
             splashData.video = { url: file.path, publicId: file.filename };
         } else {
             splashData.image = { url: file.path, publicId: file.filename };
         }
+
         const newSplash = await Splash.create(splashData);
         res.status(201).json(newSplash);
     } catch (err) {
-        console.error('Create splash error:', err);
+        console.error('Create splash error:', err.message); 
         res.status(500).json({ message: 'Error creating splash screen', error: err.message });
     }
 });
@@ -2070,7 +2354,7 @@ app.put('/api/admin/splash/:id', protect, authorizeRole('admin'), uploadSingleMe
         await splash.save();
         res.json(splash);
     } catch (err) {
-        console.error('Update splash error:', err);
+        console.error('Update splash error:', err.message); 
         res.status(500).json({ message: 'Error updating splash screen', error: err.message });
     }
 });
@@ -2084,7 +2368,7 @@ app.delete('/api/admin/splash/:id', protect, authorizeRole('admin'), async (req,
         await splash.deleteOne();
         res.json({ message: 'Splash screen deleted successfully' });
     } catch (err) {
-        console.error('Delete splash error:', err);
+        console.error('Delete splash error:', err.message); 
         res.status(500).json({ message: 'Error deleting splash screen', error: err.message });
     }
 });
@@ -2096,10 +2380,11 @@ app.get('/api/splash', async (req, res) => {
         const scheduledSplashes = allSplashes.filter(s => s.type === 'scheduled');
         res.json({ defaultSplash, scheduledSplashes });
     } catch (err) {
-        console.error('Error fetching splash screens:', err);
+        console.error('Error fetching splash screens:', err.message); 
         res.status(500).json({ message: 'Error fetching splash screens' });
     }
 });
+
 
 // --------- Reports Routes ----------
 app.get('/api/admin/reports/sales', protect, authorizeRole('admin'), async (req, res) => {
@@ -2131,6 +2416,166 @@ app.get('/api/admin/reports/products', protect, authorizeRole('admin'), async (r
         res.status(500).json({ message: 'Error generating top products report', error: err.message });
     }
 });
+
+app.get('/api/admin/reports/financial-summary', protect, authorizeRole('admin'), async (req, res) => {
+    try {
+        const salesSummary = await Order.aggregate([
+            { $match: { paymentStatus: 'completed', deliveryStatus: { $ne: 'Cancelled' } } },
+            {
+                $group: {
+                    _id: null,
+                    totalSales: { $sum: '$totalAmount' },
+                    totalRefunds: { $sum: '$totalRefunded' },
+                    totalOrders: { $sum: 1 }
+                }
+            }
+        ]);
+
+        const summary = salesSummary.length > 0 ? salesSummary[0] : { totalSales: 0, totalRefunds: 0, totalOrders: 0 };
+        const netIncome = summary.totalSales - summary.totalRefunds;
+
+        res.json({
+            totalSales: summary.totalSales,
+            totalRefunds: summary.totalRefunds,
+            totalOrders: summary.totalOrders,
+            netIncome: netIncome
+        });
+
+    } catch (err) {
+        console.error('Error generating financial summary:', err.message);
+        res.status(500).json({ message: 'Error generating financial summary report', error: err.message });
+    }
+});
+
+// ##################################################################
+// ## NEW: ADMIN DASHBOARD STATISTICS ENDPOINT (Modified)
+// ##################################################################
+app.get('/api/admin/statistics/dashboard', protect, authorizeRole('admin'), async (req, res) => {
+    try {
+        // <<< MODIFIED: Added paymentCounts to the Promise.all
+        const [orderStatusCounts, topSellingProducts, topSellingSellers, topCustomers, financialSummaryData, paymentCounts] = await Promise.all([
+            
+            // 1. Order Status Counts
+            Order.aggregate([
+                { $group: { _id: "$deliveryStatus", count: { $sum: 1 } } }
+            ]),
+            
+            // 2. Top 5 Products
+            Order.aggregate([
+                { $match: { deliveryStatus: 'Delivered' } },
+                { $unwind: "$orderItems" },
+                { $group: { 
+                    _id: "$orderItems.product", 
+                    totalQuantitySold: { $sum: "$orderItems.qty" }
+                }},
+                { $sort: { totalQuantitySold: -1 } },
+                { $limit: 5 },
+                { $lookup: { from: 'products', localField: '_id', foreignField: '_id', as: 'productInfo' } },
+                { $unwind: { path: "$productInfo", preserveNullAndEmptyArrays: true } }, 
+                { $project: { name: { $ifNull: [ "$productInfo.name", "Deleted Product" ] }, totalQuantitySold: 1 } }
+            ]),
+
+            // 3. Top 5 Sellers (by revenue)
+            Order.aggregate([
+                { $match: { deliveryStatus: 'Delivered' } },
+                { $group: {
+                    _id: "$seller",
+                    totalRevenue: { $sum: "$totalAmount" }
+                }},
+                { $sort: { totalRevenue: -1 } },
+                { $limit: 5 },
+                { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'sellerInfo' } },
+                { $unwind: { path: "$sellerInfo", preserveNullAndEmptyArrays: true } }, 
+                { $project: { name: { $ifNull: [ "$sellerInfo.name", "Deleted Seller" ] }, totalRevenue: 1 } }
+            ]),
+
+            // 4. Top 5 Customers (by revenue)
+            Order.aggregate([
+                { $match: { deliveryStatus: 'Delivered' } },
+                { $group: {
+                    _id: "$user",
+                    totalSpent: { $sum: "$totalAmount" }
+                }},
+                { $sort: { totalSpent: -1 } },
+                { $limit: 5 },
+                { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'userInfo' } },
+                { $unwind: { path: "$userInfo", preserveNullAndEmptyArrays: true } }, 
+                { $project: { name: { $ifNull: [ "$userInfo.name", "Deleted User" ] }, totalSpent: 1 } }
+            ]),
+            
+            // 5. Financial Summary
+            Order.aggregate([
+                { $match: { paymentStatus: 'completed', deliveryStatus: { $ne: 'Cancelled' } } },
+                { $group: {
+                    _id: null,
+                    totalSales: { $sum: '$totalAmount' },
+                    totalRefunds: { $sum: '$totalRefunded' }
+                }}
+            ]),
+
+            // 6. ### NEW: Payment Method Counts ###
+            Order.aggregate([
+                { $match: { paymentStatus: 'completed' } }, // Only count completed payments
+                { $group: { _id: "$paymentMethod", count: { $sum: 1 } } }
+            ])
+        ]);
+
+        // Format order stats
+        const orderStatsFormatted = {};
+        orderStatusCounts.forEach(stat => {
+            orderStatsFormatted[stat._id] = stat.count;
+        });
+
+        // ### NEW: Format payment stats ###
+        const paymentStatsFormatted = {};
+        paymentCounts.forEach(stat => {
+            paymentStatsFormatted[stat._id] = stat.count;
+        });
+        
+        const financials = financialSummaryData[0] || { totalSales: 0, totalRefunds: 0 };
+
+        // Send the complete dashboard data object
+        res.json({
+            orderStats: orderStatsFormatted,
+            paymentMethodStats: paymentStatsFormatted, // <<< NEWLY ADDED
+            topProducts: topSellingProducts,
+            topSellers: topSellingSellers,
+            topCustomers: topCustomers,
+            financials: {
+               totalSales: financials.totalSales,
+               totalRefunds: financials.totalRefunds,
+               netIncome: financials.totalSales - financials.totalRefunds
+            }
+        });
+
+    } catch (err) {
+        console.error('Error generating dashboard statistics:', err.message);
+        res.status(500).json({ message: 'Error fetching dashboard statistics', error: err.message });
+    }
+});
+
+
+// ##################################################################
+// ## GLOBAL ERROR HANDLER
+// ##################################################################
+app.use((err, req, res, next) => {
+    console.error('🆘 UNHANDLED ERROR 🆘:', err.message);
+    console.error(err.stack); 
+
+    if (err instanceof multer.MulterError) {
+        return res.status(400).json({ message: 'File upload error', error: err.message });
+    }
+
+    if (err.http_code) {
+        return res.status(err.http_code).json({ message: 'Cloud storage error', error: err.message });
+    }
+
+    res.status(5.00).json({
+        message: 'An unexpected server error occurred',
+        error: err.message || 'Unknown error'
+    });
+});
+
 
 // --------- Other Routes ----------
 app.get('/', (req, res) => {
