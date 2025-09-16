@@ -1,8 +1,6 @@
-// server.js - Full E-Commerce Backend (Patched with Time Slot Availability)
-// ... (previous features)
-// 9. ### NEW: Added comprehensive Admin Dashboard Statistics endpoint.
-// 10. ### NEW: Added Payment Method statistics (COD vs Online) to the dashboard API.
+// server.js - Full E-Commerce Backend (Patched with Village/Landmark Address Fields)
 
+// Load environment variables from .env file
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
@@ -18,6 +16,10 @@ const fs = require('fs').promises;
 const cloudinary = require('cloudinary').v2;
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const { log } = require('console');
+
+// --- NEW LIBRARIES FOR PDF LABELS ---
+const PDFDocument = require('pdfkit');
+const bwipjs = require('bwip-js');
 
 // Initialize Express app
 const app = express();
@@ -41,46 +43,16 @@ mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopol
         console.log('✅ MongoDB connected');
 
         try {
-            const categoryCount = await Category.countDocuments();
-            if (categoryCount === 0) {
-                console.log('No categories found. Creating default categories...');
-                const defaultCategories = [
-                    { name: 'Fruits', slug: 'fruits', type: 'product' },
-                    { name: 'Vegetables', slug: 'vegetables', type: 'product' },
-                    { name: 'Clothing', slug: 'clothing', type: 'product' },
-                    { name: 'Home Services', slug: 'home-services', type: 'service' },
-                    { name: 'Transport', slug: 'transport', type: 'service' },
-                ];
-                const createdCategories = await Category.insertMany(defaultCategories);
-                console.log('Default categories created:', createdCategories.map(c => c.name));
+            // --- NEW: Seed App Settings (Commission) ---
+            // We need to define AppSettings *before* this, so we'll do it after the model definitions.
+            // This is just a placeholder for the logic.
+            await seedDatabaseData();
 
-                const fruitsId = createdCategories.find(c => c.name === 'Fruits')._id;
-                const vegetablesId = createdCategories.find(c => c.name === 'Vegetables')._id;
-
-                const defaultSubcategories = [
-                    { name: 'Mango', category: fruitsId, isTopLevel: true },
-                    { name: 'Apple', category: fruitsId, isTopLevel: true },
-                    { name: 'Onion', category: vegetablesId, isTopLevel: true },
-                    { name: 'Potato', category: vegetablesId, isTopLevel: true },
-                ];
-                const createdSubcategories = await Subcategory.insertMany(defaultSubcategories);
-                console.log('Default subcategories created.');
-
-                const mangoId = createdSubcategories.find(s => s.name === 'Mango')._id;
-                const neelamMango = {
-                    name: 'Neelam Mango',
-                    category: fruitsId,
-                    parent: mangoId,
-                    isTopLevel: false
-                };
-                await Subcategory.create(neelamMango);
-                console.log('3-level subcategory created for Neelam Mango.');
-            }
         } catch (err) {
-            console.error('Error creating default categories:', err.message); 
+            console.error('Error during database seeding:', err.message);
         }
     })
-    .catch(err => console.error('❌ MongoDB connection error:', err.message)); 
+    .catch(err => console.error('❌ MongoDB connection error:', err.message));
 
 // --------- Multer with Cloudinary Storage ----------
 const storage = new CloudinaryStorage({
@@ -106,7 +78,7 @@ const uploadSingleMedia = upload.single('media');
 
 const productUpload = upload.fields([
     { name: 'images', maxCount: 10 },
-    { name: 'video', maxCount: 1 } 
+    { name: 'video', maxCount: 1 }
 ]);
 
 // --------- Notifications ----------
@@ -134,57 +106,80 @@ async function notifyAdmin(message) {
     else console.log('Admin WhatsApp not configured. Message:', message);
 }
 
-
-// #############################################
-// ## NEW HELPER FUNCTION ADDED HERE
-// #############################################
 /**
- * NEW HELPER FUNCTION
+ * HELPER FUNCTION
  * Generates a unique SKU based on category, product name, and random characters.
  */
 function generateUniqueSku(categoryId, productName) {
     const catPart = categoryId.toString().slice(-4).toUpperCase(); // Use last 4 chars of Category ID
     let prodPart = productName.substring(0, 3).toUpperCase();
     prodPart = prodPart.replace(/[^A-Z0-9]/g, 'X'); // Clean any special characters
-    
+
     // Use the crypto module (already imported) to add 6 random hex characters
-    const randomPart = crypto.randomBytes(3).toString('hex').toUpperCase(); 
-    
+    const randomPart = crypto.randomBytes(3).toString('hex').toUpperCase();
+
     return `${catPart}-${prodPart}-${randomPart}`;
 }
 
 
 // --------- Models ----------
+
+// ### MODIFIED USER SCHEMA (Pickup Address Added with Village/Landmark) ###
 const userSchema = new mongoose.Schema({
     name: String,
-    email: { type: String, unique: true, required: true },
+    email: { type: String, unique: true, required: true, index: true },
     password: { type: String, required: true },
-    phone: { type: String, unique: true, sparse: true },
-    role: { type: String, enum: ['user', 'seller', 'admin'], default: 'user' },
-    pincodes: { type: [String], default: [] },
-    approved: { type: Boolean, default: true },
+    phone: { type: String, unique: true, sparse: true, index: true },
+    role: { type: String, enum: ['user', 'seller', 'admin'], default: 'user', index: true },
+    pincodes: { type: [String], default: [] }, // This is for seller's serviceable pincodes
+    approved: { type: Boolean, default: true, index: true },
     passwordResetOTP: String,
     passwordResetOTPExpire: Date,
+
+    // --- MODIFIED FIELD FOR SELLER PICKUP ADDRESS ---
+    pickupAddress: {
+        street: String,
+        village: String, // --- NEW ---
+        landmark: String, // --- NEW ---
+        city: String,
+        state: String,
+        pincode: String,
+        isSet: { type: Boolean, default: false }
+    }
+
 }, { timestamps: true });
 const User = mongoose.model('User', userSchema);
 
+// --- NEW MODEL: AppSettings (for Commission Rate) ---
+const appSettingsSchema = new mongoose.Schema({
+    // Use a singleton pattern to ensure only one settings document exists
+    singleton: { type: Boolean, default: true, unique: true, index: true },
+    platformCommissionRate: { type: Number, default: 0.05, min: 0, max: 1 }, // Stored as 0.05 for 5%
+    // You can add more global settings here later
+});
+const AppSettings = mongoose.model('AppSettings', appSettingsSchema);
+
+
+// --- MODIFIED: Category Schema (Added sortOrder) ---
 const categorySchema = new mongoose.Schema({
-    name: { type: String, required: true, unique: true },
-    slug: { type: String, required: true, unique: true },
-    type: { type: String, enum: ['product', 'service'], default: 'product' }, 
-    isActive: { type: Boolean, default: true },
+    name: { type: String, required: true, unique: true, index: true },
+    slug: { type: String, required: true, unique: true, index: true },
+    type: { type: String, enum: ['product', 'service'], default: 'product', index: true },
+    isActive: { type: Boolean, default: true, index: true },
     image: {
         url: String,
         publicId: String
-    }
+    },
+    // --- NEW FIELD for admin-controlled sorting ---
+    sortOrder: { type: Number, default: 0, index: true }
 }, { timestamps: true });
 const Category = mongoose.model('Category', categorySchema);
 
 const subcategorySchema = new mongoose.Schema({
     name: { type: String, required: true },
-    category: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', required: true },
-    parent: { type: mongoose.Schema.Types.ObjectId, ref: 'Subcategory', default: null },
-    isTopLevel: { type: Boolean, default: false },
+    category: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', required: true, index: true },
+    parent: { type: mongoose.Schema.Types.ObjectId, ref: 'Subcategory', default: null, index: true },
+    isTopLevel: { type: Boolean, default: false, index: true },
     isActive: { type: Boolean, default: true },
     image: {
         url: String,
@@ -196,33 +191,34 @@ const Subcategory = mongoose.model('Subcategory', subcategorySchema);
 const productSchema = new mongoose.Schema({
     name: String,
     brand: { type: String, default: 'Unbranded' },
-    sku: String, 
-    category: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', required: true },
-    subcategory: { type: mongoose.Schema.Types.ObjectId, ref: 'Subcategory', default: null },
-    childCategory: { type: mongoose.Schema.Types.ObjectId, ref: 'Subcategory', default: null }, 
-    originalPrice: Number, 
-    price: Number, 
+    sku: String,
+    category: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', required: true, index: true },
+    subcategory: { type: mongoose.Schema.Types.ObjectId, ref: 'Subcategory', default: null, index: true },
+    childCategory: { type: mongoose.Schema.Types.ObjectId, ref: 'Subcategory', default: null },
+    originalPrice: Number,
+    price: Number,
+    costPrice: { type: Number, required: false }, // New field for profit calculation
     stock: { type: Number, default: 10 },
     unit: {
         type: String,
         enum: ['kg', '100g', '250g', '500g', 'L', 'ml', 'pcs', 'pack', 'piece', 'bunch', 'packet', 'dozen', 'bag', '50g'],
         required: false, // No longer required globally since services don't have it
     },
-    minOrderQty: { type: Number, default: 1 }, 
-    shortDescription: String, 
-    fullDescription: String, 
+    minOrderQty: { type: Number, default: 1 },
+    shortDescription: String,
+    fullDescription: String,
     images: [{
         url: String,
         publicId: String
     }],
-    videoLink: String, 
+    videoLink: String,
     uploadedVideo: {
         url: String,
         publicId: String
     },
     specifications: { type: Map, of: String, default: {} },
     variants: { type: Map, of: [String], default: {} },
-    shippingDetails: { 
+    shippingDetails: {
         weight: Number,
         dimensions: {
             length: Number,
@@ -231,7 +227,7 @@ const productSchema = new mongoose.Schema({
         },
         shippingType: { type: String, enum: ['Free', 'Paid', 'COD Available'], default: 'Free' },
     },
-    otherInformation: { 
+    otherInformation: {
         warranty: String,
         returnPolicy: {
             type: String,
@@ -241,8 +237,8 @@ const productSchema = new mongoose.Schema({
         tags: [String],
     },
     serviceDurationMinutes: { type: Number },
-    seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-    isTrending: { type: Boolean, default: false }
+    seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
+    isTrending: { type: Boolean, default: false, index: true }
 }, { timestamps: true });
 
 const Product = mongoose.model('Product', productSchema);
@@ -294,8 +290,8 @@ const splashSchema = new mongoose.Schema({
 const Splash = mongoose.model('Splash', splashSchema);
 
 const orderSchema = new mongoose.Schema({
-    user: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-    seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
+    seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
     orderItems: [{
         product: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' },
         name: String,
@@ -305,10 +301,10 @@ const orderSchema = new mongoose.Schema({
         category: String
     }],
     shippingAddress: { type: String, required: true },
-    deliveryStatus: { type: String, enum: ['Pending', 'Processing', 'Shipped', 'Delivered', 'Cancelled'], default: 'Pending' },
-    paymentMethod: { type: String, enum: ['cod', 'razorpay'], required: true },
+    deliveryStatus: { type: String, enum: ['Pending', 'Processing', 'Shipped', 'Delivered', 'Cancelled'], default: 'Pending', index: true },
+    paymentMethod: { type: String, enum: ['cod', 'razorpay'], required: true, index: true },
     paymentId: String,
-    paymentStatus: { type: String, enum: ['pending', 'completed', 'failed', 'refunded'], default: 'pending' },
+    paymentStatus: { type: String, enum: ['pending', 'completed', 'failed', 'refunded'], default: 'pending', index: true },
     pincode: String,
     totalAmount: Number,
     couponApplied: String,
@@ -342,10 +338,13 @@ const wishlistSchema = new mongoose.Schema({
 }, { timestamps: true });
 const Wishlist = mongoose.model('Wishlist', wishlistSchema);
 
+// --- MODIFIED: Customer Address Schema (Added Village/Landmark) ---
 const addressSchema = new mongoose.Schema({
     user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     name: { type: String, required: true },
     street: { type: String, required: true },
+    village: { type: String }, // --- NEW ---
+    landmark: { type: String }, // --- NEW ---
     city: { type: String, required: true },
     state: { type: String, required: true },
     pincode: { type: String, required: true },
@@ -385,8 +384,8 @@ const bookingSchema = new mongoose.Schema({
     user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     provider: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     service: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
-    bookingStart: { type: Date, required: true }, 
-    bookingEnd: { type: Date, required: true },  
+    bookingStart: { type: Date, required: true },
+    bookingEnd: { type: Date, required: true },
     address: { type: String, required: true },
     status: {
         type: String,
@@ -406,62 +405,148 @@ const timeSlotSchema = new mongoose.Schema({
 
 const dailyAvailabilitySchema = new mongoose.Schema({
     isActive: { type: Boolean, default: false },
-    slots: [timeSlotSchema] 
+    slots: [timeSlotSchema]
 }, { _id: false });
 
 const customDateAvailabilitySchema = new mongoose.Schema({
-    date: { type: Date, required: true }, 
-    isActive: { type: Boolean, default: false }, 
+    date: { type: Date, required: true },
+    isActive: { type: Boolean, default: false },
     slots: [timeSlotSchema]
 }, { _id: false });
 
 const availabilitySchema = new mongoose.Schema({
     provider: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
     days: {
-        monday:    dailyAvailabilitySchema,
-        tuesday:   dailyAvailabilitySchema,
+        monday:     dailyAvailabilitySchema,
+        tuesday:    dailyAvailabilitySchema,
         wednesday: dailyAvailabilitySchema,
-        thursday:  dailyAvailabilitySchema,
-        friday:    dailyAvailabilitySchema,
-        saturday:  dailyAvailabilitySchema,
-        sunday:    dailyAvailabilitySchema,
+        thursday:   dailyAvailabilitySchema,
+        friday:     dailyAvailabilitySchema,
+        saturday:   dailyAvailabilitySchema,
     },
     customDates: [customDateAvailabilitySchema]
 }, { timestamps: true });
 const Availability = mongoose.model('Availability', availabilitySchema);
 
+// ### NEW: PAYOUT SCHEMA ###
+const payoutSchema = new mongoose.Schema({
+    seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    amount: { type: Number, required: true },
+    status: { type: String, enum: ['pending', 'processed', 'failed'], default: 'pending' },
+    transactionId: String, // e.g., a Razorpay Payout ID
+    processedAt: Date,
+    notes: String
+}, { timestamps: true });
+const Payout = mongoose.model('Payout', payoutSchema);
+
+
+// --- NEW: Database Seeding Function (called after models are defined) ---
+async function seedDatabaseData() {
+    try {
+        // Seed AppSettings (Commission)
+        const settingsCount = await AppSettings.countDocuments();
+        if (settingsCount === 0) {
+            console.log('Creating default app settings...');
+            await AppSettings.create({ singleton: true, platformCommissionRate: 0.05 });
+            console.log('Default app settings created (5% commission).');
+        }
+
+        // Seed Categories
+        const categoryCount = await Category.countDocuments();
+        if (categoryCount === 0) {
+            console.log('No categories found. Creating default categories...');
+            const defaultCategories = [
+                { name: 'Fruits', slug: 'fruits', type: 'product', sortOrder: 1 },
+                { name: 'Vegetables', slug: 'vegetables', type: 'product', sortOrder: 2 },
+                { name: 'Clothing', slug: 'clothing', type: 'product', sortOrder: 3 },
+                { name: 'Home Services', slug: 'home-services', type: 'service', sortOrder: 10 },
+                { name: 'Transport', slug: 'transport', type: 'service', sortOrder: 11 },
+            ];
+            const createdCategories = await Category.insertMany(defaultCategories);
+            console.log('Default categories created:', createdCategories.map(c => c.name));
+
+            const fruitsId = createdCategories.find(c => c.name === 'Fruits')._id;
+            const vegetablesId = createdCategories.find(c => c.name === 'Vegetables')._id;
+
+            const defaultSubcategories = [
+                { name: 'Mango', category: fruitsId, isTopLevel: true },
+                { name: 'Apple', category: fruitsId, isTopLevel: true },
+                { name: 'Onion', category: vegetablesId, isTopLevel: true },
+                { name: 'Potato', category: vegetablesId, isTopLevel: true },
+            ];
+            const createdSubcategories = await Subcategory.insertMany(defaultSubcategories);
+            console.log('Default subcategories created.');
+
+            const mangoId = createdSubcategories.find(s => s.name === 'Mango')._id;
+            const neelamMango = {
+                name: 'Neelam Mango',
+                category: fruitsId,
+                parent: mangoId,
+                isTopLevel: false
+            };
+            await Subcategory.create(neelamMango);
+            console.log('3-level subcategory created for Neelam Mango.');
+        }
+    } catch (err) {
+        console.error('Error creating default data:', err.message);
+    }
+}
+
 
 // --------- Middleware ----------
+/**
+ * @description Middleware to protect routes by verifying a JWT.
+ * It checks the 'Authorization' header for a token, verifies it, and attaches the user object to the request.
+ * This is the middleware that returns "No token" if the header is missing.
+ */
 const protect = async (req, res, next) => {
     try {
         const token = req.headers.authorization?.split(' ')[1];
-        if (!token) return res.status(401).json({ message: 'No token' });
+        if (!token) {
+            console.error('❌ Authentication Failed: No token provided.');
+            return res.status(401).json({ message: 'No token' });
+        }
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
         req.user = await User.findById(decoded.id).select('-password');
-        if (!req.user) return res.status(401).json({ message: 'Invalid token' });
+        if (!req.user) {
+            console.error('❌ Authentication Failed: User not found with token.');
+            return res.status(401).json({ message: 'Invalid token' });
+        }
         next();
     } catch (err) {
+        console.error('❌ Authentication Failed: JWT verification error.', err.message);
         res.status(401).json({ message: 'Token error' });
     }
 };
 
+/**
+ * @description Middleware to authorize users based on their role.
+ * Only allows users with a role listed in the `roles` array to proceed.
+ */
 const authorizeRole = (...roles) => (req, res, next) => {
     if (!roles.includes(req.user.role)) return res.status(403).json({ message: 'Access denied' });
     next();
 };
 
+/**
+ * @description Middleware to check if a seller account is approved.
+ * Only allows approved sellers to access certain routes.
+ */
 function checkSellerApproved(req, res, next) {
     if (req.user.role === 'seller' && !req.user.approved) return res.status(403).json({ message: 'Seller account not approved yet' });
     next();
 }
 
 // --------- Category Routes ----------
+// --- MODIFIED: Added sorting by sortOrder ---
 app.get('/api/categories', async (req, res) => {
     try {
         const { active } = req.query;
         const filter = {};
         if (typeof active !== 'undefined') filter.isActive = active === 'true';
-        const categories = await Category.find(filter).sort({ name: 1 }).select('name slug isActive image type');
+        const categories = await Category.find(filter)
+            .sort({ sortOrder: 1, name: 1 }) // <-- MODIFIED SORT
+            .select('name slug isActive image type sortOrder');
         res.json(categories);
     } catch (err) {
         res.status(500).json({ message: 'Error fetching categories', error: err.message });
@@ -478,27 +563,32 @@ app.get('/api/categories/:id', async (req, res) => {
     }
 });
 
+// --- MODIFIED: Added sorting by sortOrder ---
 app.get('/api/admin/categories', protect, authorizeRole('admin'), async (req, res) => {
     try {
         const { active } = req.query;
         const filter = {};
         if (typeof active !== 'undefined') filter.isActive = active === 'true';
-        const categories = await Category.find(filter).sort({ name: 1 }).select('name slug isActive image type');
+        const categories = await Category.find(filter)
+            .sort({ sortOrder: 1, name: 1 }) // <-- MODIFIED SORT
+            .select('name slug isActive image type sortOrder');
         res.json(categories);
     } catch (err) {
         res.status(500).json({ message: 'Error fetching categories', error: err.message });
     }
 });
 
+// --- MODIFIED: Added sortOrder on creation ---
 app.post('/api/admin/categories', protect, authorizeRole('admin'), upload.single('image'), async (req, res) => {
     try {
-        const { name, type } = req.body; 
+        const { name, type, sortOrder } = req.body; // <-- MODIFIED
         if (!name) return res.status(400).json({ message: 'Category name is required' });
         const slug = name.toLowerCase().replace(/[^a-z09]+/g, '-').replace(/^-+|-+$/g, '');
         const category = await Category.create({
-            name, 
+            name,
             slug,
-            type: type || 'product', 
+            type: type || 'product',
+            sortOrder: sortOrder || 0, // <-- MODIFIED
             image: {
                 url: req.file ? req.file.path : undefined,
                 publicId: req.file ? req.file.filename : undefined,
@@ -511,9 +601,10 @@ app.post('/api/admin/categories', protect, authorizeRole('admin'), upload.single
     }
 });
 
+// --- MODIFIED: Added sortOrder on update ---
 app.put('/api/admin/categories/:id', protect, authorizeRole('admin'), upload.single('image'), async (req, res) => {
     try {
-        const { name, isActive, type } = req.body; 
+        const { name, isActive, type, sortOrder } = req.body; // <-- MODIFIED
         const category = await Category.findById(req.params.id);
         if (!category) return res.status(404).json({ message: 'Category not found' });
         if (req.file) {
@@ -525,15 +616,42 @@ app.put('/api/admin/categories/:id', protect, authorizeRole('admin'), upload.sin
             category.slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
         }
         if (typeof isActive !== 'undefined') category.isActive = isActive;
-        if (type) category.type = type; 
-        
+        if (type) category.type = type;
+        if (typeof sortOrder !== 'undefined') category.sortOrder = sortOrder; // <-- MODIFIED
+
         await category.save();
         res.json(category);
-    } catch (err) {
+    } catch (err)
+    {
         if (err.code === 11000) return res.status(409).json({ message: 'Category with this name already exists' });
         res.status(500).json({ message: 'Error updating category', error: err.message });
     }
 });
+
+// --- NEW: Route to bulk re-order categories ---
+app.put('/api/admin/categories/reorder', protect, authorizeRole('admin'), async (req, res) => {
+    try {
+        const { order } = req.body; // Expects an array like [{ id: "...", order: 0 }, { id: "...", order: 1 }]
+        if (!Array.isArray(order)) {
+            return res.status(400).json({ message: 'Invalid data. "order" must be an array.' });
+        }
+
+        const bulkOps = order.map(item => ({
+            updateOne: {
+                filter: { _id: item.id },
+                update: { $set: { sortOrder: item.order } }
+            }
+        }));
+
+        await Category.bulkWrite(bulkOps);
+
+        res.json({ message: 'Categories reordered successfully.' });
+    } catch (err) {
+        console.error("Category reorder error:", err.message);
+        res.status(500).json({ message: 'Error reordering categories', error: err.message });
+    }
+});
+
 
 app.delete('/api/admin/categories/:id', protect, authorizeRole('admin'), async (req, res) => {
     try {
@@ -690,7 +808,7 @@ app.post('/api/auth/register', async (req, res) => {
         const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
         res.status(201).json({ token, user: { id: user._id, name: user.name, email: user.email, phone: user.phone, role: user.role, pincodes: user.pincodes, approved: user.approved } });
     } catch (err) {
-        console.error('Register error:', err.message); 
+        console.error('Register error:', err.message);
         res.status(500).json({ message: 'Server error' });
     }
 });
@@ -705,11 +823,13 @@ app.post('/api/auth/login', async (req, res) => {
         let user;
         if (email) {
             user = await User.findOne({ email });
+            // Logic to enforce role-based login
             if (user && user.role === 'user') {
                 return res.status(403).json({ message: 'User role cannot log in with email. Please use phone number.' });
             }
         } else if (phone) {
             user = await User.findOne({ phone });
+            // Logic to enforce role-based login
             if (user && (user.role === 'seller' || user.role === 'admin')) {
                 return res.status(403).json({ message: 'Seller/Admin roles must log in with email.' });
             }
@@ -724,7 +844,7 @@ app.post('/api/auth/login', async (req, res) => {
         const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
         res.json({ token, user: { id: user._id, name: user.name, email: user.email, phone: user.phone, role: user.role, pincodes: user.pincodes, approved: user.approved } });
     } catch (err) {
-        console.error('Login error:', err.message); 
+        console.error('Login error:', err.message);
         res.status(500).json({ message: 'Login error' });
     }
 });
@@ -738,18 +858,18 @@ app.post('/api/auth/forgot-password', async (req, res) => {
         if (!user) {
             return res.status(404).json({ message: 'User not found with this phone number' });
         }
-        
+
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
         user.passwordResetOTP = await bcrypt.hash(otp, 10);
         user.passwordResetOTPExpire = Date.now() + 10 * 60 * 1000;
         await user.save();
-        
+
         const message = `Namaste! Your OTP for password reset is ${otp}. This OTP is valid for 10 minutes.`;
         await sendWhatsApp(user.phone, message);
 
         res.status(200).json({ message: 'OTP sent to your WhatsApp number' });
     } catch (err) {
-        console.error('Forgot password error:', err.message); 
+        console.error('Forgot password error:', err.message);
         res.status(500).json({ message: 'Error processing forgot password request' });
     }
 });
@@ -769,7 +889,7 @@ app.post('/api/auth/reset-password-with-otp', async (req, res) => {
         if (!user) {
             return res.status(400).json({ message: 'User not found or OTP has expired' });
         }
-        
+
         const isMatch = await bcrypt.compare(otp, user.passwordResetOTP);
 
         if (!isMatch) {
@@ -796,13 +916,28 @@ app.get('/api/auth/profile', protect, async (req, res) => {
     }
 });
 
+// --- MODIFIED: Profile Update Route (for new address fields) ---
 app.put('/api/auth/profile', protect, async (req, res) => {
     try {
-        const { name, phone, pincodes } = req.body;
+        const { name, phone, pincodes, pickupAddress } = req.body;
         const user = await User.findById(req.user._id);
         if (name) user.name = name;
         if (phone) user.phone = phone;
         if (pincodes && pincodes.length) user.pincodes = pincodes;
+
+        // Update pickupAddress if provided (for sellers)
+        if (user.role === 'seller' && pickupAddress) {
+            user.pickupAddress = {
+                street: pickupAddress.street,
+                village: pickupAddress.village, // --- NEW ---
+                landmark: pickupAddress.landmark, // --- NEW ---
+                city: pickupAddress.city,
+                state: pickupAddress.state,
+                pincode: pickupAddress.pincode,
+                isSet: !!(pickupAddress.street && pickupAddress.city && pickupAddress.pincode)
+            };
+        }
+
         await user.save();
         res.json(user);
     } catch (err) {
@@ -836,7 +971,7 @@ app.get('/api/products', async (req, res) => {
         const products = await Product.find(filter).populate('seller', 'name email phone pincodes').populate('subcategory', 'name image').populate('category', 'name image');
         res.json(products);
     } catch (err) {
-        console.error("Get Products Error:", err.message); 
+        console.error("Get Products Error:", err.message);
         res.status(500).json({ message: 'Error fetching products' });
     }
 });
@@ -846,7 +981,7 @@ app.get('/api/products/trending', async (req, res) => {
         const trendingProducts = await Product.find({ isTrending: true }).limit(10).populate('seller', 'name email').populate('category', 'name').populate('subcategory', 'name');
         res.json(trendingProducts);
     } catch (err) {
-        console.error("Get Trending Products Error:", err.message); 
+        console.error("Get Trending Products Error:", err.message);
         res.status(500).json({ message: 'Error fetching trending products' });
     }
 });
@@ -911,7 +1046,7 @@ app.put('/api/cart/:itemId', protect, async (req, res) => {
     try {
         const { qty } = req.body;
         const cart = await Cart.findOne({ user: req.user._id });
-        if (!cart) return res.status(404).json({ message: 'Cart not found' });
+        if (!cart) return res.status(44).json({ message: 'Cart not found' });
 
         const item = cart.items.find(item => item._id.toString() === req.params.itemId);
         if (!item) return res.status(404).json({ message: 'Item not found in cart' });
@@ -952,37 +1087,6 @@ app.get('/api/wishlist', protect, async (req, res) => {
     }
 });
 
-app.post('/api/wishlist', protect, async (req, res) => {
-    try {
-        const { productId } = req.body;
-        let wishlist = await Wishlist.findOne({ user: req.user._id });
-        if (!wishlist) {
-            wishlist = await Wishlist.create({ user: req.user._id, products: [] });
-        }
-        if (!wishlist.products.includes(productId)) {
-            wishlist.products.push(productId);
-            await wishlist.save();
-        }
-        res.status(200).json(wishlist);
-    } catch (err) {
-        res.status(500).json({ message: 'Error adding product to wishlist' });
-    }
-});
-
-app.delete('/api/wishlist/:id', protect, async (req, res) => {
-    try {
-        const wishlist = await Wishlist.findOneAndUpdate(
-            { user: req.user._id },
-            { $pull: { products: req.params.id } },
-            { new: true }
-        );
-        if (!wishlist) return res.status(404).json({ message: 'Wishlist not found' });
-        res.json(wishlist);
-    } catch (err) {
-        res.status(500).json({ message: 'Error removing product from wishlist' });
-    }
-});
-
 app.post('/api/products/:id/like', protect, async (req, res) => {
     try {
         const productId = req.params.id;
@@ -1003,7 +1107,7 @@ app.post('/api/products/:id/like', protect, async (req, res) => {
 
         res.status(201).json({ message: 'Product liked successfully' });
     } catch (err) {
-        console.error('Like product error:', err.message); 
+        console.error('Like product error:', err.message);
         res.status(500).json({ message: 'Error liking product' });
     }
 });
@@ -1020,15 +1124,16 @@ app.delete('/api/products/:id/like', protect, async (req, res) => {
 
         res.json({ message: 'Product unliked successfully' });
     } catch (err) {
-        console.error('Unlike product error:', err.message); 
+        console.error('Unlike product error:', err.message);
         res.status(500).json({ message: 'Error unliking product' });
     }
 });
 
+// --- MODIFIED: Create Order Route (for new address string format) ---
 app.post('/api/orders', protect, async (req, res) => {
     try {
         const { shippingAddressId, paymentMethod, couponCode } = req.body;
-        
+
         const cart = await Cart.findOne({ user: req.user._id }).populate({
             path: 'items.product',
             populate: {
@@ -1069,7 +1174,7 @@ app.post('/api/orders', protect, async (req, res) => {
                 ordersBySeller.set(sellerId, {
                     seller: product.seller,
                     orderItems: [],
-                    totalAmount: 0,
+                    totalAmount: 0 // Initialize totalAmount
                 });
             }
 
@@ -1089,8 +1194,9 @@ app.post('/api/orders', protect, async (req, res) => {
         let finalAmountForPayment = 0;
         let couponDetails = null;
 
+        const totalCartAmount = Array.from(ordersBySeller.values()).reduce((sum, order) => sum + order.totalAmount, 0);
+
         if (couponCode) {
-            const totalCartAmount = Array.from(ordersBySeller.values()).reduce((sum, order) => sum + order.totalAmount, 0);
             const coupon = await Coupon.findOne({
                 code: couponCode,
                 isActive: true,
@@ -1108,14 +1214,15 @@ app.post('/api/orders', protect, async (req, res) => {
                     discountAmount = coupon.discountValue;
                 }
                 couponDetails = coupon;
-                finalAmountForPayment = Math.max(0, totalCartAmount - discountAmount);
             }
-        } else {
-            finalAmountForPayment = Array.from(ordersBySeller.values()).reduce((sum, order) => sum + order.totalAmount, 0);
-        }
+        } 
+        
+        finalAmountForPayment = Math.max(0, totalCartAmount - discountAmount);
+
 
         if (paymentMethod === 'razorpay' && finalAmountForPayment <= 0) {
-            return res.status(400).json({ message: 'Payment amount must be greater than zero for Razorpay' });
+            // If total is 0 after discount, treat it like COD (free order)
+            paymentMethod = 'cod';
         }
 
         let razorpayOrder = null;
@@ -1127,28 +1234,39 @@ app.post('/api/orders', protect, async (req, res) => {
             });
         }
 
+        // --- NEW: Build the full address string with optional fields ---
+        let fullAddress = `${shippingAddress.street}`;
+        if (shippingAddress.landmark) fullAddress += `, ${shippingAddress.landmark}`;
+        if (shippingAddress.village) fullAddress += `, ${shippingAddress.village}`;
+        fullAddress += `, ${shippingAddress.city}, ${shippingAddress.state} - ${shippingAddress.pincode}`;
+        // --- END NEW ---
+
         const createdOrders = [];
         for (const [sellerId, sellerData] of ordersBySeller.entries()) {
+            // Distribute discount proportionally
+            const sellerDiscount = (discountAmount * sellerData.totalAmount) / totalCartAmount || 0;
+
             const order = new Order({
                 user: req.user._id,
                 seller: sellerData.seller,
                 orderItems: sellerData.orderItems,
-                shippingAddress: `${shippingAddress.street}, ${shippingAddress.city}, ${shippingAddress.state} - ${shippingAddress.pincode}`,
+                shippingAddress: fullAddress, // --- MODIFIED: Use the new full address string ---
                 pincode: shippingAddress.pincode,
                 paymentMethod,
                 totalAmount: sellerData.totalAmount,
                 couponApplied: couponCode,
-                discountAmount: (discountAmount * sellerData.totalAmount) / finalAmountForPayment || 0,
-                paymentId: razorpayOrder ? razorpayOrder.id : undefined,
+                discountAmount: sellerDiscount,
+                paymentId: razorpayOrder ? razorpayOrder.id : (paymentMethod === 'cod' ? `cod_${crypto.randomBytes(8).toString('hex')}` : undefined),
+                paymentStatus: paymentMethod === 'cod' ? 'completed' : 'pending',
                 history: [{ status: 'Pending' }]
             });
             await order.save();
             createdOrders.push(order);
-            
+
             const orderIdShort = order._id.toString().slice(-6);
             const userMessage = `✅ Your order #${orderIdShort} has been successfully placed! You will be notified once it's shipped.`;
             const sellerMessage = `🎉 New Order!\nYou've received a new order #${orderIdShort} from ${req.user.name}. Please process it soon.`;
-            
+
             await sendWhatsApp(req.user.phone, userMessage);
             await sendWhatsApp(sellerData.seller.phone, sellerMessage);
             await notifyAdmin(`Admin Alert: New order #${orderIdShort} placed.`);
@@ -1165,11 +1283,12 @@ app.post('/api/orders', protect, async (req, res) => {
             orders: createdOrders.map(o => o._id),
             razorpayOrder: razorpayOrder ? { id: razorpayOrder.id, amount: razorpayOrder.amount } : undefined,
             key_id: process.env.RAZORPAY_KEY_ID,
-            user: { name: req.user.name, email: req.user.email, phone: req.user.phone }
+            user: { name: req.user.name, email: req.user.email, phone: req.user.phone },
+            paymentMethod: paymentMethod
         });
 
     } catch (err) {
-        console.error('Create order error:', err.message); 
+        console.error('Create order error:', err.message);
         if (err.name === 'ValidationError') {
             return res.status(400).json({ message: err.message });
         }
@@ -1231,18 +1350,51 @@ app.put('/api/orders/:id/cancel', protect, async (req, res) => {
 
         order.deliveryStatus = 'Cancelled';
         order.history.push({ status: 'Cancelled' });
+        
+        let refundMessage = '';
+        if (order.paymentMethod === 'razorpay' && order.paymentStatus === 'completed') {
+            try {
+                const refundableAmount = order.totalAmount - order.totalRefunded;
+                if (refundableAmount > 0) {
+                    const refund = await razorpay.payments.refund(order.paymentId, {
+                        amount: Math.round(refundableAmount * 100),
+                        speed: 'normal',
+                        notes: { reason: 'Order cancelled by user.' }
+                    });
+
+                    const newRefundEntry = {
+                        amount: refund.amount / 100,
+                        reason: 'Order cancelled by user.',
+                        status: refund.status === 'processed' ? 'completed' : 'processing',
+                        razorpayRefundId: refund.id,
+                        processedBy: req.user._id, // User initiated this
+                        createdAt: new Date(),
+                        updatedAt: new Date(),
+                    };
+                    order.refunds.push(newRefundEntry);
+                    order.totalRefunded += newRefundEntry.amount;
+                    order.paymentStatus = 'refunded';
+                    refundMessage = ' Your payment is being refunded.';
+                }
+            } catch (refundErr) {
+                console.error("Auto-refund on cancel failed:", refundErr.message);
+                refundMessage = ' We will process your refund manually shortly.';
+                await notifyAdmin(`Admin Alert: Auto-refund FAILED for cancelled order #${order._id}. Please process manually.`);
+            }
+        }
+        
         await order.save();
 
         for(const item of order.orderItems) {
             await Product.findByIdAndUpdate(item.product, { $inc: { stock: item.qty } });
         }
-        
+
         const orderIdShort = order._id.toString().slice(-6);
         const sellerMessage = `Order Cancellation: Order #${orderIdShort} has been cancelled by the customer.`;
         await sendWhatsApp(order.seller.phone, sellerMessage);
         await notifyAdmin(`Admin Alert: Order #${orderIdShort} cancelled by user.`);
-        
-        res.json({ message: 'Order cancelled successfully', order });
+
+        res.json({ message: `Order cancelled successfully.${refundMessage}`, order });
     } catch (err) {
         res.status(500).json({ message: 'Error cancelling order' });
     }
@@ -1261,13 +1413,13 @@ app.get('/api/seller/availability', protect, authorizeRole('seller', 'admin'), a
             availability = await Availability.create({
                 provider: req.user._id,
                 days: {
-                    monday: defaultDay,
-                    tuesday: defaultDay,
+                    monday:     defaultDay,
+                    tuesday:    defaultDay,
                     wednesday: defaultDay,
-                    thursday: defaultDay,
-                    friday: defaultDay,
-                    saturday: defaultDay,
-                    sunday: defaultDay,
+                    thursday:   defaultDay,
+                    friday:     defaultDay,
+                    saturday:   defaultDay,
+                    sunday:     defaultDay,
                 }
             });
         }
@@ -1283,10 +1435,10 @@ app.put('/api/seller/availability', protect, authorizeRole('seller', 'admin'), a
         const { days, customDates } = req.body;
         const availability = await Availability.findOneAndUpdate(
             { provider: req.user._id },
-            { 
+            {
                 provider: req.user._id,
-                days: days, 
-                customDates: customDates || [] 
+                days: days,
+                customDates: customDates || []
             },
             { new: true, upsert: true, runValidators: true }
         );
@@ -1302,23 +1454,23 @@ app.put('/api/seller/availability', protect, authorizeRole('seller', 'admin'), a
 
 app.get('/api/services/:id/availability', async (req, res) => {
     try {
-        const { date } = req.query; 
+        const { date } = req.query;
         if (!date) {
             return res.status(400).json({ message: 'Date query parameter (YYYY-MM-DD) is required.' });
         }
 
-        const service = await Product.findById(req.params.id).populate('category'); // <<< Populate category here
+        const service = await Product.findById(req.params.id).populate('category');
         if (!service || !service.seller) {
             return res.status(404).json({ message: 'Service or service provider not found.' });
         }
 
         if (service.category.type !== 'service' || !service.serviceDurationMinutes) {
-            return res.status(400).json({ message: 'This product is not a bookable service with a valid duration.' });
+            return res.status(400).json({ message: 'This product is not a bookable service.' });
         }
 
         const providerId = service.seller;
         const duration = service.serviceDurationMinutes;
-        const requestedDate = new Date(`${date}T00:00:00.000Z`); 
+        const requestedDate = new Date(`${date}T00:00:00.000Z`);
         const dayOfWeek = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'][requestedDate.getUTCDay()];
 
         const availability = await Availability.findOne({ provider: providerId });
@@ -1326,15 +1478,15 @@ app.get('/api/services/:id/availability', async (req, res) => {
             return res.status(404).json({ message: 'This provider has not set up their availability.' });
         }
 
-        let scheduleForDay = availability.days[dayOfWeek]; 
+        let scheduleForDay = availability.days[dayOfWeek];
         const customDate = availability.customDates.find(d => new Date(d.date).toDateString() === requestedDate.toDateString());
 
         if (customDate) {
-            scheduleForDay = customDate; 
+            scheduleForDay = customDate;
         }
 
         if (!scheduleForDay || !scheduleForDay.isActive) {
-            return res.json([]); 
+            return res.json([]);
         }
 
         const allPossibleSlots = [];
@@ -1352,37 +1504,37 @@ app.get('/api/services/:id/availability', async (req, res) => {
 
             while (true) {
                 const slotEndTime = new Date(currentSlotTime.getTime() + slotDurationMillis);
-                
+
                 if (slotEndTime > blockEndTime) {
                     break;
                 }
-                
-                allPossibleSlots.push(new Date(currentSlotTime)); 
-                currentSlotTime = slotEndTime; 
+
+                allPossibleSlots.push(new Date(currentSlotTime));
+                currentSlotTime = slotEndTime;
             }
         }
 
         const dayStart = new Date(requestedDate);
         const dayEnd = new Date(requestedDate);
-        dayEnd.setUTCDate(dayEnd.getUTCDate() + 1); 
+        dayEnd.setUTCDate(dayEnd.getUTCDate() + 1);
 
         const existingBookings = await Booking.find({
             provider: providerId,
-            status: { $nin: ['Rejected', 'Cancelled'] }, 
+            status: { $nin: ['Rejected', 'Cancelled'] },
             bookingStart: {
                 $gte: dayStart,
                 $lt: dayEnd
             }
         }).select('bookingStart bookingEnd');
-        
+
         const availableSlots = allPossibleSlots.filter(slotStart => {
             const slotEnd = new Date(slotStart.getTime() + slotDurationMillis);
-            
+
             const isBooked = existingBookings.some(booking => {
                 return (booking.bookingStart < slotEnd) && (booking.bookingEnd > slotStart);
             });
 
-            return !isBooked; 
+            return !isBooked;
         });
 
         res.json(availableSlots.map(date => date.toISOString()));
@@ -1397,15 +1549,15 @@ app.get('/api/services/:id/availability', async (req, res) => {
 app.post('/api/bookings', protect, async (req, res) => {
     try {
         const { serviceId, bookingStartISO, address, notes } = req.body;
-        
+
         if (!serviceId || !bookingStartISO || !address) {
             return res.status(400).json({ message: 'Service ID, booking start time, and address are required.' });
         }
 
-        const service = await Product.findById(serviceId).populate('seller').populate('category'); // Need category to check type
+        const service = await Product.findById(serviceId).populate('seller').populate('category');
         if (!service) return res.status(404).json({ message: 'Service not found.' });
         if (service.category.type !== 'service' || !service.serviceDurationMinutes) {
-             return res.status(400).json({ message: 'This product is not a bookable service.' });
+            return res.status(400).json({ message: 'This product is not a bookable service.' });
         }
         if (!service.seller) return res.status(404).json({ message: 'Service provider not found.' });
 
@@ -1427,7 +1579,7 @@ app.post('/api/bookings', protect, async (req, res) => {
         if (conflictingBooking) {
             return res.status(409).json({ message: 'Sorry, this time slot has just been booked. Please select another slot.' });
         }
-        
+
         const newBooking = await Booking.create({
             user: req.user._id,
             provider: providerId,
@@ -1435,7 +1587,6 @@ app.post('/api/bookings', protect, async (req, res) => {
             bookingStart: bookingStart,
             bookingEnd: bookingEnd,
             address,
-            notes,
         });
 
         const providerPhone = service.seller.phone;
@@ -1445,7 +1596,7 @@ app.post('/api/bookings', protect, async (req, res) => {
 
         res.status(201).json(newBooking);
     } catch (err) {
-        console.error('Create booking error:', err.message); 
+        console.error('Create booking error:', err.message);
         res.status(500).json({ message: 'Error creating booking.' });
     }
 });
@@ -1457,12 +1608,12 @@ app.put('/api/bookings/:id/status', protect, authorizeRole('seller', 'admin'), a
         if (!booking) return res.status(404).json({ message: 'Booking not found.' });
 
         if (req.user.role === 'seller' && booking.provider.toString() !== req.user._id.toString()) {
-             return res.status(403).json({ message: 'Access denied.' });
+            return res.status(403).json({ message: 'Access denied.' });
         }
 
         booking.status = status;
         await booking.save();
-        
+
         const userPhone = booking.user.phone;
         const formattedDate = booking.bookingStart.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' });
         const message = `Booking Update!\n\nYour booking for "${booking.service.name}" on ${formattedDate} has been ${status}.`;
@@ -1506,18 +1657,32 @@ app.post('/api/payment/verify', async (req, res) => {
         const digest = shasum.digest('hex');
 
         if (digest === signature) {
-            const order = await Order.findOne({ paymentId: order_id });
-            if (order) {
-                order.paymentStatus = 'completed';
-                await order.save();
-                await PaymentHistory.create({
-                    user: order.user,
-                    order: order._id,
-                    razorpayOrderId: order_id,
-                    razorpayPaymentId: payment_id,
-                    amount: order.totalAmount,
-                    status: 'completed',
-                });
+            // Find all orders associated with this Razorpay Order ID
+            const orders = await Order.find({ paymentId: order_id });
+            if (orders && orders.length > 0) {
+                
+                const paymentHistoryEntries = [];
+
+                for (const order of orders) {
+                    order.paymentStatus = 'completed';
+                    order.paymentId = payment_id; // Store the actual payment_id
+                    await order.save();
+
+                    paymentHistoryEntries.push({
+                        user: order.user,
+                        order: order._id,
+                        razorpayOrderId: order_id,
+                        razorpayPaymentId: payment_id,
+                        amount: order.totalAmount, // This might be tricky if one payment covers multiple orders
+                        status: 'completed',
+                    });
+                }
+                
+                // Note: This logic assumes one payment per order. If one payment covers *multiple* orders,
+                // you might want to create only one PaymentHistory entry for the total amount.
+                // For now, we'll create one for each order matched.
+                await PaymentHistory.insertMany(paymentHistoryEntries);
+
                 return res.json({ status: 'success', message: 'Payment verified successfully' });
             }
         }
@@ -1600,12 +1765,13 @@ app.get('/api/addresses', protect, async (req, res) => {
     }
 });
 
+// --- MODIFIED: Create Address Route ---
 app.post('/api/addresses', protect, async (req, res) => {
     try {
-        const { name, street, city, state, pincode, phone, isDefault = false } = req.body;
+        const { name, street, village, landmark, city, state, pincode, phone, isDefault = false } = req.body; // --- MODIFIED ---
         const newAddress = await Address.create({
             user: req.user._id,
-            name, street, city, state, pincode, phone, isDefault
+            name, street, village, landmark, city, state, pincode, phone, isDefault // --- MODIFIED ---
         });
         res.status(201).json(newAddress);
     } catch (err) {
@@ -1613,14 +1779,17 @@ app.post('/api/addresses', protect, async (req, res) => {
     }
 });
 
+// --- MODIFIED: Update Address Route ---
 app.put('/api/addresses/:id', protect, async (req, res) => {
     try {
-        const { name, street, city, state, pincode, phone, isDefault } = req.body;
+        const { name, street, village, landmark, city, state, pincode, phone, isDefault } = req.body; // --- MODIFIED ---
         const address = await Address.findOne({ _id: req.params.id, user: req.user._id });
         if (!address) return res.status(404).json({ message: 'Address not found or you do not have permission' });
 
         if (name) address.name = name;
         if (street) address.street = street;
+        if (village) address.village = village; // --- NEW ---
+        if (landmark) address.landmark = landmark; // --- NEW ---
         if (city) address.city = city;
         if (state) address.state = state;
         if (pincode) address.pincode = pincode;
@@ -1634,7 +1803,7 @@ app.put('/api/addresses/:id', protect, async (req, res) => {
     }
 });
 
-app.delete('/api/addresses/:id', protect, async (req, res) => {
+app.delete('/api/addresses/:id', protect, authorizeRole('admin'), async (req, res) => {
     try {
         const address = await Address.findOne({ _id: req.params.id, user: req.user._id });
         if (!address) return res.status(404).json({ message: 'Address not found or you do not have permission' });
@@ -1659,7 +1828,7 @@ app.get('/api/seller/categories-and-subcategories', protect, authorizeRole('sell
             })));
         };
 
-        const categories = await Category.find({}).sort({ name: 1 });
+        const categories = await Category.find({}).sort({ sortOrder: 1, name: 1 }); // <-- MODIFIED SORT
 
         const responseData = await Promise.all(categories.map(async (category) => {
             const subcategories = await Subcategory.find({ category: category._id, isTopLevel: true }).sort({ name: 1 });
@@ -1677,44 +1846,91 @@ app.get('/api/seller/categories-and-subcategories', protect, authorizeRole('sell
 
         res.json(responseData);
     } catch (err) {
-        console.error("Error fetching categories and subcategories for seller:", err.message); 
+        console.error("Error fetching categories and subcategories for seller:", err.message);
         res.status(500).json({ message: 'Error fetching categories and subcategories', error: err.message });
     }
 });
 
-// ### ROUTE 1: FIX APPLIED HERE ###
 app.get('/api/seller/products', protect, authorizeRole('seller', 'admin'), async (req, res) => {
     try {
         const products = await Product.find({ seller: req.user._id })
             .populate('seller', 'name email phone pincodes')
             .populate('subcategory', 'name image')
-            // <<< FIX: Added 'type', 'slug', 'isActive' so frontend model doesn't crash
-            .populate('category', 'name slug type isActive image'); 
+            .populate('category', 'name slug type isActive image');
         res.json(products);
     } catch (error) {
-        console.error("Seller products error:", error.message); 
+        console.error("Seller products error:", error.message);
         res.status(500).json({ message: 'Error fetching seller products' });
     }
 });
 
+// ### MODIFIED: ROUTE FOR SELLER FINANCIALS (Bug Fix) ###
+app.get('/api/seller/financials', protect, authorizeRole('seller'), async (req, res) => {
+    try {
+        const sellerId = req.user._id;
 
-// ... (POST /api/seller/products, POST /api/seller/products/bulk, PUT /api/seller/products/:id, DELETE /api/seller/products/:id are unchanged from last version) ...
+        // --- NEW: Fetch dynamic commission rate ---
+        const appSettings = await AppSettings.findOne({ singleton: true });
+        const PLATFORM_COMMISSION_RATE = appSettings ? appSettings.platformCommissionRate : 0.05; // Fallback to 5%
+
+        // Calculate total revenue from delivered orders
+        const totalRevenueResult = await Order.aggregate([
+            { $match: { seller: sellerId, deliveryStatus: 'Delivered', paymentStatus: 'completed' } },
+            { $group: { _id: null, totalSales: { $sum: "$totalAmount" } } }
+        ]);
+        const totalRevenue = totalRevenueResult[0]?.totalSales || 0;
+
+        // --- MODIFIED: Use dynamic rate ---
+        const platformCommission = totalRevenue * PLATFORM_COMMISSION_RATE;
+        const netEarnings = totalRevenue - platformCommission;
+
+        // Get total amount of processed payouts
+        const totalPayoutsResult = await Payout.aggregate([
+            { $match: { seller: sellerId, status: 'processed' } },
+            { $group: { _id: null, totalProcessed: { $sum: "$amount" } } }
+        ]);
+        const totalPayouts = totalPayoutsResult[0]?.totalProcessed || 0;
+
+        // Calculate remaining balance to be paid
+        const currentBalance = netEarnings - totalPayouts;
+
+        // Get all pending and processed payouts
+        const payouts = await Payout.find({ seller: sellerId }).sort({ createdAt: -1 });
+
+        res.json({
+            totalRevenue: totalRevenue,
+            netEarnings: netEarnings,
+            platformCommission: platformCommission,
+            totalPayouts: totalPayouts,
+            currentBalance: currentBalance,
+            payouts: payouts,
+            commissionRate: PLATFORM_COMMISSION_RATE // Send the rate to the frontend
+        });
+
+    } catch (err) {
+        // This was the error you reported
+        console.error('Error fetching seller financials:', err.message);
+        res.status(500).json({ message: 'Error fetching financial data', error: err.message });
+    }
+});
+
+
 app.post('/api/seller/products', protect, authorizeRole('seller', 'admin'), checkSellerApproved, productUpload, async (req, res) => {
     try {
-        const { 
-            productTitle, brand, category, subcategory, childCategory, 
-            mrp, sellingPrice, stockQuantity, unit, minOrderQty, 
+        const {
+            productTitle, brand, category, subcategory, childCategory,
+            mrp, sellingPrice, costPrice, stockQuantity, unit, minOrderQty,
             shortDescription, fullDescription, videoLink,
             specifications, colors, sizes, storages,
             shippingWeight, shippingLength, shippingWidth, shippingHeight, shippingType,
             warranty, returnPolicy, tags,
-            serviceDurationMinutes 
+            serviceDurationMinutes
         } = req.body;
 
         if (!productTitle || !sellingPrice || !category || !stockQuantity) {
             return res.status(400).json({ message: 'Product title, selling price, stock, and category are required.' });
         }
-        
+
         const parentCategory = await Category.findById(category);
         if (!parentCategory) {
             return res.status(404).json({ message: 'Selected category not found.' });
@@ -1725,7 +1941,7 @@ app.post('/api/seller/products', protect, authorizeRole('seller', 'admin'), chec
                 return res.status(400).json({ message: 'Services must have a valid "Service Duration (in minutes)".' });
             }
         } else if (parentCategory.type === 'product') {
-             if (!unit) {
+            if (!unit) {
                 return res.status(400).json({ message: 'Products must have a "Unit" (e.g., kg, pcs).' });
             }
         }
@@ -1777,17 +1993,18 @@ app.post('/api/seller/products', protect, authorizeRole('seller', 'admin'), chec
         };
 
         const finalSubcategory = childCategory || subcategory;
-        
+
         const product = await Product.create({
             name: productTitle,
-            sku: newSku, 
+            sku: newSku,
             brand,
             category,
             subcategory: finalSubcategory,
             originalPrice: parsedMrp,
             price: parsedSellingPrice,
+            costPrice: costPrice ? parseFloat(costPrice) : undefined, // MODIFIED
             stock: parseInt(stockQuantity),
-            unit: parentCategory.type === 'product' ? unit : undefined, 
+            unit: parentCategory.type === 'product' ? unit : undefined,
             minOrderQty: minOrderQty ? parseInt(minOrderQty) : 1,
             shortDescription,
             fullDescription,
@@ -1799,14 +2016,14 @@ app.post('/api/seller/products', protect, authorizeRole('seller', 'admin'), chec
             shippingDetails: parsedShippingDetails,
             otherInformation: parsedOtherInfo,
             seller: req.user._id,
-            serviceDurationMinutes: parentCategory.type === 'service' ? parseInt(serviceDurationMinutes) : undefined, 
+            serviceDurationMinutes: parentCategory.type === 'service' ? parseInt(serviceDurationMinutes) : undefined,
         });
 
         res.status(201).json(product);
     } catch (err) {
-        console.error('Create product error:', err.message); 
+        console.error('Create product error:', err.message);
         if (err.name === 'ValidationError') {
-             return res.status(400).json({ message: 'Validation failed', error: err.message });
+            return res.status(400).json({ message: 'Validation failed', error: err.message });
         }
         res.status(500).json({ message: 'Error creating product', error: err.message });
     }
@@ -1835,20 +2052,20 @@ app.post('/api/seller/products/bulk', protect, authorizeRole('seller', 'admin'),
         for (const productInfo of productsData) {
             const { productTitle, sellingPrice, stockQuantity, unit, category, imageCount } = productInfo;
             if (!productTitle || !sellingPrice || !stockQuantity || !unit || !category || imageCount === undefined) {
-               return res.status(400).json({ message: `Missing required fields for product "${productTitle || 'Unknown'}". Ensure all products have title, price, stock, unit, category, and imageCount.` });
+                return res.status(400).json({ message: `Missing required fields for product "${productTitle || 'Unknown'}". Ensure all products have title, price, stock, unit, category, and imageCount.` });
             }
 
             const productImages = req.files.slice(fileIndex, fileIndex + imageCount).map(file => ({
                 url: file.path,
                 publicId: file.filename
             }));
-            
+
             fileIndex += imageCount;
-            
+
             const newProduct = {
                 name: productTitle,
                 price: parseFloat(sellingPrice),
-                sku: generateUniqueSku(category, productTitle), 
+                sku: generateUniqueSku(category, productTitle),
                 stock: parseInt(stockQuantity),
                 unit,
                 category,
@@ -1863,23 +2080,23 @@ app.post('/api/seller/products/bulk', protect, authorizeRole('seller', 'admin'),
                     tags: productInfo.tags || []
                 }
             };
-            
+
             productsToCreate.push(newProduct);
         }
-        
+
         const createdProducts = await Product.insertMany(productsToCreate);
 
         res.status(201).json({ message: `${createdProducts.length} products uploaded successfully.`, products: createdProducts });
 
     } catch (err) {
-        console.error('Bulk create product error:', err.message); 
+        console.error('Bulk create product error:', err.message);
         if (req.files) {
             req.files.forEach(file => {
                 cloudinary.uploader.destroy(file.filename);
             });
         }
         if (err.name === 'ValidationError') {
-             return res.status(400).json({ message: 'Validation failed (perhaps an invalid returnPolicy value was used?).', error: err.message });
+            return res.status(400).json({ message: 'Validation failed (perhaps an invalid returnPolicy value was used?).', error: err.message });
         }
         res.status(500).json({ message: 'Error creating products in bulk', error: err.message });
     }
@@ -1887,10 +2104,10 @@ app.post('/api/seller/products/bulk', protect, authorizeRole('seller', 'admin'),
 
 app.put('/api/seller/products/:id', protect, authorizeRole('seller', 'admin'), checkSellerApproved, productUpload, async (req, res) => {
     try {
-        const { name, description, brand, originalPrice, price, stock, category, subcategory, childSubcategory, specifications, imagesToDelete, unit, serviceDurationMinutes, returnPolicy } = req.body;
+        const { name, description, brand, originalPrice, price, stock, category, subcategory, childSubcategory, specifications, imagesToDelete, unit, serviceDurationMinutes, returnPolicy, costPrice, isTrending } = req.body;
         const product = await Product.findById(req.params.id);
         if (!product) return res.status(404).json({ message: 'Product not found' });
-        
+
         if (req.user.role === 'seller' && product.seller.toString() !== req.user._id.toString()) {
             return res.status(403).json({ message: 'Access denied: You do not own this product' });
         }
@@ -1911,7 +2128,7 @@ app.put('/api/seller/products/:id', protect, authorizeRole('seller', 'admin'), c
             const newImages = req.files.images.map(file => ({ url: file.path, publicId: file.filename }));
             product.images.push(...newImages);
         }
-        
+
         if (req.files.video && req.files.video.length > 0) {
             const newVideoFile = req.files.video[0];
             if (product.uploadedVideo && product.uploadedVideo.publicId) {
@@ -1926,22 +2143,24 @@ app.put('/api/seller/products/:id', protect, authorizeRole('seller', 'admin'), c
         if (name) product.name = name;
         if (description) product.description = description;
         if (brand) product.brand = brand;
-        if (parsedOriginalPrice) product.originalPrice = parsedOriginalPrice;
-        if (parsedPrice) product.price = parsedPrice;
+        if (originalPrice) product.originalPrice = parsedOriginalPrice;
+        if (price) product.price = parsedPrice;
+        if (costPrice) product.costPrice = parseFloat(costPrice); // MODIFIED
         if (stock) product.stock = stock;
         if (unit) product.unit = unit;
         if (category) product.category = category;
         if (returnPolicy) product.otherInformation.returnPolicy = returnPolicy;
         if (serviceDurationMinutes) product.serviceDurationMinutes = parseInt(serviceDurationMinutes);
+        if (typeof isTrending !== 'undefined') product.isTrending = isTrending;
 
         const finalSubcategory = childSubcategory || subcategory;
         if (finalSubcategory) product.subcategory = finalSubcategory;
-
         if (specifications) product.specifications = JSON.parse(specifications);
+
         await product.save();
         res.json(product);
     } catch (err) {
-        console.error('Update product error:', err.message); 
+        console.error('Update product error:', err.message);
         res.status(500).json({ message: 'Error updating product', error: err.message });
     }
 });
@@ -1950,34 +2169,135 @@ app.delete('/api/seller/products/:id', protect, authorizeRole('seller', 'admin')
     try {
         const product = await Product.findById(req.params.id);
         if (!product) return res.status(404).json({ message: 'Product not found' });
-        
+
         if (req.user.role === 'seller' && product.seller.toString() !== req.user._id.toString()) {
             return res.status(403).json({ message: 'Access denied: You do not own this product' });
         }
-        
+
         await Promise.all(product.images.map(img => cloudinary.uploader.destroy(img.publicId)));
         if (product.uploadedVideo && product.uploadedVideo.publicId) {
             await cloudinary.uploader.destroy(product.uploadedVideo.publicId, { resource_type: 'video' });
         }
-        
+
         await product.deleteOne();
         res.json({ message: 'Product deleted successfully' });
     } catch (err) {
-        console.error('Delete product error:', err.message); 
+        console.error('Delete product error:', err.message);
         res.status(500).json({ message: 'Error deleting product' });
     }
 });
 
 
+// ##################################################################
+// ## MODIFIED: SHIPPING LABEL GENERATOR ROUTE (with Village/Landmark)
+// ##################################################################
+app.get('/api/seller/orders/:id/shipping-label', protect, authorizeRole('seller'), async (req, res) => {
+    try {
+        // Updated `populate` call to include `phone`
+        const order = await Order.findById(req.params.id).populate('user', 'name phone');
+        if (!order) {
+            return res.status(404).json({ message: 'Order not found' });
+        }
+
+        // Check if this seller owns this order
+        if (order.seller.toString() !== req.user._id.toString()) {
+            return res.status(403).json({ message: 'Access denied to this order' });
+        }
+
+        // Get Seller's pickup address
+        const sellerAddress = req.user.pickupAddress; // This now contains village/landmark
+        if (!sellerAddress || !sellerAddress.isSet || !sellerAddress.pincode) {
+            return res.status(400).json({ message: 'Seller pickup address is not set in your profile. Please update it first.' });
+        }
+
+        // Get Customer's shipping address (this is the full formatted string)
+        const customerAddressString = order.shippingAddress; // This string now has village/landmark from the order creation step
+        const customerName = order.user.name;
+        const customerPhone = order.user.phone;
+        const orderId = order._id.toString();
+
+        // 1. Generate Barcode Image Buffer
+        const barcodePng = await bwipjs.toBuffer({
+            bcid: 'code128',
+            text: orderId,
+            scale: 3,
+            height: 12,
+            includetext: true,
+            textxalign: 'center',
+        });
+
+        // 2. Create PDF (Standard 4x6 inch label size = 288x432 points)
+        const doc = new PDFDocument({
+            size: [288, 432], // 4x6 inches
+            margins: { top: 20, bottom: 20, left: 20, right: 20 }
+        });
+
+        // Set headers to force PDF download
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename="label-${orderId}.pdf"`);
+
+        // Pipe PDF data directly to the response
+        doc.pipe(res);
+
+        // --- PDF CONTENT ---
+
+        // Header
+        doc.fontSize(14).font('Helvetica-Bold').text(`Order: #${orderId.slice(-8)}`, { align: 'center' });
+        doc.fontSize(10).font('Helvetica').text(`Payment: ${order.paymentMethod.toUpperCase()}`, { align: 'center' });
+
+        // Conditionally add COD amount
+        if (order.paymentMethod === 'cod') {
+            const finalAmount = order.totalAmount - order.discountAmount;
+            doc.fontSize(12).font('Helvetica-Bold').text(`Amount Due: ₹${finalAmount.toFixed(2)}`, { align: 'center' });
+        }
+        doc.moveDown(1);
+
+        // --- MODIFIED: Seller (FROM) Address to include new fields ---
+        doc.fontSize(10).font('Helvetica-Bold').text('SHIP FROM:');
+        doc.fontSize(10).font('Helvetica').text(req.user.name);
+        doc.text(sellerAddress.street);
+        if (sellerAddress.landmark) doc.text(`Landmark: ${sellerAddress.landmark}`); // --- NEW ---
+        if (sellerAddress.village) doc.text(`Village: ${sellerAddress.village}`); // --- NEW ---
+        doc.text(`${sellerAddress.city}, ${sellerAddress.state} - ${sellerAddress.pincode}`);
+        doc.text(`Phone: ${req.user.phone}`);
+        // --- END MODIFICATION ---
+
+        doc.moveDown(2);
+
+        // Customer (TO) Address
+        doc.rect(15, 170, 258, 120).stroke(); // Draw a box around "To" address
+        doc.fontSize(12).font('Helvetica-Bold').text('SHIP TO:', 20, 175);
+        doc.fontSize(14).font('Helvetica-Bold').text(customerName, 20, 195);
+        doc.fontSize(12).font('Helvetica').text(`Phone: ${customerPhone}`, 20, 215);
+        // This address string is already formatted from the /api/orders route
+        doc.text(customerAddressString, 20, 235, { width: 248 }); 
+
+        doc.moveDown(6);
+
+        // Add Barcode Image at the bottom
+        doc.image(barcodePng, {
+            fit: [250, 70],
+            align: 'center',
+            valign: 'bottom'
+        });
+
+        // --- Finalize PDF ---
+        doc.end();
+
+    } catch (err) {
+        console.error('Failed to generate shipping label:', err.message);
+        if (!res.headersSent) {
+            res.status(500).json({ message: 'Error generating PDF label', error: err.message });
+        }
+    }
+});
+
 
 // --------- Admin Routes ----------
-
-// ### ROUTE 2: FIX APPLIED HERE ###
 app.get('/api/admin/products', protect, authorizeRole('admin'), async (req, res) => {
     try {
         const products = await Product.find({})
             .populate('seller', 'name email')
-             // <<< FIX: Added 'type', 'slug', 'isActive' so frontend model doesn't crash
             .populate('category', 'name slug type isActive')
             .populate('subcategory', 'name');
         res.json(products);
@@ -1989,7 +2309,7 @@ app.get('/api/admin/products', protect, authorizeRole('admin'), async (req, res)
 
 app.put('/api/admin/products/:id', protect, authorizeRole('admin'), productUpload, async (req, res) => {
     try {
-        const { name, description, brand, originalPrice, price, stock, category, subcategory, childSubcategory, specifications, imagesToDelete, unit, isTrending, serviceDurationMinutes, returnPolicy } = req.body;
+        const { name, description, brand, originalPrice, price, stock, category, subcategory, childSubcategory, specifications, imagesToDelete, unit, isTrending, serviceDurationMinutes, returnPolicy, costPrice } = req.body;
         const product = await Product.findById(req.params.id);
         if (!product) return res.status(404).json({ message: 'Product not found' });
 
@@ -2004,12 +2324,12 @@ app.put('/api/admin/products/:id', protect, authorizeRole('admin'), productUploa
             await Promise.all(idsToDelete.map(publicId => cloudinary.uploader.destroy(publicId)));
             product.images = product.images.filter(img => !idsToDelete.includes(img.publicId));
         }
-        
+
         if (req.files.images && req.files.images.length > 0) {
             const newImages = req.files.images.map(file => ({ url: file.path, publicId: file.filename }));
             product.images.push(...newImages);
         }
-        
+
         if (req.files.video && req.files.video.length > 0) {
             const newVideoFile = req.files.video[0];
             if (product.uploadedVideo && product.uploadedVideo.publicId) {
@@ -2020,12 +2340,13 @@ app.put('/api/admin/products/:id', protect, authorizeRole('admin'), productUploa
                 publicId: newVideoFile.filename
             };
         }
-        
+
         if (name) product.name = name;
         if (description) product.description = description;
         if (brand) product.brand = brand;
         if (originalPrice) product.originalPrice = parsedOriginalPrice;
         if (price) product.price = parsedPrice;
+        if (costPrice) product.costPrice = parseFloat(costPrice); // MODIFIED
         if (stock) product.stock = stock;
         if (unit) product.unit = unit;
         if (category) product.category = category;
@@ -2036,17 +2357,16 @@ app.put('/api/admin/products/:id', protect, authorizeRole('admin'), productUploa
         const finalSubcategory = childSubcategory || subcategory;
         if (finalSubcategory) product.subcategory = finalSubcategory;
         if (specifications) product.specifications = JSON.parse(specifications);
-        
+
         await product.save();
         res.json(product);
     } catch (err) {
-        console.error('Admin update product error:', err.message); 
+        console.error('Admin update product error:', err.message);
         res.status(500).json({ message: 'Error updating product', error: err.message });
     }
 });
 
 
-// ... (Admin User/Seller/Order Management) ...
 app.get('/api/admin/users', protect, authorizeRole('admin'), async (req, res) => {
     try {
         const users = await User.find({ role: 'user' }).select('-password');
@@ -2124,7 +2444,7 @@ app.put('/api/admin/orders/:id/status', protect, authorizeRole('admin', 'seller'
         order.deliveryStatus = status;
         order.history.push({ status: status });
         await order.save();
-        
+
         const orderIdShort = order._id.toString().slice(-6);
         const userMessage = `Order Update: Your order #${orderIdShort} has been updated to: ${status}.`;
         await sendWhatsApp(order.user.phone, userMessage);
@@ -2137,7 +2457,7 @@ app.put('/api/admin/orders/:id/status', protect, authorizeRole('admin', 'seller'
 
 app.post('/api/admin/broadcast', protect, authorizeRole('admin'), async (req, res) => {
     try {
-        const { message, target } = req.body; 
+        const { message, target } = req.body;
         if (!message || !target) {
             return res.status(400).json({ message: 'Message and target audience are required.' });
         }
@@ -2153,18 +2473,18 @@ app.post('/api/admin/broadcast', protect, authorizeRole('admin'), async (req, re
 
         const recipients = await User.find(query).select('phone');
         let successCount = 0;
-        
+
         for (const recipient of recipients) {
             if (recipient.phone) {
                 await sendWhatsApp(recipient.phone, message);
                 successCount++;
             }
         }
-        
+
         res.json({ message: `Broadcast sent successfully to ${successCount} recipients.` });
 
     } catch (err) {
-        console.error('Broadcast error:', err.message); 
+        console.error('Broadcast error:', err.message);
         res.status(500).json({ message: 'Error sending broadcast message', error: err.message });
     }
 });
@@ -2193,7 +2513,7 @@ app.post('/api/admin/banners', protect, authorizeRole('admin'), uploadSingleMedi
         const newBanner = await Banner.create(bannerData);
         res.status(201).json(newBanner);
     } catch (err) {
-        console.error('Create banner error:', err.message); 
+        console.error('Create banner error:', err.message);
         res.status(500).json({ message: 'Error creating banner', error: err.message });
     }
 });
@@ -2203,7 +2523,7 @@ app.get('/api/banners/hero', async (req, res) => {
         const banners = await Banner.find({ isActive: true, position: 'top' }).sort({ createdAt: -1 });
         res.json(banners);
     } catch (err) {
-        console.error('Error fetching hero banners:', err.message); 
+        console.error('Error fetching hero banners:', err.message);
         res.status(500).json({ message: 'Error fetching hero banners' });
     }
 });
@@ -2213,7 +2533,7 @@ app.get('/api/banners/dynamic', async (req, res) => {
         const banners = await Banner.find({ isActive: true, position: { $in: ['middle', 'bottom'] } }).sort({ createdAt: -1 });
         res.json(banners);
     } catch (err) {
-        console.error('Error fetching dynamic banners:', err.message); 
+        console.error('Error fetching dynamic banners:', err.message);
         res.status(500).json({ message: 'Error fetching dynamic banners' });
     }
 });
@@ -2240,24 +2560,37 @@ app.put('/api/admin/banners/:id', protect, authorizeRole('admin'), uploadSingleM
             if (banner.video && banner.video.publicId) {
                 await cloudinary.uploader.destroy(banner.video.publicId, { resource_type: 'video' });
             }
-            if (file.mimetype.startsWith('video')) {
-                banner.video = { url: file.path, publicId: file.filename };
-                banner.image = null;
-            } else {
+            
+            // --- NEW: Set new file based on type ---
+            const newType = type || (file.mimetype.startsWith('video') ? 'video' : 'image');
+            banner.type = newType;
+            if (newType === 'image') {
                 banner.image = { url: file.path, publicId: file.filename };
-                banner.video = null;
+                banner.video = { url: null, publicId: null };
+            } else {
+                banner.video = { url: file.path, publicId: file.filename };
+                banner.image = { url: null, publicId: null };
             }
-            banner.type = file.mimetype.startsWith('video') ? 'video' : 'image';
+
+        } else if (type) {
+            // If only type changed without a new file, clear the other type
+            banner.type = type;
+            if (type === 'image' && banner.video.publicId) {
+                 banner.video = { url: null, publicId: null };
+            } else if (type === 'video' && banner.image.publicId) {
+                 banner.image = { url: null, publicId: null };
+            }
         }
+        
         if (title) banner.title = title;
         if (link) banner.link = link;
         if (typeof isActive !== 'undefined') banner.isActive = isActive === 'true';
         if (position) banner.position = position;
-        if (type) banner.type = type;
+
         await banner.save();
         res.json(banner);
     } catch (err) {
-        console.error('Update banner error:', err.message); 
+        console.error('Update banner error:', err.message);
         res.status(500).json({ message: 'Error updating banner', error: err.message });
     }
 });
@@ -2271,105 +2604,8 @@ app.delete('/api/admin/banners/:id', protect, authorizeRole('admin'), async (req
         await banner.deleteOne();
         res.json({ message: 'Banner deleted successfully' });
     } catch (err) {
-        console.error('Delete banner error:', err.message); 
+        console.error('Delete banner error:', err.message);
         res.status(500).json({ message: 'Error deleting banner', error: err.message });
-    }
-});
-
-app.post('/api/admin/splash', protect, authorizeRole('admin'), uploadSingleMedia, async (req, res) => {
-    try {
-        const { title, link, type, startDate, endDate, isActive } = req.body;
-        const file = req.file;
-        if (!file) {
-            return res.status(400).json({ message: 'Media file (image or video) is required' });
-        }
-        if (type === 'scheduled' && (!startDate || !endDate)) {
-            return res.status(400).json({ message: 'Scheduled splash screens require a start and end date.' });
-        }
-        const splashData = {
-            title: title || 'New Splash',
-            link: link || '',
-            type: type || 'default',
-            isActive: isActive === 'true',
-        };
-        
-        if (file.mimetype.startsWith('video')) {
-            splashData.video = { url: file.path, publicId: file.filename };
-        } else {
-            splashData.image = { url: file.path, publicId: file.filename };
-        }
-
-        const newSplash = await Splash.create(splashData);
-        res.status(201).json(newSplash);
-    } catch (err) {
-        console.error('Create splash error:', err.message); 
-        res.status(500).json({ message: 'Error creating splash screen', error: err.message });
-    }
-});
-
-app.get('/api/admin/splash', protect, authorizeRole('admin'), async (req, res) => {
-    try {
-        const splashes = await Splash.find().sort({ createdAt: -1 });
-        res.json(splashes);
-    } catch (err) {
-        res.status(500).json({ message: 'Error fetching splash screens', error: err.message });
-    }
-});
-
-app.put('/api/admin/splash/:id', protect, authorizeRole('admin'), uploadSingleMedia, async (req, res) => {
-    try {
-        const { title, link, type, startDate, endDate, isActive } = req.body;
-        const splash = await Splash.findById(req.params.id);
-        if (!splash) return res.status(404).json({ message: 'Splash screen not found' });
-        const file = req.file;
-        if (file) {
-            if (splash.image && splash.image.publicId) {
-                await cloudinary.uploader.destroy(splash.image.publicId);
-            }
-            if (splash.video && splash.video.publicId) {
-                await cloudinary.uploader.destroy(splash.video.publicId, { resource_type: 'video' });
-            }
-            if (file.mimetype.startsWith('video')) {
-                splash.video = { url: file.path, publicId: file.filename };
-                splash.image = null;
-            } else {
-                splash.image = { url: file.path, publicId: file.filename };
-                splash.video = null;
-            }
-        }
-        if (title) splash.title = title;
-        if (link) splash.link = link;
-        if (typeof isActive !== 'undefined') splash.isActive = isActive === 'true';
-        if (type) splash.type = type;
-        if (type === 'scheduled') {
-            if (!startDate || !endDate) {
-                return res.status(400).json({ message: 'Scheduled splash screens require a start and end date.' });
-            }
-            splash.startDate = startDate;
-            splash.endDate = endDate;
-        } else {
-            splash.startDate = undefined;
-            splash.endDate = undefined;
-        }
-        await splash.save();
-        res.json(splash);
-    } catch (err) {
-        console.error('Update splash error:', err.message); 
-        res.status(500).json({ message: 'Error updating splash screen', error: err.message });
-    }
-});
-
-app.delete('/api/admin/splash/:id', protect, authorizeRole('admin'), async (req, res) => {
-    try {
-        const splash = await Splash.findById(req.params.id);
-        if (!splash) return res.status(404).json({ message: 'Splash screen not found' });
-        if (splash.image && splash.image.publicId) await cloudinary.uploader.destroy(splash.image.publicId);
-        if (splash.video && splash.video.publicId) await cloudinary.uploader.destroy(splash.video.publicId, { resource_type: 'video' });
-        await splash.deleteOne();
-        res.json({ message: 'Splash screen deleted successfully' });
-    } catch (err) {
-        console.error('Delete splash error:', err.message); 
-        res.status(500).json({ message: 'Error deleting splash screen', error: err.message });
     }
 });
 
@@ -2380,8 +2616,57 @@ app.get('/api/splash', async (req, res) => {
         const scheduledSplashes = allSplashes.filter(s => s.type === 'scheduled');
         res.json({ defaultSplash, scheduledSplashes });
     } catch (err) {
-        console.error('Error fetching splash screens:', err.message); 
+        console.error('Error fetching splash screens:', err.message);
         res.status(500).json({ message: 'Error fetching splash screens' });
+    }
+});
+
+
+// ##################################################################
+// ## NEW: ADMIN APP SETTINGS ROUTES (for Commission)
+// ##################################################################
+
+app.get('/api/admin/settings', protect, authorizeRole('admin'), async (req, res) => {
+    try {
+        const settings = await AppSettings.findOne({ singleton: true });
+        if (!settings) {
+            // This should have been seeded, but as a fallback:
+            const newSettings = await AppSettings.create({ singleton: true, platformCommissionRate: 0.05 });
+            return res.json(newSettings);
+        }
+        res.json(settings);
+    } catch (err) {
+        console.error('Error fetching settings:', err.message);
+        res.status(500).json({ message: 'Error fetching app settings', error: err.message });
+    }
+});
+
+app.put('/api/admin/settings', protect, authorizeRole('admin'), async (req, res) => {
+    try {
+        const { platformCommissionRate } = req.body;
+        
+        const updateData = {};
+        if (typeof platformCommissionRate !== 'undefined') {
+            const rate = parseFloat(platformCommissionRate);
+            if (rate < 0 || rate > 1) {
+                return res.status(400).json({ message: 'Commission rate must be between 0 (0%) and 1 (100%).' });
+            }
+            updateData.platformCommissionRate = rate;
+        }
+
+        const updatedSettings = await AppSettings.findOneAndUpdate(
+            { singleton: true },
+            { $set: updateData },
+            { new: true, upsert: true, runValidators: true }
+        );
+
+        res.json(updatedSettings);
+    } catch (err) {
+        console.error('Error updating settings:', err.message);
+        if (err.name === 'ValidationError') {
+            return res.status(400).json({ message: 'Validation failed', error: err.message });
+        }
+        res.status(500).json({ message: 'Error updating app settings', error: err.message });
     }
 });
 
@@ -2409,7 +2694,8 @@ app.get('/api/admin/reports/products', protect, authorizeRole('admin'), async (r
             { $sort: { totalQuantitySold: -1 } },
             { $limit: 10 },
             { $lookup: { from: 'products', localField: '_id', foreignField: '_id', as: 'productInfo' } },
-            { $unwind: "$productInfo" }
+            { $unwind: { path: "$productInfo", preserveNullAndEmptyArrays: true } },
+            { $project: { name: { $ifNull: [ "$productInfo.name", "Deleted Product" ] }, totalQuantitySold: 1 } }
         ]);
         res.json(topProducts);
     } catch (err) {
@@ -2430,15 +2716,26 @@ app.get('/api/admin/reports/financial-summary', protect, authorizeRole('admin'),
                 }
             }
         ]);
+        
+        // --- NEW: Get commission ---
+        const appSettings = await AppSettings.findOne({ singleton: true });
+        const PLATFORM_COMMISSION_RATE = appSettings ? appSettings.platformCommissionRate : 0.05;
 
         const summary = salesSummary.length > 0 ? salesSummary[0] : { totalSales: 0, totalRefunds: 0, totalOrders: 0 };
-        const netIncome = summary.totalSales - summary.totalRefunds;
+        
+        const platformEarnings = summary.totalSales * PLATFORM_COMMISSION_RATE;
+        // This is a simple calculation. A more complex one would subtract refunds from seller earnings *before* commission.
+        // For this report, we'll show gross earnings.
+        
+        const netRevenue = summary.totalSales - summary.totalRefunds;
 
         res.json({
             totalSales: summary.totalSales,
             totalRefunds: summary.totalRefunds,
             totalOrders: summary.totalOrders,
-            netIncome: netIncome
+            netRevenue: netRevenue,
+            platformEarnings: platformEarnings,
+            commissionRate: PLATFORM_COMMISSION_RATE
         });
 
     } catch (err) {
@@ -2448,30 +2745,38 @@ app.get('/api/admin/reports/financial-summary', protect, authorizeRole('admin'),
 });
 
 // ##################################################################
-// ## NEW: ADMIN DASHBOARD STATISTICS ENDPOINT (Modified)
+// ## MODIFIED: ADMIN DASHBOARD STATISTICS ENDPOINT
 // ##################################################################
 app.get('/api/admin/statistics/dashboard', protect, authorizeRole('admin'), async (req, res) => {
     try {
-        // <<< MODIFIED: Added paymentCounts to the Promise.all
-        const [orderStatusCounts, topSellingProducts, topSellingSellers, topCustomers, financialSummaryData, paymentCounts] = await Promise.all([
-            
+        // <<< MODIFIED: Added AppSettings to the Promise.all
+        const [
+            orderStatusCounts, 
+            topSellingProducts, 
+            topSellingSellers, 
+            topCustomers, 
+            financialSummaryData, 
+            paymentCounts,
+            appSettings // <-- NEW
+        ] = await Promise.all([
+
             // 1. Order Status Counts
             Order.aggregate([
                 { $group: { _id: "$deliveryStatus", count: { $sum: 1 } } }
             ]),
-            
+
             // 2. Top 5 Products
             Order.aggregate([
                 { $match: { deliveryStatus: 'Delivered' } },
                 { $unwind: "$orderItems" },
-                { $group: { 
-                    _id: "$orderItems.product", 
+                { $group: {
+                    _id: "$orderItems.product",
                     totalQuantitySold: { $sum: "$orderItems.qty" }
                 }},
                 { $sort: { totalQuantitySold: -1 } },
                 { $limit: 5 },
                 { $lookup: { from: 'products', localField: '_id', foreignField: '_id', as: 'productInfo' } },
-                { $unwind: { path: "$productInfo", preserveNullAndEmptyArrays: true } }, 
+                { $unwind: { path: "$productInfo", preserveNullAndEmptyArrays: true } },
                 { $project: { name: { $ifNull: [ "$productInfo.name", "Deleted Product" ] }, totalQuantitySold: 1 } }
             ]),
 
@@ -2485,7 +2790,7 @@ app.get('/api/admin/statistics/dashboard', protect, authorizeRole('admin'), asyn
                 { $sort: { totalRevenue: -1 } },
                 { $limit: 5 },
                 { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'sellerInfo' } },
-                { $unwind: { path: "$sellerInfo", preserveNullAndEmptyArrays: true } }, 
+                { $unwind: { path: "$sellerInfo", preserveNullAndEmptyArrays: true } },
                 { $project: { name: { $ifNull: [ "$sellerInfo.name", "Deleted Seller" ] }, totalRevenue: 1 } }
             ]),
 
@@ -2499,10 +2804,10 @@ app.get('/api/admin/statistics/dashboard', protect, authorizeRole('admin'), asyn
                 { $sort: { totalSpent: -1 } },
                 { $limit: 5 },
                 { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'userInfo' } },
-                { $unwind: { path: "$userInfo", preserveNullAndEmptyArrays: true } }, 
+                { $unwind: { path: "$userInfo", preserveNullAndEmptyArrays: true } },
                 { $project: { name: { $ifNull: [ "$userInfo.name", "Deleted User" ] }, totalSpent: 1 } }
             ]),
-            
+
             // 5. Financial Summary
             Order.aggregate([
                 { $match: { paymentStatus: 'completed', deliveryStatus: { $ne: 'Cancelled' } } },
@@ -2513,11 +2818,14 @@ app.get('/api/admin/statistics/dashboard', protect, authorizeRole('admin'), asyn
                 }}
             ]),
 
-            // 6. ### NEW: Payment Method Counts ###
+            // 6. Payment Method Counts
             Order.aggregate([
                 { $match: { paymentStatus: 'completed' } }, // Only count completed payments
                 { $group: { _id: "$paymentMethod", count: { $sum: 1 } } }
-            ])
+            ]),
+
+            // 7. --- NEW: Get App Settings ---
+            AppSettings.findOne({ singleton: true })
         ]);
 
         // Format order stats
@@ -2526,25 +2834,33 @@ app.get('/api/admin/statistics/dashboard', protect, authorizeRole('admin'), asyn
             orderStatsFormatted[stat._id] = stat.count;
         });
 
-        // ### NEW: Format payment stats ###
+        // Format payment stats
         const paymentStatsFormatted = {};
         paymentCounts.forEach(stat => {
             paymentStatsFormatted[stat._id] = stat.count;
         });
-        
+
         const financials = financialSummaryData[0] || { totalSales: 0, totalRefunds: 0 };
+        
+        // --- NEW: Calculate platform earnings ---
+        const PLATFORM_COMMISSION_RATE = appSettings ? appSettings.platformCommissionRate : 0.05;
+        const platformEarnings = financials.totalSales * PLATFORM_COMMISSION_RATE;
+        const netRevenue = financials.totalSales - financials.totalRefunds;
+
 
         // Send the complete dashboard data object
         res.json({
             orderStats: orderStatsFormatted,
-            paymentMethodStats: paymentStatsFormatted, // <<< NEWLY ADDED
+            paymentMethodStats: paymentStatsFormatted,
             topProducts: topSellingProducts,
             topSellers: topSellingSellers,
             topCustomers: topCustomers,
             financials: {
-               totalSales: financials.totalSales,
-               totalRefunds: financials.totalRefunds,
-               netIncome: financials.totalSales - financials.totalRefunds
+                totalSales: financials.totalSales,
+                totalRefunds: financials.totalRefunds,
+                netRevenue: netRevenue,
+                platformEarnings: platformEarnings, // <-- NEWLY ADDED
+                commissionRate: PLATFORM_COMMISSION_RATE // <-- NEWLY ADDED
             }
         });
 
@@ -2554,13 +2870,90 @@ app.get('/api/admin/statistics/dashboard', protect, authorizeRole('admin'), asyn
     }
 });
 
+// ##################################################################
+// ## NEW: REFUND ROUTE
+// ##################################################################
+app.post('/api/admin/orders/:id/refund', protect, authorizeRole('admin'), async (req, res) => {
+    try {
+        const { amount, reason } = req.body;
+        const order = await Order.findById(req.params.id);
+
+        if (!order) {
+            return res.status(404).json({ message: 'Order not found.' });
+        }
+
+        if (order.paymentMethod !== 'razorpay' || order.paymentStatus !== 'completed') {
+            return res.status(400).json({ message: 'Refunds are only available for completed Razorpay payments.' });
+        }
+        
+        // This is the *payment_id*, not the order_id. This was fixed in /api/payment/verify
+        const paymentId = order.paymentId; 
+        if (!paymentId.startsWith('pay_')) {
+             return res.status(400).json({ message: 'Invalid payment ID associated with this order. Cannot refund.' });
+        }
+
+        const refundableAmount = order.totalAmount - order.discountAmount - order.totalRefunded;
+        const requestedAmount = parseFloat(amount);
+
+        if (!requestedAmount || requestedAmount <= 0 || requestedAmount > refundableAmount) {
+            return res.status(400).json({ message: `Invalid refund amount. Max refundable amount is ${refundableAmount.toFixed(2)}.` });
+        }
+
+        const refund = await razorpay.payments.refund(paymentId, {
+            amount: Math.round(requestedAmount * 100),
+            speed: 'normal',
+            notes: { reason: reason }
+        });
+
+        const newRefundEntry = {
+            amount: refund.amount / 100,
+            reason: reason || 'Not specified',
+            status: refund.status === 'processed' ? 'completed' : 'processing',
+            razorpayRefundId: refund.id,
+            processedBy: req.user._id,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+        };
+
+        order.refunds.push(newRefundEntry);
+        order.totalRefunded += newRefundEntry.amount;
+        order.history.push({ status: 'Refund Initiated', note: `Refund of ${newRefundEntry.amount} initiated by Admin.` });
+        
+        // If full refund, mark as 'refunded'
+        if (order.totalRefunded >= (order.totalAmount - order.discountAmount)) {
+            order.paymentStatus = 'refunded';
+        }
+
+        await order.save();
+
+        const user = await User.findById(order.user);
+        if (user && user.phone) {
+            const message = `💸 Refund Alert!\n\nYour refund of ₹${newRefundEntry.amount} for order #${order._id.toString().slice(-6)} has been initiated. The amount will be credited to your account shortly.`;
+            await sendWhatsApp(user.phone, message);
+        }
+
+        res.status(200).json({
+            message: 'Refund initiated successfully.',
+            refund,
+            order
+        });
+
+    } catch (err) {
+        console.error('Error initiating refund:', err.message);
+        res.status(500).json({
+            message: 'Failed to initiate refund.',
+            error: err.message
+        });
+    }
+});
+
 
 // ##################################################################
 // ## GLOBAL ERROR HANDLER
 // ##################################################################
 app.use((err, req, res, next) => {
     console.error('🆘 UNHANDLED ERROR 🆘:', err.message);
-    console.error(err.stack); 
+    console.error(err.stack);
 
     if (err instanceof multer.MulterError) {
         return res.status(400).json({ message: 'File upload error', error: err.message });
@@ -2570,7 +2963,7 @@ app.use((err, req, res, next) => {
         return res.status(err.http_code).json({ message: 'Cloud storage error', error: err.message });
     }
 
-    res.status(5.00).json({
+    res.status(500).json({
         message: 'An unexpected server error occurred',
         error: err.message || 'Unknown error'
     });
