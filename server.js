@@ -24,6 +24,9 @@ const bwipjs = require('bwip-js');
 const admin = require('firebase-admin');
 const { getMessaging } = require('firebase-admin/messaging');
 const serviceAccount = require('./serviceAccountKey.json'); // Assumes key is in root
+// --- [NEW LIBRARY FOR QR CODE] ---
+const qrcode = require('qrcode');
+// --- [END NEW LIBRARY] ---
 
 // Initialize Express app
 const app = express();
@@ -388,7 +391,12 @@ const orderSchema = new mongoose.Schema({
     updatedAt: Date
   }],
   totalRefunded: { type: Number, default: 0 },
-  history: [{ status: String, timestamp: { type: Date, default: Date.now } }]
+  history: [{ status: String, timestamp: { type: Date, default: Date.now } }],
+  
+  // --- [NEW FIELD FOR QR CODE PAYMENT] ---
+  razorpayPaymentLinkId: { type: String, default: null }
+  // --- [END NEW FIELD] ---
+  
 }, { timestamps: true });
 const Order = mongoose.model('Order', orderSchema);
 
@@ -2685,7 +2693,9 @@ app.put('/api/delivery/assignments/:id/status', protect, authorizeRole('delivery
     order.history.push({ status: newOrderStatus, note: `Updated by Delivery Boy ${req.user.name}` });
 
     // If delivered, update payment status for COD
-    if (newOrderStatus === 'Delivered' && order.paymentMethod === 'cod') {
+    // This handles the "Cash Collected" scenario.
+    // The "QR Code" scenario is handled by the /verify-payment-link route.
+    if (newOrderStatus === 'Delivered' && order.paymentMethod === 'cod' && order.paymentStatus === 'pending') {
       order.paymentStatus = 'completed';
     }
 
@@ -2722,6 +2732,193 @@ app.put('/api/delivery/assignments/:id/status', protect, authorizeRole('delivery
     res.status(500).json({ message: 'Error updating order status', error: err.message });
   }
 });
+
+// Get all delivered orders (history) for a specific time range for the logged-in delivery boy
+// --- [NEW ROUTE START] ---
+app.get('/api/delivery/my-history', protect, authorizeRole('delivery'), async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    if (!startDate || !endDate) {
+      return res.status(400).json({ message: 'startDate and endDate query parameters are required.' });
+    }
+
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+
+    const historyJobs = await DeliveryAssignment.find({
+      deliveryBoy: req.user._id,
+      status: 'Delivered',
+      updatedAt: {
+        $gte: start,
+        $lte: end
+      }
+    })
+    .populate({
+      path: 'order',
+      select: 'orderItems totalAmount paymentMethod paymentStatus',
+    })
+    .sort({ updatedAt: -1 });
+
+    res.json(historyJobs);
+  } catch (err) {
+    console.error('Error fetching delivery history:', err.message);
+    res.status(500).json({ message: 'Error fetching delivery history', error: err.message });
+  }
+});
+// --- [NEW ROUTE END] ---
+
+
+// --- [NEW ROUTES START] (QR Code Payment for Delivery) ---
+
+/**
+ * @route   POST /api/delivery/orders/:id/generate-payment-link
+ * @desc    Generate a Razorpay Payment Link & QR Code for a COD order
+ * @access  Private (Delivery Boy)
+ */
+app.post('/api/delivery/orders/:id/generate-payment-link', protect, authorizeRole('delivery'), async (req, res) => {
+  try {
+    const orderId = req.params.id;
+
+    // 1. Find the assignment and verify the delivery boy
+    const assignment = await DeliveryAssignment.findOne({ 
+      order: orderId, 
+      deliveryBoy: req.user._id 
+    });
+
+    if (!assignment) {
+      return res.status(404).json({ message: 'No delivery assignment found for this order under your name.' });
+    }
+
+    // 2. Find the order and populate customer details
+    const order = await Order.findById(orderId).populate('user', 'name phone');
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found.' });
+    }
+
+    // 3. Check if payment is eligible (COD and still pending)
+    if (order.paymentMethod !== 'cod') {
+      return res.status(400).json({ message: 'This order is not a Cash on Delivery order.' });
+    }
+    if (order.paymentStatus === 'completed') {
+      return res.status(400).json({ message: 'This order has already been paid for.' });
+    }
+
+    // 4. If a link already exists and is pending, return that
+    if (order.razorpayPaymentLinkId) {
+      try {
+        const existingLink = await razorpay.paymentLink.fetch(order.razorpayPaymentLinkId);
+        if (existingLink.status === 'created' || existingLink.status === 'pending') {
+          const qrCodeDataUrl = await qrcode.toDataURL(existingLink.short_url);
+          return res.json({ 
+            message: 'Existing payment link retrieved.',
+            shortUrl: existingLink.short_url, 
+            qrCodeDataUrl,
+            paymentLinkId: existingLink.id
+          });
+        }
+      } catch (fetchErr) {
+        // Link might be expired or invalid, proceed to create a new one
+        console.log('Could not fetch existing payment link, creating a new one.');
+      }
+    }
+
+    // 5. Create a new Razorpay Payment Link
+    const amountToCollect = (order.totalAmount - order.discountAmount);
+    const orderIdShort = order._id.toString().slice(-6);
+
+    const paymentLink = await razorpay.paymentLink.create({
+      amount: Math.round(amountToCollect * 100), // Amount in paise
+      currency: "INR",
+      accept_partial: false,
+      description: `Payment for Order #${orderIdShort}`,
+      customer: {
+        name: order.user.name || 'Valued Customer',
+        phone: order.user.phone,
+      },
+      notify: {
+        sms: true,
+        email: false
+      },
+      reminder_enable: false,
+      notes: {
+        order_id: order._id.toString(),
+        delivery_boy_id: req.user._id.toString()
+      }
+    });
+
+    // 6. Save the new payment link ID to the order
+    order.razorpayPaymentLinkId = paymentLink.id;
+    await order.save();
+
+    // 7. Generate QR code from the short URL
+    const qrCodeDataUrl = await qrcode.toDataURL(paymentLink.short_url);
+
+    // 8. Return the URL and QR code to the app
+    res.status(201).json({
+      message: 'Payment link generated successfully.',
+      shortUrl: paymentLink.short_url,
+      qrCodeDataUrl,
+      paymentLinkId: paymentLink.id
+    });
+
+  } catch (err) {
+    console.error('Error generating payment link:', err.message);
+    res.status(500).json({ message: 'Error generating payment link', error: err.message });
+  }
+});
+
+/**
+ * @route   GET /api/delivery/order-payment-status/:id
+ * @desc    Check the status of a Razorpay Payment Link by order ID
+ * @access  Private (Delivery Boy)
+ */
+app.get('/api/delivery/order-payment-status/:id', protect, authorizeRole('delivery'), async (req, res) => {
+  try {
+    const orderId = req.params.id;
+
+    const order = await Order.findById(orderId);
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found.' });
+    }
+
+    const assignment = await DeliveryAssignment.findOne({ order: orderId, deliveryBoy: req.user._id });
+    if (!assignment) {
+        return res.status(403).json({ message: 'Access denied. You are not assigned to this order.' });
+    }
+
+    // If payment is already completed, return immediately
+    if (order.paymentStatus === 'completed') {
+      return res.json({ paymentStatus: 'completed' });
+    }
+
+    if (!order.razorpayPaymentLinkId) {
+      // If a link was never created, it's still pending
+      return res.json({ paymentStatus: 'pending' });
+    }
+
+    // Fetch the payment link status from Razorpay
+    const paymentLink = await razorpay.paymentLink.fetch(order.razorpayPaymentLinkId);
+
+    if (paymentLink.status === 'paid') {
+      order.paymentStatus = 'completed';
+      order.paymentMethod = 'razorpay_cod'; // A new internal status to differentiate from regular prepaid orders
+      
+      if (paymentLink.payments && paymentLink.payments.length > 0) {
+        order.paymentId = paymentLink.payments[0].payment_id;
+      }
+      await order.save();
+      return res.json({ paymentStatus: 'completed' });
+    }
+
+    return res.json({ paymentStatus: 'pending' });
+
+  } catch (err) {
+    console.error('Error checking payment status:', err.message);
+    res.status(500).json({ message: 'Error checking payment status', error: err.message });
+  }
+});
+// --- [NEW ROUTES END] ---
+
 
 // --- [NEW CODE SECTION END] ---
 
@@ -3127,8 +3324,7 @@ app.delete('/api/admin/banners/:id', protect, authorizeRole('admin'), async (req
     await banner.deleteOne();
     res.json({ message: 'Banner deleted successfully' });
   } catch (err) {
-    console.error('Delete banner error:', err.message);
-    res.status(500).json({ message: 'Error deleting banner', error: err.message });
+    console.status(500).json({ message: 'Error deleting banner', error: err.message });
   }
 });
 
