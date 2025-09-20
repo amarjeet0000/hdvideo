@@ -551,7 +551,7 @@ const notificationSchema = new mongoose.Schema({
   title: { type: String, required: true },
   body: { type: String, required: true },
   imageUrl: { type: String, default: null }, // <-- ADDED THIS LINE
-  target: { type: String, enum: ['all', 'users', 'sellers'], required: true },
+  target: { type: String, enum: ['all', 'users', 'sellers', 'delivery_boys'], required: true },
   scheduledAt: { type: Date, required: true },
   isSent: { type: Boolean, default: false },
   sentAt: Date,
@@ -3324,7 +3324,8 @@ app.delete('/api/admin/banners/:id', protect, authorizeRole('admin'), async (req
     await banner.deleteOne();
     res.json({ message: 'Banner deleted successfully' });
   } catch (err) {
-    console.status(500).json({ message: 'Error deleting banner', error: err.message });
+    console.error('Delete banner error:', err.message);
+    res.status(500).json({ message: 'Error deleting banner', error: err.message });
   }
 });
 
