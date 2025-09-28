@@ -120,7 +120,6 @@ async function notifyAdmin(message) {
   else console.log('Admin WhatsApp not configured. Message:', message);
 }
 
-// --- [UPDATED CODE SECTION 1] (Feature Update) ---
 async function sendPushNotification(tokens, title, body, data = {}, imageUrl = null) {
   try {
     if (!tokens) return;
@@ -187,8 +186,6 @@ async function sendPushNotification(tokens, title, body, data = {}, imageUrl = n
     console.error('Push Notification Failed:', err.message);
   }
 }
-// --- [END UPDATED CODE SECTION 1] ---
-
 
 /**
  * HELPER FUNCTION
@@ -209,9 +206,9 @@ function generateUniqueSku(categoryId, productName) {
  */
 function calculateShippingFee(customerPincode) {
     if (customerPincode === BASE_PINCODE) {
-        return LOCAL_DELIVERY_FEE; // 20
+        return LOCAL_DELIVERY_FEE;
     }
-    return REMOTE_DELIVERY_FEE; // 40
+    return REMOTE_DELIVERY_FEE;
 }
 
 
@@ -221,14 +218,11 @@ const userSchema = new mongoose.Schema({
   email: { type: String, unique: true, required: true, index: true },
   password: { type: String, required: true },
   phone: { type: String, unique: true, sparse: true, index: true },
-  // --- [MODIFIED LINE] (Delivery Boy Module) ---
   role: { type: String, enum: ['user', 'seller', 'admin', 'delivery'], default: 'user', index: true },
-  // --- [END MODIFIED LINE] ---
-  pincodes: { type: [String], default: [] }, // This will be used by delivery boys
-  approved: { type: Boolean, default: true, index: true }, // Default is now true
+  pincodes: { type: [String], default: [] },
+  approved: { type: Boolean, default: true, index: true },
   passwordResetOTP: String,
   passwordResetOTPExpire: Date,
-
   pickupAddress: {
     street: String,
     village: String,
@@ -238,9 +232,7 @@ const userSchema = new mongoose.Schema({
     pincode: String,
     isSet: { type: Boolean, default: false }
   },
-  
   fcmToken: { type: String, default: null }
-
 }, { timestamps: true });
 const User = mongoose.model('User', userSchema);
 
@@ -389,16 +381,14 @@ const orderSchema = new mongoose.Schema({
     category: String
   }],
   shippingAddress: { type: String, required: true },
-  // Added 'Payment Pending' for online orders awaiting verification
   deliveryStatus: { type: String, enum: ['Pending', 'Processing', 'Shipped', 'Delivered', 'Cancelled', 'Payment Pending'], default: 'Pending', index: true }, 
   paymentMethod: { type: String, enum: ['cod', 'razorpay', 'razorpay_cod'], required: true, index: true },
   paymentId: String,
-  // Added 'failed' status
   paymentStatus: { type: String, enum: ['pending', 'completed', 'failed', 'refunded'], default: 'pending', index: true },
   pincode: String,
   totalAmount: Number, // Items Total (Subtotal)
-  taxRate: { type: Number, default: GST_RATE }, // New: Tax Rate (e.g., 0.18 for 18% GST)
-  taxAmount: { type: Number, default: 0 }, // New: Calculated Tax Fee
+  taxRate: { type: Number, default: GST_RATE },
+  taxAmount: { type: Number, default: 0 },
   couponApplied: String,
   discountAmount: { type: Number, default: 0 },
   shippingFee: { type: Number, default: 0 }, 
@@ -413,9 +403,7 @@ const orderSchema = new mongoose.Schema({
   }],
   totalRefunded: { type: Number, default: 0 },
   history: [{ status: String, timestamp: { type: Date, default: Date.now } }],
-  
   razorpayPaymentLinkId: { type: String, default: null }
-  
 }, { timestamps: true });
 const Order = mongoose.model('Order', orderSchema);
 
@@ -483,18 +471,17 @@ const payoutSchema = new mongoose.Schema({
 }, { timestamps: true });
 const Payout = mongoose.model('Payout', payoutSchema);
 
-// --- [NEW CODE START] (Delivery Boy Module) ---
 const deliveryAssignmentSchema = new mongoose.Schema({
   order: { 
     type: mongoose.Schema.Types.ObjectId, 
     ref: 'Order', 
     required: true, 
-    unique: true // Each order can only have one assignment
+    unique: true
   },
   deliveryBoy: { 
     type: mongoose.Schema.Types.ObjectId, 
     ref: 'User', 
-    default: null, // Starts as null (unassigned)
+    default: null,
     index: true 
   },
   status: { 
@@ -506,35 +493,26 @@ const deliveryAssignmentSchema = new mongoose.Schema({
   pincode: { 
     type: String, 
     required: true, 
-    index: true // For fast querying by pincode
+    index: true
   },
   history: [{
     status: String,
     timestamp: { type: Date, default: Date.now }
   }]
 }, { timestamps: true });
-
 const DeliveryAssignment = mongoose.model('DeliveryAssignment', deliveryAssignmentSchema);
-// --- [NEW CODE END] ---
 
-
-// --- [UPDATED CODE SECTION 2] (Feature Update + Optimization Fix) ---
-// --- NEW MODEL: Notification Schema for Scheduled Messages ---
 const notificationSchema = new mongoose.Schema({
   title: { type: String, required: true },
   body: { type: String, required: true },
-  imageUrl: { type: String, default: null }, // <-- ADDED THIS LINE
+  imageUrl: { type: String, default: null },
   target: { type: String, enum: ['all', 'users', 'sellers', 'delivery_boys'], required: true },
   scheduledAt: { type: Date, required: true },
   isSent: { type: Boolean, default: false },
   sentAt: Date,
 }, { timestamps: true });
-
 notificationSchema.index({ isSent: 1, scheduledAt: 1 });
-
 const ScheduledNotification = mongoose.model('ScheduledNotification', notificationSchema);
-// --- [END UPDATED CODE SECTION 2] ---
-
 
 // --- Database Seeding Function ---
 async function seedDatabaseData() {
@@ -661,7 +639,7 @@ app.post('/api/admin/categories', protect, authorizeRole('admin'), upload.single
   try {
     const { name, type, sortOrder } = req.body;
     if (!name) return res.status(400).json({ message: 'Category name is required' });
-    const slug = name.toLowerCase().replace(/[^a-z09]+/g, '-').replace(/^-+|-+$/g, '');
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
     const category = await Category.create({
       name,
       slug,
@@ -860,15 +838,12 @@ app.delete('/api/admin/subcategories/:id', protect, authorizeRole('admin'), asyn
 });
 
 
-// --------- Auth Routes ----------
-// --- [MODIFIED ROUTE] (Delivery Boy Module) ---
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { name, email, password, phone, role = 'user', pincodes } = req.body;
     if (!name || !password || !phone) return res.status(400).json({ message: 'Name, password, and phone number are required' });
 
-    // --- [MODIFIED LOGIC START] ---
-    // Sellers must use email, users/delivery must use phone for login
+  
     if (role === 'seller' && !email) {
         return res.status(400).json({ message: 'Email is required for seller registration.' });
     }
@@ -883,7 +858,6 @@ app.post('/api/auth/register', async (req, res) => {
     } else {
         existingUser = await User.findOne({ phone });
     }
-    // --- [END MODIFIED LOGIC] ---
 
     if (existingUser) {
       return res.status(409).json({ message: 'User with this email or phone number already exists' });
@@ -891,13 +865,11 @@ app.post('/api/auth/register', async (req, res) => {
 
     const hashed = await bcrypt.hash(password, 10);
 
-    // --- [MODIFIED LOGIC START] ---
-    // By default, 'user' and 'delivery' are approved. 'seller' is not.
     let approved = true;
     if (role === 'seller') {
       approved = false;
     }
-    // --- [END MODIFIED LOGIC] ---
+
 
     const user = await User.create({ 
         name, 
@@ -920,9 +892,7 @@ app.post('/api/auth/register', async (req, res) => {
     res.status(500).json({ message: 'Server error' });
   }
 });
-// --- [END MODIFIED ROUTE] ---
 
-// --- [CORRECTED SECTION - BUG FIX 2] ---
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { phone, password, email } = req.body;
@@ -949,7 +919,6 @@ app.post('/api/auth/login', async (req, res) => {
 
     if (user.role === 'seller' && !user.approved) return res.status(403).json({ message: 'Seller account awaiting admin approval' });
 
-    // Note: Delivery boy role is auto-approved, so no special check is needed here.
 
     const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
     res.json({ token, user: { id: user._id, name: user.name, email: user.email, phone: user.phone, role: user.role, pincodes: user.pincodes, approved: user.approved } });
@@ -958,7 +927,6 @@ app.post('/api/auth/login', async (req, res) => {
     res.status(500).json({ message: 'Login error' });
   }
 });
-// --- [END CORRECTED SECTION - BUG FIX 2] ---
 
 app.post('/api/auth/forgot-password', async (req, res) => {
   try {
@@ -1073,14 +1041,12 @@ app.post('/api/auth/save-fcm-token', protect, async (req, res) => {
     await user.save();
 
     if (user.role !== 'admin') {
-      // --- ATTRACTIVE LOGIN SUCCESS MESSAGE ---
       await sendPushNotification(
         token,
-        'Welcome Back! 🛍️ Ready to Shop?', // New attractive Title
-        `Hi ${user.name}! We've missed you. Your next great deal is waiting!`, // New attractive Body
+        'Welcome Back! 🛍️ Ready to Shop?',
+        `Hi ${user.name}! We've missed you. Your next great deal is waiting!`,
         { type: 'LOGIN_WELCOME' }
       );
-      // --- END ATTRACTIVE MESSAGE ---
     }
     res.json({ message: 'FCM token saved and welcome notification handled.' });
   } catch (err) {
@@ -1138,8 +1104,6 @@ app.get('/api/products/:id', async (req, res) => {
   }
 });
 
-
-// --------- Cart, Wishlist, Likes, Orders Routes ----------
 app.get('/api/cart', protect, async (req, res) => {
   try {
     const cart = await Cart.findOne({ user: req.user._id }).populate('items.product');
@@ -1268,10 +1232,9 @@ app.delete('/api/products/:id/like', protect, async (req, res) => {
   }
 });
 
-// --- [NEW API ENDPOINT FOR CHECKOUT SUMMARY (PRE-ORDER CALCULATION)] ---
 app.get('/api/orders/checkout-summary', protect, async (req, res) => {
   try {
-    const { shippingAddressId, couponCode } = req.query; // Use query params for GET request
+    const { shippingAddressId, couponCode } = req.query;
 
     const cart = await Cart.findOne({ user: req.user._id }).populate({
       path: 'items.product',
@@ -1287,13 +1250,11 @@ app.get('/api/orders/checkout-summary', protect, async (req, res) => {
     const shippingAddress = await Address.findById(shippingAddressId);
     if (!shippingAddress) return res.status(404).json({ message: 'Shipping address not found' });
 
-    // --- VALIDATION AND PRE-CALCULATION START (Items Total) ---
     for (const item of cart.items) {
       if (!item.product || !item.product.seller) {
         return res.status(400).json({ message: `An item in your cart is no longer available.` });
       }
       const product = item.product;
-      // Check seller's delivery area (Pincode validation)
       if (!product.seller.pincodes.includes(shippingAddress.pincode)) {
         return res.status(400).json({
           message: `Sorry, delivery not available at your location for the product: "${product.name}"`
@@ -1305,15 +1266,11 @@ app.get('/api/orders/checkout-summary', protect, async (req, res) => {
     }
 
     const totalCartAmount = cart.items.reduce((sum, item) => sum + (item.product.price * item.qty), 0);
-    // --- VALIDATION AND PRE-CALCULATION END ---
 
     let discountAmount = 0;
-    // Shipping fee (pincode based)
     const shippingFee = calculateShippingFee(shippingAddress.pincode);
-    // Tax (18% GST)
     const totalTaxAmount = totalCartAmount * GST_RATE;
 
-    // Discount calculation
     if (couponCode) {
       const coupon = await Coupon.findOne({
         code: couponCode,
@@ -1334,10 +1291,8 @@ app.get('/api/orders/checkout-summary', protect, async (req, res) => {
       }
     }
 
-    // Grand total (itemsTotal + shippingFee + taxFee - discount)
     let finalAmountForPayment = Math.max(0, totalCartAmount + shippingFee + totalTaxAmount - discountAmount);
 
-    // Return the calculated summary
     res.json({
       message: 'Checkout summary calculated successfully.',
       itemsTotal: totalCartAmount,
@@ -1349,24 +1304,17 @@ app.get('/api/orders/checkout-summary', protect, async (req, res) => {
 
   } catch (err) {
     console.error('Checkout summary error:', err.message);
-    // Use a specific status code if delivery failed validation
     if (err.message.includes('delivery not available') || err.message.includes('Insufficient stock') || err.message.includes('not available')) {
         return res.status(400).json({ message: err.message });
     }
     res.status(500).json({ message: 'Error calculating checkout summary', error: err.message });
   }
 });
-// --- [END NEW API ENDPOINT] ---
 
-// =================================================================
-// === NEW ENDPOINT: POST ORDER SUMMARY CALCULATION (Non-Order) ====
-// =================================================================
 app.post('/api/orders/calculate-summary', protect, async (req, res) => {
   try {
-    // Uses body instead of query params for a POST request
     const { shippingAddressId, couponCode } = req.body; 
 
-    // --- Data Fetching and Validation (Same as GET checkout-summary) ---
     const cart = await Cart.findOne({ user: req.user._id }).populate({
       path: 'items.product',
       populate: {
@@ -1397,7 +1345,6 @@ app.post('/api/orders/calculate-summary', protect, async (req, res) => {
     }
 
     const totalCartAmount = cart.items.reduce((sum, item) => sum + (item.product.price * item.qty), 0);
-    // --- End Validation ---
 
     let discountAmount = 0;
     const shippingFee = calculateShippingFee(shippingAddress.pincode);
@@ -1423,10 +1370,8 @@ app.post('/api/orders/calculate-summary', protect, async (req, res) => {
       }
     }
 
-    // Grand total calculation: (Items Total + Shipping Fee + Tax Amount) - Discount Amount
     let finalAmountForPayment = Math.max(0, totalCartAmount + shippingFee + totalTaxAmount - discountAmount);
 
-    // Return the calculated summary (without placing an order)
     res.json({
       message: 'Summary calculated successfully.',
       itemsTotal: totalCartAmount,
@@ -1444,2398 +1389,2236 @@ app.post('/api/orders/calculate-summary', protect, async (req, res) => {
     res.status(500).json({ message: 'Error calculating order summary', error: err.message });
   }
 });
-// =================================================================
 
-
-// --- [MODIFIED ROUTE - INCLUDES TAX/GST CALCULATION & GRAND TOTAL] ---
 app.post('/api/orders', protect, async (req, res) => {
-  try {
-    const { shippingAddressId, paymentMethod, couponCode } = req.body;
+  try {
+    const { shippingAddressId, paymentMethod, couponCode } = req.body;
 
-    const cart = await Cart.findOne({ user: req.user._id }).populate({
-      path: 'items.product',
-      populate: {
-        path: 'seller',
-        select: 'pincodes name phone fcmToken'
-      }
-    });
+    const cart = await Cart.findOne({ user: req.user._id }).populate({
+      path: 'items.product',
+      populate: {
+        path: 'seller',
+        select: 'pincodes name phone fcmToken'
+      }
+    });
 
-    if (!cart || cart.items.length === 0) {
-      return res.status(400).json({ message: 'Cart is empty' });
-    }
-    const shippingAddress = await Address.findById(shippingAddressId);
-    if (!shippingAddress) return res.status(404).json({ message: 'Shipping address not found' });
+    if (!cart || cart.items.length === 0) {
+      return res.status(400).json({ message: 'Cart is empty' });
+    }
+    const shippingAddress = await Address.findById(shippingAddressId);
+    if (!shippingAddress) return res.status(404).json({ message: 'Shipping address not found' });
 
-    // --- VALIDATION AND PRE-CALCULATION START (Items Total) ---
-    for (const item of cart.items) {
-      if (!item.product || !item.product.seller) {
-        return res.status(400).json({
-          message: `An item in your cart is no longer available. Please remove it to continue.`
-        });
-      }
-      const product = item.product;
-      if (!product.seller.pincodes.includes(shippingAddress.pincode)) {
-        return res.status(400).json({
-          message: `Sorry, delivery not available at your location for the product: "${product.name}"`
-        });
-      }
-      if (product.stock < item.qty) {
-        return res.status(400).json({ message: `Insufficient stock for product: ${product.name}` });
-      }
-    }
+    for (const item of cart.items) {
+      if (!item.product || !item.product.seller) {
+        return res.status(400).json({
+          message: `An item in your cart is no longer available. Please remove it to continue.`
+        });
+      }
+      const product = item.product;
+      if (!product.seller.pincodes.includes(shippingAddress.pincode)) {
+        return res.status(400).json({
+          message: `Sorry, delivery not available at your location for the product: "${product.name}"`
+        });
+      }
+      if (product.stock < item.qty) {
+        return res.status(400).json({ message: `Insufficient stock for product: ${product.name}` });
+      }
+    }
 
-    const ordersBySeller = new Map();
-    for (const item of cart.items) {
-      const product = item.product;
-      
-      const sellerId = product.seller._id.toString();
-      if (!ordersBySeller.has(sellerId)) {
-        ordersBySeller.set(sellerId, {
-          seller: product.seller,
-          orderItems: [],
-          totalAmount: 0 // Items total (Subtotal)
-        });
-      }
+    const ordersBySeller = new Map();
+    for (const item of cart.items) {
+      const product = item.product;
+      
+      const sellerId = product.seller._id.toString();
+      if (!ordersBySeller.has(sellerId)) {
+        ordersBySeller.set(sellerId, {
+          seller: product.seller,
+          orderItems: [],
+          totalAmount: 0
+        });
+      }
 
-      const sellerOrder = ordersBySeller.get(sellerId);
-      // 1. Products subtotal (qty × price)
-      sellerOrder.orderItems.push({
-        product: product._id,
-        name: product.name,
-        qty: item.qty,
-        originalPrice: product.originalPrice,
-        price: product.price,
-        category: product.category,
-      });
-      sellerOrder.totalAmount += product.price * item.qty;
-    }
-    // 2. Items total (sum of all products)
-    const totalCartAmount = Array.from(ordersBySeller.values()).reduce((sum, order) => sum + order.totalAmount, 0); 
-    // --- VALIDATION AND PRE-CALCULATION END ---
+      const sellerOrder = ordersBySeller.get(sellerId);
+      sellerOrder.orderItems.push({
+        product: product._id,
+        name: product.name,
+        qty: item.qty,
+        originalPrice: product.originalPrice,
+        price: product.price,
+        category: product.category,
+      });
+      sellerOrder.totalAmount += product.price * item.qty;
+    }
+    const totalCartAmount = Array.from(ordersBySeller.values()).reduce((sum, order) => sum + order.totalAmount, 0); 
 
-    let discountAmount = 0;
-    // 3. Shipping fee (pincode based)
-    const shippingFee = calculateShippingFee(shippingAddress.pincode); 
-    // 4. Tax (18% GST)
-    const totalTaxAmount = totalCartAmount * GST_RATE;
-    
-    // 5. Discount + coupon code
-    if (couponCode) {
-      const coupon = await Coupon.findOne({
-        code: couponCode,
-        isActive: true,
-        expiryDate: { $gt: new Date() },
-        minPurchaseAmount: { $lte: totalCartAmount }
-      });
+    let discountAmount = 0;
+    const shippingFee = calculateShippingFee(shippingAddress.pincode); 
+    const totalTaxAmount = totalCartAmount * GST_RATE;
+    
+    if (couponCode) {
+      const coupon = await Coupon.findOne({
+        code: couponCode,
+        isActive: true,
+        expiryDate: { $gt: new Date() },
+        minPurchaseAmount: { $lte: totalCartAmount }
+      });
 
-      if (coupon) {
-        if (coupon.discountType === 'percentage') {
-          discountAmount = totalCartAmount * (coupon.discountValue / 100);
-          if (coupon.maxDiscountAmount && discountAmount > coupon.maxDiscountAmount) {
-            discountAmount = coupon.maxDiscountAmount;
-          }
-        } else if (coupon.discountType === 'fixed') {
-          discountAmount = coupon.discountValue;
-        }
-      }
-    }
-    
-    // 6. Grand total (itemsTotal + shippingFee + taxFee - discount)
-    let finalAmountForPayment = Math.max(0, totalCartAmount + shippingFee + totalTaxAmount - discountAmount);
-    
-    let effectivePaymentMethod = paymentMethod;
-    if (paymentMethod === 'razorpay' && finalAmountForPayment <= 0) {
-      effectivePaymentMethod = 'cod'; // Treat as COD if total is 0
-    }
+      if (coupon) {
+        if (coupon.discountType === 'percentage') {
+          discountAmount = totalCartAmount * (coupon.discountValue / 100);
+          if (coupon.maxDiscountAmount && discountAmount > coupon.maxDiscountAmount) {
+            discountAmount = coupon.maxDiscountAmount;
+          }
+        } else if (coupon.discountType === 'fixed') {
+          discountAmount = coupon.discountValue;
+        }
+      }
+    }
+    
+    let finalAmountForPayment = Math.max(0, totalCartAmount + shippingFee + totalTaxAmount - discountAmount);
+    
+    let effectivePaymentMethod = paymentMethod;
+    if (paymentMethod === 'razorpay' && finalAmountForPayment <= 0) {
+      effectivePaymentMethod = 'cod';
+    }
 
-    let razorpayOrder = null;
-    if (effectivePaymentMethod === 'razorpay') {
-      razorpayOrder = await razorpay.orders.create({
-        amount: Math.round(finalAmountForPayment * 100), // Amount in paise
-        currency: 'INR',
-        receipt: `rcpt_${crypto.randomBytes(8).toString('hex')}`,
-      });
-    }
+    let razorpayOrder = null;
+    if (effectivePaymentMethod === 'razorpay') {
+      razorpayOrder = await razorpay.orders.create({
+        amount: Math.round(finalAmountForPayment * 100),
+        currency: 'INR',
+        receipt: `rcpt_${crypto.randomBytes(8).toString('hex')}`,
+      });
+    }
 
-    // 10. Delivery address details
-    let fullAddress = `${shippingAddress.street}`;
-    if (shippingAddress.landmark) fullAddress += `, ${shippingAddress.landmark}`;
-    if (shippingAddress.village) fullAddress += `, ${shippingAddress.village}`;
-    fullAddress += `, ${shippingAddress.city}, ${shippingAddress.state} - ${shippingAddress.pincode}`;
-    
-    const createdOrders = [];
-    
-    // DISTRIBUTE TAX, SHIPPING FEE AND DISCOUNT ACROSS SUB-ORDERS
-    let remainingDiscount = discountAmount;
-    let remainingShippingFee = shippingFee;
-    let remainingTaxAmount = totalTaxAmount; 
+    let fullAddress = `${shippingAddress.street}`;
+    if (shippingAddress.landmark) fullAddress += `, ${shippingAddress.landmark}`;
+    if (shippingAddress.village) fullAddress += `, ${shippingAddress.village}`;
+    fullAddress += `, ${shippingAddress.city}, ${shippingAddress.state} - ${shippingAddress.pincode}`;
+    
+    const createdOrders = [];
+    
+    let remainingDiscount = discountAmount;
+    let remainingShippingFee = shippingFee;
+    let remainingTaxAmount = totalTaxAmount; 
 
-    for (const [sellerId, sellerData] of ordersBySeller.entries()) {
-      // Allocate proportional amounts based on item amount
-      const proportion = sellerData.totalAmount / totalCartAmount;
+    for (const [sellerId, sellerData] of ordersBySeller.entries()) {
+      const proportion = sellerData.totalAmount / totalCartAmount;
 
-      const sellerDiscount = remainingDiscount * proportion;
-      const sellerShippingFee = remainingShippingFee * proportion;
-      const sellerTaxAmount = remainingTaxAmount * proportion;
+      const sellerDiscount = remainingDiscount * proportion;
+      const sellerShippingFee = remainingShippingFee * proportion;
+      const sellerTaxAmount = remainingTaxAmount * proportion;
 
-      remainingDiscount -= sellerDiscount;
-      remainingShippingFee -= sellerShippingFee;
-      remainingTaxAmount -= sellerTaxAmount;
+      remainingDiscount -= sellerDiscount;
+      remainingShippingFee -= sellerShippingFee;
+      remainingTaxAmount -= sellerTaxAmount;
 
-      const isCodOrFree = effectivePaymentMethod === 'cod' || finalAmountForPayment === 0;
-      const orderGrandTotal = (sellerData.totalAmount + sellerShippingFee + sellerTaxAmount - sellerDiscount);
+      const isCodOrFree = effectivePaymentMethod === 'cod' || finalAmountForPayment === 0;
+      const orderGrandTotal = (sellerData.totalAmount + sellerShippingFee + sellerTaxAmount - sellerDiscount);
 
-      const order = new Order({
-        user: req.user._id,
-        seller: sellerData.seller,
-        orderItems: sellerData.orderItems,
-        shippingAddress: fullAddress,
-        pincode: shippingAddress.pincode,
-        // 7. Payment method
-        paymentMethod: effectivePaymentMethod,
-        totalAmount: sellerData.totalAmount, // Items Total
-        taxRate: GST_RATE, // Tax Rate
-        taxAmount: sellerTaxAmount, // Tax Amount
-        couponApplied: couponCode,
-        discountAmount: sellerDiscount,
-        shippingFee: sellerShippingFee,
-        paymentId: razorpayOrder ? razorpayOrder.id : (isCodOrFree ? `cod_${crypto.randomBytes(8).toString('hex')}` : undefined),
-        
-        // 8. Payment status & 9. Order status
-        paymentStatus: isCodOrFree ? 'completed' : 'pending', // COD = Completed on paper, Online = Pending/Unpaid
-        deliveryStatus: isCodOrFree ? 'Pending' : 'Payment Pending', // COD = Confirmed, Online = Pending
-        history: [{ status: isCodOrFree ? 'Pending' : 'Payment Pending' }]
-      });
-      await order.save();
-      createdOrders.push(order);
+      const order = new Order({
+        user: req.user._id,
+        seller: sellerData.seller,
+        orderItems: sellerData.orderItems,
+        shippingAddress: fullAddress,
+        pincode: shippingAddress.pincode,
+        paymentMethod: effectivePaymentMethod,
+        totalAmount: sellerData.totalAmount,
+        taxRate: GST_RATE,
+        taxAmount: sellerTaxAmount,
+        couponApplied: couponCode,
+        discountAmount: sellerDiscount,
+        shippingFee: sellerShippingFee,
+        paymentId: razorpayOrder ? razorpayOrder.id : (isCodOrFree ? `cod_${crypto.randomBytes(8).toString('hex')}` : undefined),
+        paymentStatus: isCodOrFree ? 'completed' : 'pending',
+        deliveryStatus: isCodOrFree ? 'Pending' : 'Payment Pending',
+        history: [{ status: isCodOrFree ? 'Pending' : 'Payment Pending' }]
+      });
+      await order.save();
+      createdOrders.push(order);
 
-      const orderIdShort = order._id.toString().slice(-6);
+      const orderIdShort = order._id.toString().slice(-6);
 
-      if (isCodOrFree) {
-        // --- Stock Deduction and Notifications for COD/Free Orders (Immediate) ---
-        
-        // 1. Deduct Stock immediately for COD
-        for(const item of sellerData.orderItems) {
-            await Product.findByIdAndUpdate(item.product, { $inc: { stock: -item.qty } });
-        }
+      if (isCodOrFree) {
+        
+        for(const item of sellerData.orderItems) {
+            await Product.findByIdAndUpdate(item.product, { $inc: { stock: -item.qty } });
+        }
 
-        // 2. Send Notifications to User/Seller
-        const userMessage = `✅ Your COD order #${orderIdShort} has been successfully placed! Grand Total: ₹${orderGrandTotal.toFixed(2)}.`;
-        const sellerMessage = `🎉 New Order (COD)!\nYou've received a new order #${orderIdShort}. Item Subtotal: ₹${sellerData.totalAmount.toFixed(2)}.`;
-        await sendWhatsApp(req.user.phone, userMessage);
-        await sendWhatsApp(sellerData.seller.phone, sellerMessage);
-        await notifyAdmin(`Admin Alert: New COD order #${orderIdShort} placed.`);
+        const userMessage = `✅ Your COD order #${orderIdShort} has been successfully placed! Grand Total: ₹${orderGrandTotal.toFixed(2)}.`;
+        const sellerMessage = `🎉 New Order (COD)!\nYou've received a new order #${orderIdShort}. Item Subtotal: ₹${sellerData.totalAmount.toFixed(2)}.`;
+        await sendWhatsApp(req.user.phone, userMessage);
+        await sendWhatsApp(sellerData.seller.phone, sellerMessage);
+        await notifyAdmin(`Admin Alert: New COD order #${orderIdShort} placed.`);
 
-        // 3. Create Delivery Assignment immediately for COD
-        try {
-            const orderPincode = shippingAddress.pincode;
-            await DeliveryAssignment.create({
-            order: order._id,
-            deliveryBoy: null,
-            status: 'Pending',
-            pincode: orderPincode,
-            history: [{ status: 'Pending' }]
-            });
-            // Notify Delivery Boys (Logic omitted for brevity)
-            const nearbyDeliveryBoys = await User.find({
-            role: 'delivery', approved: true, pincodes: orderPincode
-            }).select('fcmToken');
-            const deliveryTokens = nearbyDeliveryBoys.map(db => db.fcmToken).filter(Boolean);
-            
-            if (deliveryTokens.length > 0) {
-            await sendPushNotification(
-                deliveryTokens,
-                'New Delivery Available! 🛵',
-                `A new order (#${orderIdShort}) is available for pickup in your area (Pincode: ${orderPincode}).`,
-                { orderId: order._id.toString(), type: 'NEW_DELIVERY_AVAILABLE' }
-            );
-            }
-        } catch (deliveryErr) {
-            console.error('Failed to create delivery assignment or notify boys:', deliveryErr.message);
-        }
-        
-      } else {
-        // --- Notifications for Razorpay Orders (Pending Payment) ---
-        const userMessage = `🔔 Your order #${orderIdShort} is awaiting payment completion via Razorpay.`;
-        await sendWhatsApp(req.user.phone, userMessage);
-      }
-    } // --- End of for...of loop ---
+        try {
+            const orderPincode = shippingAddress.pincode;
+            await DeliveryAssignment.create({
+            order: order._id,
+            deliveryBoy: null,
+            status: 'Pending',
+            pincode: orderPincode,
+            history: [{ status: 'Pending' }]
+            });
+            const nearbyDeliveryBoys = await User.find({
+            role: 'delivery', approved: true, pincodes: orderPincode
+            }).select('fcmToken');
+            const deliveryTokens = nearbyDeliveryBoys.map(db => db.fcmToken).filter(Boolean);
+            
+            if (deliveryTokens.length > 0) {
+            await sendPushNotification(
+                deliveryTokens,
+                'New Delivery Available! 🛵',
+                `A new order (#${orderIdShort}) is available for pickup in your area (Pincode: ${orderPincode}).`,
+                { orderId: order._id.toString(), type: 'NEW_DELIVERY_AVAILABLE' }
+            );
+            }
+        } catch (deliveryErr) {
+            console.error('Failed to create delivery assignment or notify boys:', deliveryErr.message);
+        }
+        
+      } else {
+        const userMessage = `🔔 Your order #${orderIdShort} is awaiting payment completion via Razorpay.`;
+        await sendWhatsApp(req.user.phone, userMessage);
+      }
+    }
 
-    if (effectivePaymentMethod === 'cod') {
-      await Cart.deleteOne({ user: req.user._id }); 
-    }
+    if (effectivePaymentMethod === 'cod') {
+      await Cart.deleteOne({ user: req.user._id }); 
+    }
 
-    res.status(201).json({
-      message: effectivePaymentMethod === 'razorpay' ? 'Order initiated, awaiting payment verification.' : 'Orders created successfully',
-      orders: createdOrders.map(o => o._id),
-      razorpayOrder: razorpayOrder ? { id: razorpayOrder.id, amount: razorpayOrder.amount } : undefined,
-      key_id: process.env.RAZORPAY_KEY_ID,
-      user: { name: req.user.name, email: req.user.email, phone: req.user.phone },
-      paymentMethod: effectivePaymentMethod,
-      grandTotal: finalAmountForPayment,
-      itemsTotal: totalCartAmount,
-      totalShippingFee: shippingFee,
-      totalTaxAmount: totalTaxAmount,
-      totalDiscount: discountAmount
-    });
+    res.status(201).json({
+      message: effectivePaymentMethod === 'razorpay' ? 'Order initiated, awaiting payment verification.' : 'Orders created successfully',
+      orders: createdOrders.map(o => o._id),
+      razorpayOrder: razorpayOrder ? { id: razorpayOrder.id, amount: razorpayOrder.amount } : undefined,
+      key_id: process.env.RAZORPAY_KEY_ID,
+      user: { name: req.user.name, email: req.user.email, phone: req.user.phone },
+      paymentMethod: effectivePaymentMethod,
+      grandTotal: finalAmountForPayment,
+      itemsTotal: totalCartAmount,
+      totalShippingFee: shippingFee,
+      totalTaxAmount: totalTaxAmount,
+      totalDiscount: discountAmount
+    });
 
-  } catch (err) {
-    console.error('Create order error:', err.message);
-    if (err.name === 'ValidationError') {
-      return res.status(400).json({ message: err.message });
-    }
-    res.status(500).json({ message: 'Error creating order', error: err.message });
-  }
+  } catch (err) {
+    console.error('Create order error:', err.message);
+    if (err.name === 'ValidationError') {
+      return res.status(400).json({ message: err.message });
+    }
+    res.status(500).json({ message: 'Error creating order', error: err.message });
+  }
 });
-// --- [END MODIFIED ROUTE] ---
 
 app.get('/api/orders', protect, async (req, res) => {
-  try {
-    // Filter out orders that failed payment
-    const orders = await Order.find({ user: req.user._id, paymentStatus: { $ne: 'failed' } })
-      .populate({
-        path: 'orderItems.product',
-        select: 'name images price originalPrice unit category',
-        populate: {
-          path: 'category',
-          select: 'name'
-        }
-      })
-      .populate('seller', 'name email')
-      .sort({ createdAt: -1 })
-      .lean();
+  try {
+    // MODIFICATION: Removed the filter that was hiding failed orders.
+    const orders = await Order.find({ user: req.user._id })
+      .populate({
+        path: 'orderItems.product',
+        select: 'name images price originalPrice unit category',
+        populate: {
+          path: 'category',
+          select: 'name'
+        }
+      })
+      .populate('seller', 'name email')
+      .sort({ createdAt: -1 })
+      .lean();
 
-    const ordersWithDisplayImage = orders.map(order => {
-      let image = null;
-      if (order.orderItems?.[0]?.product?.images?.[0]?.url) {
-        image = order.orderItems[0].product.images[0].url;
-      }
-      // Calculate grandTotal on read: (Item Subtotal + Shipping Fee + Tax Amount) - Discount
-      const grandTotal = (order.totalAmount + order.shippingFee + order.taxAmount) - order.discountAmount;
+    const ordersWithDisplayImage = orders.map(order => {
+      let image = null;
+      if (order.orderItems?.[0]?.product?.images?.[0]?.url) {
+        image = order.orderItems[0].product.images[0].url;
+      }
+      const grandTotal = (order.totalAmount + order.shippingFee + order.taxAmount) - order.discountAmount;
 
-      return { 
-        ...order, 
-        displayImage: image,
-        grandTotal: grandTotal // Inject the calculated grand total for display
-      };
-    });
+      return { 
+        ...order, 
+        displayImage: image,
+        grandTotal: grandTotal
+      };
+    });
 
-    res.json(ordersWithDisplayImage);
-  } catch (err) {
-    res.status(500).json({ message: 'Error fetching orders' });
-  }
+    res.json(ordersWithDisplayImage);
+  } catch (err) {
+    res.status(500).json({ message: 'Error fetching orders' });
+  }
 });
 
 app.get('/api/orders/:id', protect, async (req, res) => {
-  try {
-    const order = await Order.findOne({ _id: req.params.id, user: req.user._id })
-      .populate({
-        path: 'orderItems.product',
-        select: 'name images price originalPrice unit',
-      })
-      .populate('seller', 'name email');
-    if (!order) return res.status(404).json({ message: 'Order not found or you do not have permission' });
-    res.json(order);
-  } catch (err) {
-    res.status(500).json({ message: 'Error fetching order details' });
-  }
+  try {
+    const order = await Order.findOne({ _id: req.params.id, user: req.user._id })
+      .populate({
+        path: 'orderItems.product',
+        select: 'name images price originalPrice unit',
+      })
+      .populate('seller', 'name email');
+    if (!order) return res.status(404).json({ message: 'Order not found or you do not have permission' });
+    res.json(order);
+  } catch (err) {
+    res.status(500).json({ message: 'Error fetching order details' });
+  }
 });
 
 app.put('/api/orders/:id/cancel', protect, async (req, res) => {
-  try {
-    const order = await Order.findOne({ _id: req.params.id, user: req.user._id }).populate('seller', 'phone');
-    if (!order) return res.status(404).json({ message: 'Order not found or you do not have permission' });
-    if (order.deliveryStatus === 'Cancelled' || order.deliveryStatus === 'Delivered' || order.deliveryStatus === 'Shipped') {
-      return res.status(400).json({ message: `Cannot cancel an order that is already ${order.deliveryStatus}` });
-    }
+  try {
+    const order = await Order.findOne({ _id: req.params.id, user: req.user._id }).populate('seller', 'phone');
+    if (!order) return res.status(404).json({ message: 'Order not found or you do not have permission' });
+    if (order.deliveryStatus === 'Cancelled' || order.deliveryStatus === 'Delivered' || order.deliveryStatus === 'Shipped') {
+      return res.status(400).json({ message: `Cannot cancel an order that is already ${order.deliveryStatus}` });
+    }
 
-    order.deliveryStatus = 'Cancelled';
-    order.history.push({ status: 'Cancelled' });
-    
-    // --- [MODIFIED LOGIC] (Delivery Boy Module) ---
-    // Also cancel the associated delivery assignment
-    try {
-        await DeliveryAssignment.findOneAndUpdate(
-          { order: order._id },
-          { $set: { status: 'Cancelled' }, $push: { history: { status: 'Cancelled' } } }
-        );
-    } catch (assignErr) {
-        console.error('Error cancelling delivery assignment:', assignErr.message);
-    }
-    // --- [END MODIFIED LOGIC] ---
+    order.deliveryStatus = 'Cancelled';
+    order.history.push({ status: 'Cancelled' });
+    
 
-    let refundMessage = '';
-    // Check for "completed" prepaid or COD payments
-    if ((order.paymentMethod === 'razorpay' || order.paymentMethod === 'razorpay_cod') && order.paymentStatus === 'completed') {
-      try {
-        // Grand Total = totalAmount (subtotal) + shippingFee + taxAmount - discountAmount
-        const orderGrandTotal = (order.totalAmount + order.shippingFee + order.taxAmount) - order.discountAmount;
-        const refundableAmount = orderGrandTotal - order.totalRefunded;
+    try {
+        await DeliveryAssignment.findOneAndUpdate(
+          { order: order._id },
+          { $set: { status: 'Cancelled' }, $push: { history: { status: 'Cancelled' } } }
+        );
+    } catch (assignErr) {
+        console.error('Error cancelling delivery assignment:', assignErr.message);
+    }
 
-        if (refundableAmount > 0) {
-          const refund = await razorpay.payments.refund(order.paymentId, {
-            amount: Math.round(refundableAmount * 100),
-            speed: 'normal',
-            notes: { reason: 'Order cancelled by user.' }
-          });
+    let refundMessage = '';
+    if ((order.paymentMethod === 'razorpay' || order.paymentMethod === 'razorpay_cod') && order.paymentStatus === 'completed') {
+      try {
+        const orderGrandTotal = (order.totalAmount + order.shippingFee + order.taxAmount) - order.discountAmount;
+        const refundableAmount = orderGrandTotal - order.totalRefunded;
 
-          const newRefundEntry = {
-            amount: refund.amount / 100,
-            reason: 'Order cancelled by user.',
-            status: refund.status === 'processed' ? 'completed' : 'processing',
-            razorpayRefundId: refund.id,
-            processedBy: req.user._id,
-            createdAt: new Date(),
-            updatedAt: new Date(),
-          };
-          order.refunds.push(newRefundEntry);
-          order.totalRefunded += newRefundEntry.amount;
-          order.paymentStatus = 'refunded';
-          refundMessage = ' Your payment is being refunded.';
-        }
-      } catch (refundErr) {
-        console.error("Auto-refund on cancel failed:", refundErr.message);
-        refundMessage = ' We will process your refund manually shortly.';
-        await notifyAdmin(`Admin Alert: Auto-refund FAILED for cancelled order #${order._id}. Please process manually.`);
-      }
-    }
-    
-    await order.save();
+        if (refundableAmount > 0) {
+          const refund = await razorpay.payments.refund(order.paymentId, {
+            amount: Math.round(refundableAmount * 100),
+            speed: 'normal',
+            notes: { reason: 'Order cancelled by user.' }
+          });
 
-    // Revert stock ONLY if stock was deducted (i.e., not a 'Payment Pending' or 'failed' order)
-    if (order.deliveryStatus !== 'Payment Pending' && order.paymentStatus !== 'failed') {
-        for(const item of order.orderItems) {
-            await Product.findByIdAndUpdate(item.product, { $inc: { stock: item.qty } });
-        }
-    }
+          const newRefundEntry = {
+            amount: refund.amount / 100,
+            reason: 'Order cancelled by user.',
+            status: refund.status === 'processed' ? 'completed' : 'processing',
+            razorpayRefundId: refund.id,
+            processedBy: req.user._id,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          };
+          order.refunds.push(newRefundEntry);
+          order.totalRefunded += newRefundEntry.amount;
+          order.paymentStatus = 'refunded';
+          refundMessage = ' Your payment is being refunded.';
+        }
+      } catch (refundErr) {
+        console.error("Auto-refund on cancel failed:", refundErr.message);
+        refundMessage = ' We will process your refund manually shortly.';
+        await notifyAdmin(`Admin Alert: Auto-refund FAILED for cancelled order #${order._id}. Please process manually.`);
+      }
+    }
+    
+    await order.save();
 
-    const orderIdShort = order._id.toString().slice(-6);
-    const sellerMessage = `Order Cancellation: Order #${orderIdShort} has been cancelled by the customer.`;
-    await sendWhatsApp(order.seller.phone, sellerMessage);
-    await notifyAdmin(`Admin Alert: Order #${orderIdShort} cancelled by user.`);
+    if (order.deliveryStatus !== 'Payment Pending' && order.paymentStatus !== 'failed') {
+        for(const item of order.orderItems) {
+            await Product.findByIdAndUpdate(item.product, { $inc: { stock: item.qty } });
+        }
+    }
 
-    res.json({ message: `Order cancelled successfully.${refundMessage}`, order });
-  } catch (err) {
-    res.status(500).json({ message: 'Error cancelling order' });
-  }
+    const orderIdShort = order._id.toString().slice(-6);
+    const sellerMessage = `Order Cancellation: Order #${orderIdShort} has been cancelled by the customer.`;
+    await sendWhatsApp(order.seller.phone, sellerMessage);
+    await notifyAdmin(`Admin Alert: Order #${orderIdShort} cancelled by user.`);
+
+    res.json({ message: `Order cancelled successfully.${refundMessage}`, order });
+  } catch (err) {
+    res.status(500).json({ message: 'Error cancelling order' });
+  }
 });
 
-
-// --------- BOOKING & AVAILABILITY ROUTES ----------
-
-
-// --------- Payments Routes ----------
 app.post('/api/payment/create-order', protect, async (req, res) => {
-  res.status(501).json({ message: 'This endpoint is not fully implemented. Payment is initiated via the /api/orders route.' });
+  res.status(501).json({ message: 'This endpoint is not fully implemented. Payment is initiated via the /api/orders route.' });
 });
 
 app.post('/api/payment/verify', async (req, res) => {
-  try {
-    const { order_id, payment_id, signature } = req.body;
-    const shasum = crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET);
-    shasum.update(`${order_id}|${payment_id}`);
-    const digest = shasum.digest('hex');
+  try {
+    const { order_id, payment_id, signature } = req.body;
+    const shasum = crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET);
+    shasum.update(`${order_id}|${payment_id}`);
+    const digest = shasum.digest('hex');
 
-    if (digest === signature) {
-      // --- SUCCESS PATH ---
-      // Only process orders that are in the 'pending' payment state
-      const orders = await Order.find({ paymentId: order_id, paymentStatus: 'pending' });
-      if (orders && orders.length > 0) {
-        
-        const paymentHistoryEntries = [];
-        let customerId = orders[0].user; 
-        
-        for (const order of orders) {
-          // 1. Update Order Status to Completed (CONFIRMED)
-          order.paymentStatus = 'completed';
-          order.deliveryStatus = 'Pending'; // Confirmed, ready for processing (visible to seller)
-          order.history.push({ status: 'Payment Completed', note: 'Razorpay verification successful.' });
-          order.paymentId = payment_id;
-          await order.save();
-          
-          // 2. Deduct Stock (CRITICAL STEP for prepaid order confirmation)
-          for(const item of order.orderItems) {
-            await Product.findByIdAndUpdate(item.product, { $inc: { stock: -item.qty } });
-          }
+    if (digest === signature) {
 
-          // 3. Delivery Assignment Logic (CRITICAL STEP for prepaid order confirmation)
-          try {
-              const orderPincode = order.pincode;
-              await DeliveryAssignment.create({
-                order: order._id,
-                deliveryBoy: null,
-                status: 'Pending',
-                pincode: orderPincode,
-                history: [{ status: 'Pending' }]
-              });
+      const orders = await Order.find({ paymentId: order_id, paymentStatus: 'pending' });
+      if (orders && orders.length > 0) {
+        
+        const paymentHistoryEntries = [];
+        let customerId = orders[0].user; 
+        
+        for (const order of orders) {
+          order.paymentStatus = 'completed';
+          order.deliveryStatus = 'Pending';
+          order.history.push({ status: 'Payment Completed', note: 'Razorpay verification successful.' });
+          order.paymentId = payment_id;
+          await order.save();
+          
+          for(const item of order.orderItems) {
+            await Product.findByIdAndUpdate(item.product, { $inc: { stock: -item.qty } });
+          }
 
-              // Notify Delivery Boys
-              const nearbyDeliveryBoys = await User.find({
-                role: 'delivery', approved: true, pincodes: orderPincode
-              }).select('fcmToken');
-              const deliveryTokens = nearbyDeliveryBoys.map(db => db.fcmToken).filter(Boolean);
-              
-              if (deliveryTokens.length > 0) {
-                await sendPushNotification(
-                  deliveryTokens,
-                  'New Delivery Available! 🛵',
-                  `A new paid order (#${order._id.toString().slice(-6)}) is available for pickup.`,
-                  { orderId: order._id.toString(), type: 'NEW_DELIVERY_AVAILABLE' }
-                );
-              }
-            } catch (deliveryErr) {
-              console.error('Failed to create delivery assignment or notify boys:', deliveryErr.message);
-            }
+          try {
+              const orderPincode = order.pincode;
+              await DeliveryAssignment.create({
+                order: order._id,
+                deliveryBoy: null,
+                status: 'Pending',
+                pincode: orderPincode,
+                history: [{ status: 'Pending' }]
+              });
 
-          // 4. Send Seller Notifications (Now safe to notify seller)
-          const seller = await User.findById(order.seller).select('phone fcmToken name');
-          const sellerMessage = `🎉 New Paid Order!\nYou've received a new order #${order._id.toString().slice(-6)}. Item Total: ₹${order.totalAmount.toFixed(2)}.`;
-          await sendWhatsApp(seller.phone, sellerMessage);
+              const nearbyDeliveryBoys = await User.find({
+                role: 'delivery', approved: true, pincodes: orderPincode
+              }).select('fcmToken');
+              const deliveryTokens = nearbyDeliveryBoys.map(db => db.fcmToken).filter(Boolean);
+              
+              if (deliveryTokens.length > 0) {
+                await sendPushNotification(
+                  deliveryTokens,
+                  'New Delivery Available! 🛵',
+                  `A new paid order (#${order._id.toString().slice(-6)}) is available for pickup.`,
+                  { orderId: order._id.toString(), type: 'NEW_DELIVERY_AVAILABLE' }
+                );
+              }
+            } catch (deliveryErr) {
+              console.error('Failed to create delivery assignment or notify boys:', deliveryErr.message);
+            }
 
-          // 5. Add to Payment History
-          paymentHistoryEntries.push({
-            user: order.user,
-            order: order._id,
-            razorpayOrderId: order_id,
-            razorpayPaymentId: payment_id,
-            amount: order.totalAmount,
-            status: 'completed',
-          });
-        }
-        
-        await PaymentHistory.insertMany(paymentHistoryEntries);
-        
-        // 6. Clear Cart
-        await Cart.deleteOne({ user: customerId });
-        
-        // 7. Final User Notification
-        const customerInfo = await User.findById(customerId).select('name phone fcmToken');
-        if (customerInfo) {
-            await sendWhatsApp(customerInfo.phone, `✅ Your payment for order has been confirmed and the order is being processed! Thank you, ${customerInfo.name}!`);
-            await sendPushNotification(customerInfo.fcmToken, 'Payment Confirmed! ✅', `Your order is now being processed!`);
-        }
+          const seller = await User.findById(order.seller).select('phone fcmToken name');
+          const sellerMessage = `🎉 New Paid Order!\nYou've received a new order #${order._id.toString().slice(-6)}. Item Total: ₹${order.totalAmount.toFixed(2)}.`;
+          await sendWhatsApp(seller.phone, sellerMessage);
 
-        return res.json({ status: 'success', message: 'Payment verified successfully' });
-      }
-    }
-    
-    // --- FAILURE PATH ---
-    // Update orders whose payment ID matches but are still 'pending'
-    const ordersToFail = await Order.find({ paymentId: order_id, paymentStatus: 'pending' });
-    if (ordersToFail && ordersToFail.length > 0) {
-        for (const order of ordersToFail) {
-            // CRITICAL CHANGE: Set status to failed/cancelled
-            order.paymentStatus = 'failed';
-            order.deliveryStatus = 'Cancelled';
-            order.history.push({ status: 'Payment Failed', note: 'Razorpay verification failed. Order cancelled.' });
-            
-            // Stock was never deducted in /api/orders.
-            
-            await order.save();
-            
-            console.log(`Order ${order._id} payment failed. Status set to Failed/Cancelled. Cart preserved.`);
-            await notifyAdmin(`Payment FAILED for Order #${order._id.toString().slice(-6)}. Status set to Failed/Cancelled.`);
-            
-            // Notify the user that their order failed but the cart is safe
-            const customerInfo = await User.findById(order.user).select('phone fcmToken');
-            if(customerInfo && customerInfo.phone) {
-                await sendWhatsApp(customerInfo.phone, `❌ Your payment for order #${order._id.toString().slice(-6)} failed. Your items are still in your cart. Please try again.`);
-            }
-        }
-    }
+          paymentHistoryEntries.push({
+            user: order.user,
+            order: order._id,
+            razorpayOrderId: order_id,
+            razorpayPaymentId: payment_id,
+            amount: order.totalAmount,
+            status: 'completed',
+          });
+        }
+        
+        await PaymentHistory.insertMany(paymentHistoryEntries);
+        
+        await Cart.deleteOne({ user: customerId });
+        
+        const customerInfo = await User.findById(customerId).select('name phone fcmToken');
+        if (customerInfo) {
+            await sendWhatsApp(customerInfo.phone, `✅ Your payment for order has been confirmed and the order is being processed! Thank you, ${customerInfo.name}!`);
+            await sendPushNotification(customerInfo.fcmToken, 'Payment Confirmed! ✅', `Your order is now being processed!`);
+        }
 
-    // Cart is NOT cleared here.
-    res.status(400).json({ status: 'failure', message: 'Payment verification failed' });
-  } catch (err) {
-    res.status(500).json({ message: 'Error verifying payment', error: err.message });
-  }
+        return res.json({ status: 'success', message: 'Payment verified successfully' });
+      }
+    }
+    
+    const ordersToFail = await Order.find({ paymentId: order_id, paymentStatus: 'pending' });
+    if (ordersToFail && ordersToFail.length > 0) {
+        for (const order of ordersToFail) {
+            order.paymentStatus = 'failed';
+            order.deliveryStatus = 'Cancelled';
+            order.history.push({ status: 'Payment Failed', note: 'Razorpay verification failed. Order cancelled.' });
+
+            
+            await order.save();
+            
+            console.log(`Order ${order._id} payment failed. Status set to Failed/Cancelled. Cart preserved.`);
+            await notifyAdmin(`Payment FAILED for Order #${order._id.toString().slice(-6)}. Status set to Failed/Cancelled.`);
+            
+            const customerInfo = await User.findById(order.user).select('phone fcmToken');
+            if(customerInfo && customerInfo.phone) {
+                await sendWhatsApp(customerInfo.phone, `❌ Your payment for order #${order._id.toString().slice(-6)} failed. Your items are still in your cart. Please try again.`);
+            }
+        }
+    }
+
+    
+    res.status(400).json({ status: 'failure', message: 'Payment verification failed' });
+  } catch (err) {
+    res.status(500).json({ message: 'Error verifying payment', error: err.message });
+  }
 });
 
 app.get('/api/payment/history', protect, async (req, res) => {
-  try {
-    const history = await PaymentHistory.find({ user: req.user._id }).sort({ createdAt: -1 });
-    res.json(history);
-  } catch (err) {
-    res.status(500).json({ message: 'Error fetching payment history' });
-  }
+  try {
+    const history = await PaymentHistory.find({ user: req.user._id }).sort({ createdAt: -1 });
+    res.json(history);
+  } catch (err) {
+    res.status(500).json({ message: 'Error fetching payment history' });
+  }
 });
 
 // --------- Reviews & Addresses Routes ----------
 app.get('/api/products/:id/reviews', async (req, res) => {
-  try {
-    const reviews = await Review.find({ product: req.params.id }).populate('user', 'name');
-    res.json(reviews);
-  } catch (err) {
-    res.status(500).json({ message: 'Error fetching reviews' });
-  }
+  try {
+    const reviews = await Review.find({ product: req.params.id }).populate('user', 'name');
+    res.json(reviews);
+  } catch (err) {
+    res.status(500).json({ message: 'Error fetching reviews' });
+  }
 });
 
 app.post('/api/products/:id/reviews', protect, async (req, res) => {
-  try {
-    const { rating, comment } = req.body;
-    const product = await Product.findById(req.params.id);
-    if (!product) return res.status(404).json({ message: 'Product not found' });
+  try {
+    const { rating, comment } = req.body;
+    const product = await Product.findById(req.params.id);
+    if (!product) return res.status(404).json({ message: 'Product not found' });
 
-    const review = await Review.create({
-      product: req.params.id,
-      user: req.user._id,
-      rating,
-      comment
-    });
-    res.status(201).json(review);
-  } catch (err) {
-    res.status(500).json({ message: 'Error adding review' });
-  }
+    const review = await Review.create({
+      product: req.params.id,
+      user: req.user._id,
+      rating,
+      comment
+    });
+    res.status(201).json(review);
+  } catch (err) {
+    res.status(500).json({ message: 'Error adding review' });
+  }
 });
 
 app.put('/api/products/:id/reviews/:reviewId', protect, async (req, res) => {
-  try {
-    const { rating, comment } = req.body;
-    const review = await Review.findOne({ _id: req.params.reviewId, user: req.user._id, product: req.params.id });
-    if (!review) return res.status(404).json({ message: 'Review not found or you do not have permission' });
+  try {
+    const { rating, comment } = req.body;
+    const review = await Review.findOne({ _id: req.params.reviewId, user: req.user._id, product: req.params.id });
+    if (!review) return res.status(404).json({ message: 'Review not found or you do not have permission' });
 
-    if (rating) review.rating = rating;
-    if (comment) review.comment = comment;
-    await review.save();
-    res.json(review);
-  } catch (err) {
-    res.status(500).json({ message: 'Error editing review' });
-  }
+    if (rating) review.rating = rating;
+    if (comment) review.comment = comment;
+    await review.save();
+    res.json(review);
+  } catch (err) {
+    res.status(500).json({ message: 'Error editing review' });
+  }
 });
 
 app.delete('/api/products/:id/reviews/:reviewId', protect, authorizeRole('admin'), async (req, res) => {
-  try {
-    const review = await Review.findOne({ _id: req.params.reviewId, user: req.user._id, product: req.params.id });
-    if (!review) return res.status(404).json({ message: 'Review not found or you do not have permission' });
+  try {
+    const review = await Review.findOne({ _id: req.params.reviewId, user: req.user._id, product: req.params.id });
+    if (!review) return res.status(404).json({ message: 'Review not found or you do not have permission' });
 
-    await review.deleteOne();
-    res.json({ message: 'Review deleted successfully' });
-  } catch (err) {
-    res.status(500).json({ message: 'Error deleting review' });
-  }
+    await review.deleteOne();
+    res.json({ message: 'Review deleted successfully' });
+  } catch (err) {
+    res.status(500).json({ message: 'Error deleting review' });
+  }
 });
 
 app.get('/api/addresses', protect, async (req, res) => {
-  try {
-    const addresses = await Address.find({ user: req.user._id }).sort({ isDefault: -1 });
-    res.json(addresses);
-  } catch (err) {
-    res.status(500).json({ message: 'Error fetching addresses' });
-  }
+  try {
+    const addresses = await Address.find({ user: req.user._id }).sort({ isDefault: -1 });
+    res.json(addresses);
+  } catch (err) {
+    res.status(500).json({ message: 'Error fetching addresses' });
+  }
 });
 
 app.post('/api/addresses', protect, async (req, res) => {
-  try {
-    const { name, street, village, landmark, city, state, pincode, phone, isDefault = false } = req.body;
-    const newAddress = await Address.create({
-      user: req.user._id,
-      name, street, village, landmark, city, state, pincode, phone, isDefault
-    });
-    res.status(201).json(newAddress);
-  } catch (err) {
-    res.status(500).json({ message: 'Error adding address' });
-  }
+  try {
+    const { name, street, village, landmark, city, state, pincode, phone, isDefault = false } = req.body;
+    const newAddress = await Address.create({
+      user: req.user._id,
+      name, street, village, landmark, city, state, pincode, phone, isDefault
+    });
+    res.status(201).json(newAddress);
+  } catch (err) {
+    res.status(500).json({ message: 'Error adding address' });
+  }
 });
 
 app.put('/api/addresses/:id', protect, async (req, res) => {
-  try {
-    const { name, street, village, landmark, city, state, pincode, phone, isDefault } = req.body;
-    const address = await Address.findOne({ _id: req.params.id, user: req.user._id });
-    if (!address) return res.status(404).json({ message: 'Address not found or you do not have permission' });
+  try {
+    const { name, street, village, landmark, city, state, pincode, phone, isDefault } = req.body;
+    const address = await Address.findOne({ _id: req.params.id, user: req.user._id });
+    if (!address) return res.status(404).json({ message: 'Address not found or you do not have permission' });
 
-    if (name) address.name = name;
-    if (street) address.street = street;
-    if (village) address.village = village;
-    if (landmark) address.landmark = landmark;
-    if (city) address.city = city;
-    if (state) address.state = state;
-    if (pincode) address.pincode = pincode;
-    if (phone) address.phone = phone;
-    if (typeof isDefault !== 'undefined') address.isDefault = isDefault;
+    if (name) address.name = name;
+    if (street) address.street = street;
+    if (village) address.village = village;
+    if (landmark) address.landmark = landmark;
+    if (city) address.city = city;
+    if (state) address.state = state;
+    if (pincode) address.pincode = pincode;
+    if (phone) address.phone = phone;
+    if (typeof isDefault !== 'undefined') address.isDefault = isDefault;
 
-    await address.save();
-    res.json(address);
-  } catch (err) {
-    res.status(500).json({ message: 'Error updating address' });
-  }
+    await address.save();
+    res.json(address);
+  } catch (err) {
+    res.status(500).json({ message: 'Error updating address' });
+  }
 });
 
 app.delete('/api/addresses/:id', protect, authorizeRole('admin'), async (req, res) => {
-  try {
-    const address = await Address.findOne({ _id: req.params.id, user: req.user._id });
-    if (!address) return res.status(404).json({ message: 'Address not found or you do not have permission' });
+  try {
+    const address = await Address.findOne({ _id: req.params.id, user: req.user._id });
+    if (!address) return res.status(404).json({ message: 'Address not found or you do not have permission' });
 
-    await address.deleteOne();
-    res.json({ message: 'Address deleted successfully' });
-  } catch (err) {
-    res.status(500).json({ message: 'Error deleting address' });
-  }
+    await address.deleteOne();
+    res.json({ message: 'Address deleted successfully' });
+  } catch (err) {
+    res.status(500).json({ message: 'Error deleting address' });
+  }
 });
 
 
 // --------- Seller Routes ----------
 app.get('/api/seller/categories-and-subcategories', protect, authorizeRole('seller', 'admin'), async (req, res) => {
-  try {
-    const getNestedSubcategories = async (parentId) => {
-      const children = await Subcategory.find({ parent: parentId }).sort({ name: 1 });
-      return await Promise.all(children.map(async (child) => ({
-        id: child._id,
-        name: child.name,
-        subcategories: await getNestedSubcategories(child._id),
-      })));
-    };
+  try {
+    const getNestedSubcategories = async (parentId) => {
+      const children = await Subcategory.find({ parent: parentId }).sort({ name: 1 });
+      return await Promise.all(children.map(async (child) => ({
+        id: child._id,
+        name: child.name,
+        subcategories: await getNestedSubcategories(child._id),
+      })));
+    };
 
-    const categories = await Category.find({}).sort({ sortOrder: 1, name: 1 });
+    const categories = await Category.find({}).sort({ sortOrder: 1, name: 1 });
 
-    const responseData = await Promise.all(categories.map(async (category) => {
-      const subcategories = await Subcategory.find({ category: category._id, isTopLevel: true }).sort({ name: 1 });
-      
-      const nestedSubcategories = await Promise.all(subcategories.map(async (sub) => ({
-        id: sub._id,
-        name: sub.name,
-        subcategories: await getNestedSubcategories(sub._id),
-      })));
-      
-      return {
-        id: category._id,
-        name: category.name,
-        subcategories: nestedSubcategories,
-      };
-    }));
+    const responseData = await Promise.all(categories.map(async (category) => {
+      const subcategories = await Subcategory.find({ category: category._id, isTopLevel: true }).sort({ name: 1 });
+      
+      const nestedSubcategories = await Promise.all(subcategories.map(async (sub) => ({
+        id: sub._id,
+        name: sub.name,
+        subcategories: await getNestedSubcategories(sub._id),
+      })));
+      
+      return {
+        id: category._id,
+        name: category.name,
+        subcategories: nestedSubcategories,
+      };
+    }));
 
-    res.json(responseData);
-  } catch (err) {
-    console.error("Error fetching categories and subcategories for seller:", err.message);
-    res.status(500).json({ message: 'Error fetching categories and subcategories', error: err.message });
-  }
+    res.json(responseData);
+  } catch (err) {
+    console.error("Error fetching categories and subcategories for seller:", err.message);
+    res.status(500).json({ message: 'Error fetching categories and subcategories', error: err.message });
+  }
 });
 
 app.get('/api/seller/products', protect, authorizeRole('seller', 'admin'), async (req, res) => {
-  try {
-    const products = await Product.find({ seller: req.user._id })
-      .populate('seller', 'name email phone pincodes')
-      .populate('subcategory', 'name image')
-      .populate('category', 'name slug type isActive image');
-    res.json(products);
-  } catch (error) {
-    console.error("Seller products error:", error.message);
-    res.status(500).json({ message: 'Error fetching seller products' });
-  }
+  try {
+    const products = await Product.find({ seller: req.user._id })
+      .populate('seller', 'name email phone pincodes')
+      .populate('subcategory', 'name image')
+      .populate('category', 'name slug type isActive image');
+    res.json(products);
+  } catch (error) {
+    console.error("Seller products error:", error.message);
+    res.status(500).json({ message: 'Error fetching seller products' });
+  }
 });
 
 app.get('/api/seller/financials', protect, authorizeRole('seller'), async (req, res) => {
-  try {
-    const sellerId = req.user._id;
+  try {
+    const sellerId = req.user._id;
 
-    const appSettings = await AppSettings.findOne({ singleton: true });
-    const PLATFORM_COMMISSION_RATE = appSettings ? appSettings.platformCommissionRate : 0.05;
+    const appSettings = await AppSettings.findOne({ singleton: true });
+    const PLATFORM_COMMISSION_RATE = appSettings ? appSettings.platformCommissionRate : 0.05;
 
-    const totalRevenueResult = await Order.aggregate([
-      { $match: { seller: sellerId, deliveryStatus: 'Delivered', paymentStatus: 'completed' } },
-      { $group: { _id: null, totalSales: { $sum: "$totalAmount" } } }
-    ]);
-    const totalRevenue = totalRevenueResult[0]?.totalSales || 0;
+    const totalRevenueResult = await Order.aggregate([
+      { $match: { seller: sellerId, deliveryStatus: 'Delivered', paymentStatus: 'completed' } },
+      { $group: { _id: null, totalSales: { $sum: "$totalAmount" } } }
+    ]);
+    const totalRevenue = totalRevenueResult[0]?.totalSales || 0;
 
-    const platformCommission = totalRevenue * PLATFORM_COMMISSION_RATE;
-    const netEarnings = totalRevenue - platformCommission;
+    const platformCommission = totalRevenue * PLATFORM_COMMISSION_RATE;
+    const netEarnings = totalRevenue - platformCommission;
 
-    const totalPayoutsResult = await Payout.aggregate([
-      { $match: { seller: sellerId, status: 'processed' } },
-      { $group: { _id: null, totalProcessed: { $sum: "$amount" } } }
-    ]);
-    const totalPayouts = totalPayoutsResult[0]?.totalProcessed || 0;
+    const totalPayoutsResult = await Payout.aggregate([
+      { $match: { seller: sellerId, status: 'processed' } },
+      { $group: { _id: null, totalProcessed: { $sum: "$amount" } } }
+    ]);
+    const totalPayouts = totalPayoutsResult[0]?.totalProcessed || 0;
 
-    const currentBalance = netEarnings - totalPayouts;
+    const currentBalance = netEarnings - totalPayouts;
 
-    const payouts = await Payout.find({ seller: sellerId }).sort({ createdAt: -1 });
+    const payouts = await Payout.find({ seller: sellerId }).sort({ createdAt: -1 });
 
-    res.json({
-      totalRevenue: totalRevenue,
-      netEarnings: netEarnings,
-      platformCommission: platformCommission,
-      totalPayouts: totalPayouts,
-      currentBalance: currentBalance,
-      payouts: payouts,
-      commissionRate: PLATFORM_COMMISSION_RATE
-    });
+    res.json({
+      totalRevenue: totalRevenue,
+      netEarnings: netEarnings,
+      platformCommission: platformCommission,
+      totalPayouts: totalPayouts,
+      currentBalance: currentBalance,
+      payouts: payouts,
+      commissionRate: PLATFORM_COMMISSION_RATE
+    });
 
-  } catch (err) {
-    console.error('Error fetching seller financials:', err.message);
-    res.status(500).json({ message: 'Error fetching financial data', error: err.message });
-  }
+  } catch (err) {
+    console.error('Error fetching seller financials:', err.message);
+    res.status(500).json({ message: 'Error fetching financial data', error: err.message });
+  }
 });
 
 
 app.post('/api/seller/products', protect, authorizeRole('seller', 'admin'), checkSellerApproved, productUpload, async (req, res) => {
-  try {
-    const {
-      productTitle, brand, category, subcategory, childCategory,
-      mrp, sellingPrice, costPrice, stockQuantity, unit, minOrderQty,
-      shortDescription, fullDescription, videoLink,
-      specifications, colors, sizes, storages,
-      shippingWeight, shippingLength, shippingWidth, shippingHeight, shippingType,
-      warranty, returnPolicy, tags,
-      serviceDurationMinutes
-    } = req.body;
+  try {
+    const {
+      productTitle, brand, category, subcategory, childCategory,
+      mrp, sellingPrice, costPrice, stockQuantity, unit, minOrderQty,
+      shortDescription, fullDescription, videoLink,
+      specifications, colors, sizes, storages,
+      shippingWeight, shippingLength, shippingWidth, shippingHeight, shippingType,
+      warranty, returnPolicy, tags,
+      serviceDurationMinutes
+    } = req.body;
 
-    if (!productTitle || !sellingPrice || !category || !stockQuantity) {
-      return res.status(400).json({ message: 'Product title, selling price, stock, and category are required.' });
-    }
+    if (!productTitle || !sellingPrice || !category || !stockQuantity) {
+      return res.status(400).json({ message: 'Product title, selling price, stock, and category are required.' });
+    }
 
-    const parentCategory = await Category.findById(category);
-    if (!parentCategory) {
-      return res.status(404).json({ message: 'Selected category not found.' });
-    }
+    const parentCategory = await Category.findById(category);
+    if (!parentCategory) {
+      return res.status(404).json({ message: 'Selected category not found.' });
+    }
 
-    if (parentCategory.type === 'service') {
-      if (!serviceDurationMinutes || parseInt(serviceDurationMinutes) <= 0) {
-        return res.status(400).json({ message: 'Services must have a valid "Service Duration (in minutes)".' });
-      }
-    } else if (parentCategory.type === 'product') {
-      if (!unit) {
-        return res.status(400).json({ message: 'Products must have a "Unit" (e.g., kg, pcs).' });
-      }
-    }
+    if (parentCategory.type === 'service') {
+      if (!serviceDurationMinutes || parseInt(serviceDurationMinutes) <= 0) {
+        return res.status(400).json({ message: 'Services must have a valid "Service Duration (in minutes)".' });
+      }
+    } else if (parentCategory.type === 'product') {
+      if (!unit) {
+        return res.status(400).json({ message: 'Products must have a "Unit" (e.g., kg, pcs).' });
+      }
+    }
 
-    const newSku = generateUniqueSku(category, productTitle);
+    const newSku = generateUniqueSku(category, productTitle);
 
-    const parsedSellingPrice = parseFloat(sellingPrice);
-    const parsedMrp = mrp ? parseFloat(mrp) : null;
-    if (parsedMrp && parsedMrp < parsedSellingPrice) {
-      return res.status(400).json({ message: 'MRP cannot be less than the selling price.' });
-    }
+    const parsedSellingPrice = parseFloat(sellingPrice);
+    const parsedMrp = mrp ? parseFloat(mrp) : null;
+    if (parsedMrp && parsedMrp < parsedSellingPrice) {
+      return res.status(400).json({ message: 'MRP cannot be less than the selling price.' });
+    }
 
-    if (!req.files.images || req.files.images.length === 0) {
-      return res.status(400).json({ message: 'At least one image is required.' });
-    }
-    const images = req.files.images.map(file => ({
-      url: file.path,
-      publicId: file.filename,
-    }));
+    if (!req.files.images || req.files.images.length === 0) {
+      return res.status(400).json({ message: 'At least one image is required.' });
+    }
+    const images = req.files.images.map(file => ({
+      url: file.path,
+      publicId: file.filename,
+    }));
 
-    let uploadedVideo = null;
-    if (req.files.video && req.files.video.length > 0) {
-      const videoFile = req.files.video[0];
-      uploadedVideo = {
-        url: videoFile.path,
-        publicId: videoFile.filename
-      };
-    }
+    let uploadedVideo = null;
+    if (req.files.video && req.files.video.length > 0) {
+      const videoFile = req.files.video[0];
+      uploadedVideo = {
+        url: videoFile.path,
+        publicId: videoFile.filename
+      };
+    }
 
-    const parsedSpecifications = specifications ? JSON.parse(specifications) : {};
-    const parsedTags = tags ? JSON.parse(tags) : [];
-    const parsedVariants = {
-      colors: colors ? JSON.parse(colors) : [],
-      sizes: sizes ? JSON.parse(sizes) : [],
-      storages: storages ? JSON.parse(storages) : [],
-    };
-    const parsedShippingDetails = {
-      weight: shippingWeight ? parseFloat(shippingWeight) : null,
-      dimensions: {
-        length: shippingLength ? parseFloat(shippingLength) : null,
-        width: shippingWidth ? parseFloat(shippingWidth) : null,
-      },
-      shippingType: shippingType || 'Free',
-    };
-    const parsedOtherInfo = {
-      warranty: warranty || null,
-      returnPolicy: returnPolicy || 'Non-Returnable',
-      tags: parsedTags,
-    };
+    const parsedSpecifications = specifications ? JSON.parse(specifications) : {};
+    const parsedTags = tags ? JSON.parse(tags) : [];
+    const parsedVariants = {
+      colors: colors ? JSON.parse(colors) : [],
+      sizes: sizes ? JSON.parse(sizes) : [],
+      storages: storages ? JSON.parse(storages) : [],
+    };
+    const parsedShippingDetails = {
+      weight: shippingWeight ? parseFloat(shippingWeight) : null,
+      dimensions: {
+        length: shippingLength ? parseFloat(shippingLength) : null,
+        width: shippingWidth ? parseFloat(shippingWidth) : null,
+      },
+      shippingType: shippingType || 'Free',
+    };
+    const parsedOtherInfo = {
+      warranty: warranty || null,
+      returnPolicy: returnPolicy || 'Non-Returnable',
+      tags: parsedTags,
+    };
 
-    const finalSubcategory = childCategory || subcategory;
+    const finalSubcategory = childCategory || subcategory;
 
-    const product = await Product.create({
-      name: productTitle,
-      sku: newSku,
-      brand,
-      category,
-      subcategory: finalSubcategory,
-      originalPrice: parsedMrp,
-      price: parsedSellingPrice,
-      costPrice: costPrice ? parseFloat(costPrice) : undefined,
-      stock: parseInt(stockQuantity),
-      unit: parentCategory.type === 'product' ? unit : undefined,
-      minOrderQty: minOrderQty ? parseInt(minOrderQty) : 1,
-      shortDescription,
-      fullDescription,
-      images,
-      videoLink,
-      uploadedVideo: uploadedVideo,
-      specifications: parsedSpecifications,
-      variants: parsedVariants,
-      shippingDetails: parsedShippingDetails,
-      otherInformation: parsedOtherInfo,
-      seller: req.user._id,
-      serviceDurationMinutes: parentCategory.type === 'service' ? parseInt(serviceDurationMinutes) : undefined,
-    });
+    const product = await Product.create({
+      name: productTitle,
+      sku: newSku,
+      brand,
+      category,
+      subcategory: finalSubcategory,
+      originalPrice: parsedMrp,
+      price: parsedSellingPrice,
+      costPrice: costPrice ? parseFloat(costPrice) : undefined,
+      stock: parseInt(stockQuantity),
+      unit: parentCategory.type === 'product' ? unit : undefined,
+      minOrderQty: minOrderQty ? parseInt(minOrderQty) : 1,
+      shortDescription,
+      fullDescription,
+      images,
+      videoLink,
+      uploadedVideo: uploadedVideo,
+      specifications: parsedSpecifications,
+      variants: parsedVariants,
+      shippingDetails: parsedShippingDetails,
+      otherInformation: parsedOtherInfo,
+      seller: req.user._id,
+      serviceDurationMinutes: parentCategory.type === 'service' ? parseInt(serviceDurationMinutes) : undefined,
+    });
 
-    res.status(201).json(product);
-  } catch (err) {
-    console.error('Create product error:', err.message);
-    if (err.name === 'ValidationError') {
-      return res.status(400).json({ message: 'Validation failed', error: err.message });
-    }
-    res.status(500).json({ message: 'Error creating product', error: err.message });
-  }
+    res.status(201).json(product);
+  } catch (err) {
+    console.error('Create product error:', err.message);
+    if (err.name === 'ValidationError') {
+      return res.status(400).json({ message: 'Validation failed', error: err.message });
+    }
+    res.status(500).json({ message: 'Error creating product', error: err.message });
+  }
 });
 
 app.post('/api/seller/products/bulk', protect, authorizeRole('seller', 'admin'), checkSellerApproved, upload.array('images', 100), async (req, res) => {
-  try {
-    const { products } = req.body;
-    if (!products) {
-      return res.status(400).json({ message: 'Products data is missing.' });
-    }
+  try {
+    const { products } = req.body;
+    if (!products) {
+      return res.status(400).json({ message: 'Products data is missing.' });
+    }
 
-    const productsData = JSON.parse(products);
+    const productsData = JSON.parse(products);
 
-    if (!Array.isArray(productsData) || productsData.length === 0) {
-      return res.status(400).json({ message: 'Products data must be a non-empty array.' });
-    }
+    if (!Array.isArray(productsData) || productsData.length === 0) {
+      return res.status(400).json({ message: 'Products data must be a non-empty array.' });
+    }
 
-    if (productsData.length > 10) {
-      return res.status(400).json({ message: 'You can upload a maximum of 10 products at a time.' });
-    }
+    if (productsData.length > 10) {
+      return res.status(400).json({ message: 'You can upload a maximum of 10 products at a time.' });
+    }
 
-    let fileIndex = 0;
-    const productsToCreate = [];
+    let fileIndex = 0;
+    const productsToCreate = [];
 
-    for (const productInfo of productsData) {
-      const { productTitle, sellingPrice, stockQuantity, unit, category, imageCount } = productInfo;
-      if (!productTitle || !sellingPrice || !stockQuantity || !unit || !category || imageCount === undefined) {
-        return res.status(400).json({ message: `Missing required fields for product "${productTitle || 'Unknown'}". Ensure all products have title, price, stock, unit, category, and imageCount.` });
-      }
+    for (const productInfo of productsData) {
+      const { productTitle, sellingPrice, stockQuantity, unit, category, imageCount } = productInfo;
+      if (!productTitle || !sellingPrice || !stockQuantity || !unit || !category || imageCount === undefined) {
+        return res.status(400).json({ message: `Missing required fields for product "${productTitle || 'Unknown'}". Ensure all products have title, price, stock, unit, category, and imageCount.` });
+      }
 
-      const productImages = req.files.slice(fileIndex, fileIndex + imageCount).map(file => ({
-        url: file.path,
-        publicId: file.filename
-      }));
+      const productImages = req.files.slice(fileIndex, fileIndex + imageCount).map(file => ({
+        url: file.path,
+        publicId: file.filename
+      }));
 
-      fileIndex += imageCount;
+      fileIndex += imageCount;
 
-      const newProduct = {
-        name: productTitle,
-        price: parseFloat(sellingPrice),
-        sku: generateUniqueSku(category, productTitle),
-        stock: parseInt(stockQuantity),
-        unit,
-        category,
-        seller: req.user._id,
-        images: productImages,
-        brand: productInfo.brand || 'Unbranded',
-        originalPrice: productInfo.mrp ? parseFloat(productInfo.mrp) : undefined,
-        shortDescription: productInfo.shortDescription || undefined,
-        otherInformation: {
-          warranty: productInfo.warranty || null,
-          returnPolicy: productInfo.returnPolicy || 'Non-Returnable',
-          tags: productInfo.tags || []
-        }
-      };
+      const newProduct = {
+        name: productTitle,
+        price: parseFloat(sellingPrice),
+        sku: generateUniqueSku(category, productTitle),
+        stock: parseInt(stockQuantity),
+        unit,
+        category,
+        seller: req.user._id,
+        images: productImages,
+        brand: productInfo.brand || 'Unbranded',
+        originalPrice: productInfo.mrp ? parseFloat(productInfo.mrp) : undefined,
+        shortDescription: productInfo.shortDescription || undefined,
+        otherInformation: {
+          warranty: productInfo.warranty || null,
+          returnPolicy: productInfo.returnPolicy || 'Non-Returnable',
+          tags: productInfo.tags || []
+        }
+      };
 
-      productsToCreate.push(newProduct);
-    }
+      productsToCreate.push(newProduct);
+    }
 
-    const createdProducts = await Product.insertMany(productsToCreate);
+    const createdProducts = await Product.insertMany(productsToCreate);
 
-    res.status(201).json({ message: `${createdProducts.length} products uploaded successfully.`, products: createdProducts });
+    res.status(201).json({ message: `${createdProducts.length} products uploaded successfully.`, products: createdProducts });
 
-  } catch (err) {
-    console.error('Bulk create product error:', err.message);
-    if (req.files) {
-      req.files.forEach(file => {
-        cloudinary.uploader.destroy(file.filename);
-      });
-    }
-    if (err.name === 'ValidationError') {
-      return res.status(400).json({ message: 'Validation failed (perhaps an invalid returnPolicy value was used?).', error: err.message });
-    }
-    res.status(500).json({ message: 'Error creating products in bulk', error: err.message });
-  }
+  } catch (err) {
+    console.error('Bulk create product error:', err.message);
+    if (req.files) {
+      req.files.forEach(file => {
+        cloudinary.uploader.destroy(file.filename);
+      });
+    }
+    if (err.name === 'ValidationError') {
+      return res.status(400).json({ message: 'Validation failed (perhaps an invalid returnPolicy value was used?).', error: err.message });
+    }
+    res.status(500).json({ message: 'Error creating products in bulk', error: err.message });
+  }
 });
 
 app.put('/api/seller/products/:id', protect, authorizeRole('seller', 'admin'), checkSellerApproved, productUpload, async (req, res) => {
-  try {
-    const { name, description, brand, originalPrice, price, stock, category, subcategory, childSubcategory, specifications, imagesToDelete, unit, serviceDurationMinutes, returnPolicy, costPrice, isTrending } = req.body;
-    const product = await Product.findById(req.params.id);
-    if (!product) return res.status(404).json({ message: 'Product not found' });
+  try {
+    const { name, description, brand, originalPrice, price, stock, category, subcategory, childSubcategory, specifications, imagesToDelete, unit, serviceDurationMinutes, returnPolicy, costPrice, isTrending } = req.body;
+    const product = await Product.findById(req.params.id);
+    if (!product) return res.status(404).json({ message: 'Product not found' });
 
-    if (req.user.role === 'seller' && product.seller.toString() !== req.user._id.toString()) {
-      return res.status(403).json({ message: 'Access denied: You do not own this product' });
-    }
+    if (req.user.role === 'seller' && product.seller.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'Access denied: You do not own this product' });
+    }
 
-    const parsedPrice = price ? parseFloat(price) : product.price;
-    const parsedOriginalPrice = originalPrice ? parseFloat(originalPrice) : product.originalPrice;
-    if (parsedOriginalPrice && parsedOriginalPrice < parsedPrice) {
-      return res.status(400).json({ message: 'Original price cannot be less than the discounted price.' });
-    }
+    const parsedPrice = price ? parseFloat(price) : product.price;
+    const parsedOriginalPrice = originalPrice ? parseFloat(originalPrice) : product.originalPrice;
+    if (parsedOriginalPrice && parsedOriginalPrice < parsedPrice) {
+      return res.status(400).json({ message: 'Original price cannot be less than the discounted price.' });
+    }
 
-    if (imagesToDelete) {
-      const idsToDelete = Array.isArray(imagesToDelete) ? idsToDelete : [imagesToDelete];
-      await Promise.all(idsToDelete.map(publicId => cloudinary.uploader.destroy(publicId)));
-      product.images = product.images.filter(img => !idsToDelete.includes(img.publicId));
-    }
+    if (imagesToDelete) {
+      const idsToDelete = Array.isArray(imagesToDelete) ? idsToDelete : [imagesToDelete];
+      await Promise.all(idsToDelete.map(publicId => cloudinary.uploader.destroy(publicId)));
+      product.images = product.images.filter(img => !idsToDelete.includes(img.publicId));
+    }
 
-    if (req.files.images && req.files.images.length > 0) {
-      const newImages = req.files.images.map(file => ({ url: file.path, publicId: file.filename }));
-      product.images.push(...newImages);
-    }
+    if (req.files.images && req.files.images.length > 0) {
+      const newImages = req.files.images.map(file => ({ url: file.path, publicId: file.filename }));
+      product.images.push(...newImages);
+    }
 
-    if (req.files.video && req.files.video.length > 0) {
-      const newVideoFile = req.files.video[0];
-      if (product.uploadedVideo && product.uploadedVideo.publicId) {
-        await cloudinary.uploader.destroy(product.uploadedVideo.publicId, { resource_type: 'video' });
-      }
-      product.uploadedVideo = {
-        url: newVideoFile.path,
-        publicId: newVideoFile.filename
-      };
-    }
+    if (req.files.video && req.files.video.length > 0) {
+      const newVideoFile = req.files.video[0];
+      if (product.uploadedVideo && product.uploadedVideo.publicId) {
+        await cloudinary.uploader.destroy(product.uploadedVideo.publicId, { resource_type: 'video' });
+      }
+      product.uploadedVideo = {
+        url: newVideoFile.path,
+        publicId: newVideoFile.filename
+      };
+    }
 
-    if (name) product.name = name;
-    if (description) product.description = description;
-    if (brand) product.brand = brand;
-    if (originalPrice) product.originalPrice = parsedOriginalPrice;
-    if (price) product.price = parsedPrice;
-    if (costPrice) product.costPrice = parseFloat(costPrice);
-    if (stock) product.stock = stock;
-    if (unit) product.unit = unit;
-    if (category) product.category = category;
-    if (returnPolicy) product.otherInformation.returnPolicy = returnPolicy;
-    if (serviceDurationMinutes) product.serviceDurationMinutes = parseInt(serviceDurationMinutes);
-    if (typeof isTrending !== 'undefined') product.isTrending = isTrending;
+    if (name) product.name = name;
+    if (description) product.description = description;
+    if (brand) product.brand = brand;
+    if (originalPrice) product.originalPrice = parsedOriginalPrice;
+    if (price) product.price = parsedPrice;
+    if (costPrice) product.costPrice = parseFloat(costPrice);
+    if (stock) product.stock = stock;
+    if (unit) product.unit = unit;
+    if (category) product.category = category;
+    if (returnPolicy) product.otherInformation.returnPolicy = returnPolicy;
+    if (serviceDurationMinutes) product.serviceDurationMinutes = parseInt(serviceDurationMinutes);
+    if (typeof isTrending !== 'undefined') product.isTrending = isTrending;
 
-    const finalSubcategory = childSubcategory || subcategory;
-    if (finalSubcategory) product.subcategory = finalSubcategory;
-    if (specifications) product.specifications = JSON.parse(specifications);
+    const finalSubcategory = childSubcategory || subcategory;
+    if (finalSubcategory) product.subcategory = finalSubcategory;
+    if (specifications) product.specifications = JSON.parse(specifications);
 
-    await product.save();
-    res.json(product);
-  } catch (err) {
-    console.error('Update product error:', err.message);
-    res.status(500).json({ message: 'Error updating product', error: err.message });
-  }
+    await product.save();
+    res.json(product);
+  } catch (err) {
+    console.error('Update product error:', err.message);
+    res.status(500).json({ message: 'Error updating product', error: err.message });
+  }
 });
 
 app.delete('/api/seller/products/:id', protect, authorizeRole('seller', 'admin'), async (req, res) => {
-  try {
-    const product = await Product.findById(req.params.id);
-    if (!product) return res.status(404).json({ message: 'Product not found' });
+  try {
+    const product = await Product.findById(req.params.id);
+    if (!product) return res.status(404).json({ message: 'Product not found' });
 
-    if (req.user.role === 'seller' && product.seller.toString() !== req.user._id.toString()) {
-      return res.status(403).json({ message: 'Access denied: You do not own this product' });
-    }
+    if (req.user.role === 'seller' && product.seller.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'Access denied: You do not own this product' });
+    }
 
-    await Promise.all(product.images.map(img => cloudinary.uploader.destroy(img.publicId)));
-    if (product.uploadedVideo && product.uploadedVideo.publicId) {
-      await cloudinary.uploader.destroy(product.uploadedVideo.publicId, { resource_type: 'video' });
-    }
+    await Promise.all(product.images.map(img => cloudinary.uploader.destroy(img.publicId)));
+    if (product.uploadedVideo && product.uploadedVideo.publicId) {
+      await cloudinary.uploader.destroy(product.uploadedVideo.publicId, { resource_type: 'video' });
+    }
 
-    await product.deleteOne();
-    res.json({ message: 'Product deleted successfully' });
-  } catch (err) {
-    console.error('Delete product error:', err.message);
-    res.status(500).json({ message: 'Error deleting product' });
-  }
+    await product.deleteOne();
+    res.json({ message: 'Product deleted successfully' });
+  } catch (err) {
+    console.error('Delete product error:', err.message);
+    res.status(500).json({ message: 'Error deleting product' });
+  }
 });
 
-// --- [CORRECTED SECTION - BUG FIX 3] ---
 app.get('/api/seller/orders/:id/shipping-label', protect, authorizeRole('seller'), async (req, res) => {
-  try {
-    const order = await Order.findById(req.params.id).populate('user', 'name phone');
-    if (!order) {
-      return res.status(404).json({ message: 'Order not found' });
-    }
+  try {
+    const order = await Order.findById(req.params.id).populate('user', 'name phone');
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found' });
+    }
 
-    if (order.seller.toString() !== req.user._id.toString()) {
-      return res.status(403).json({ message: 'Access denied to this order' });
-    }
+    if (order.seller.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'Access denied to this order' });
+    }
 
-    const sellerAddress = req.user.pickupAddress;
-    if (!sellerAddress || !sellerAddress.isSet || !sellerAddress.pincode) {
-      return res.status(400).json({ message: 'Seller pickup address is not set in your profile. Please update it first.' });
-    }
+    const sellerAddress = req.user.pickupAddress;
+    if (!sellerAddress || !sellerAddress.isSet || !sellerAddress.pincode) {
+      return res.status(400).json({ message: 'Seller pickup address is not set in your profile. Please update it first.' });
+    }
 
-    const customerAddressString = order.shippingAddress;
-    const customerName = order.user.name;
-    const customerPhone = order.user.phone;
-    const orderId = order._id.toString();
+    const customerAddressString = order.shippingAddress;
+    const customerName = order.user.name;
+    const customerPhone = order.user.phone;
+    const orderId = order._id.toString();
 
-    const barcodePng = await bwipjs.toBuffer({
-      bcid: 'code128',
-      text: orderId,
-      scale: 3,
-      height: 12,
-      includetext: true,
-      textxalign: 'center',
-    });
+    const barcodePng = await bwipjs.toBuffer({
+      bcid: 'code128',
+      text: orderId,
+      scale: 3,
+      height: 12,
+      includetext: true,
+      textxalign: 'center',
+    });
 
-    // Grand Total calculation for label
-    const finalAmount = (order.totalAmount + order.shippingFee + order.taxAmount) - order.discountAmount;
+    const finalAmount = (order.totalAmount + order.shippingFee + order.taxAmount) - order.discountAmount;
 
-    const doc = new PDFDocument({
-      size: [288, 432],
-      margins: { top: 20, bottom: 20, left: 20, right: 20 }
-    });
+    const doc = new PDFDocument({
+      size: [288, 432],
+      margins: { top: 20, bottom: 20, left: 20, right: 20 }
+    });
 
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="label-${orderId}.pdf"`);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="label-${orderId}.pdf"`);
 
-    doc.pipe(res);
+    doc.pipe(res);
 
-    doc.fontSize(14).font('Helvetica-Bold').text(`Order: #${orderId.slice(-8)}`, { align: 'center' });
-    doc.fontSize(10).font('Helvetica').text(`Payment: ${order.paymentMethod.toUpperCase()}`, { align: 'center' });
+    doc.fontSize(14).font('Helvetica-Bold').text(`Order: #${orderId.slice(-8)}`, { align: 'center' });
+    doc.fontSize(10).font('Helvetica').text(`Payment: ${order.paymentMethod.toUpperCase()}`, { align: 'center' });
 
-    if (order.paymentMethod === 'cod' || order.paymentMethod === 'razorpay_cod') {
-      doc.fontSize(12).font('Helvetica-Bold').text(`Amount Due: ₹${finalAmount.toFixed(2)}`, { align: 'center' });
-    }
-    doc.moveDown(1);
+    if (order.paymentMethod === 'cod' || order.paymentMethod === 'razorpay_cod') {
+      doc.fontSize(12).font('Helvetica-Bold').text(`Amount Due: ₹${finalAmount.toFixed(2)}`, { align: 'center' });
+    }
+    doc.moveDown(1);
 
-    doc.fontSize(10).font('Helvetica-Bold').text('SHIP FROM:');
-    doc.fontSize(10).font('Helvetica').text(req.user.name);
-    doc.text(sellerAddress.street);
-    if (sellerAddress.landmark) doc.text(`Landmark: ${sellerAddress.landmark}`);
-    if (sellerAddress.village) doc.text(`Village: ${sellerAddress.village}`);
-    doc.text(`${sellerAddress.city}, ${sellerAddress.state} - ${sellerAddress.pincode}`);
-    doc.text(`Phone: ${req.user.phone}`);
+    doc.fontSize(10).font('Helvetica-Bold').text('SHIP FROM:');
+    doc.fontSize(10).font('Helvetica').text(req.user.name);
+    doc.text(sellerAddress.street);
+    if (sellerAddress.landmark) doc.text(`Landmark: ${sellerAddress.landmark}`);
+    if (sellerAddress.village) doc.text(`Village: ${sellerAddress.village}`);
+    doc.text(`${sellerAddress.city}, ${sellerAddress.state} - ${sellerAddress.pincode}`);
+    doc.text(`Phone: ${req.user.phone}`);
 
-    doc.moveDown(2);
+    doc.moveDown(2);
 
-    doc.rect(15, 170, 258, 120).stroke();
-    doc.fontSize(12).font('Helvetica-Bold').text('SHIP TO:', 20, 175);
-    doc.fontSize(14).font('Helvetica-Bold').text(customerName, 20, 195);
-    doc.fontSize(12).font('Helvetica').text(`Phone: ${customerPhone}`, 20, 215);
-    doc.text(customerAddressString, 20, 235, { width: 248 });
+    doc.rect(15, 170, 258, 120).stroke();
+    doc.fontSize(12).font('Helvetica-Bold').text('SHIP TO:', 20, 175);
+    doc.fontSize(14).font('Helvetica-Bold').text(customerName, 20, 195);
+    doc.fontSize(12).font('Helvetica').text(`Phone: ${customerPhone}`, 20, 215);
+    doc.text(customerAddressString, 20, 235, { width: 248 });
 
-    doc.moveDown(6);
+    doc.moveDown(6);
 
-    doc.image(barcodePng, {
-      fit: [250, 70],
-      align: 'center',
-      valign: 'bottom'
-    });
+    doc.image(barcodePng, {
+      fit: [250, 70],
+      align: 'center',
+      valign: 'bottom'
+    });
 
-    doc.end();
+    doc.end();
 
-  } catch (err) {
-    console.error('Failed to generate shipping label:', err.message);
-    if (!res.headersSent) {
-      res.status(500).json({ message: 'Error generating PDF label', error: err.message });
-    }
-  }
+  } catch (err) {
+    console.error('Failed to generate shipping label:', err.message);
+    if (!res.headersSent) {
+      res.status(500).json({ message: 'Error generating PDF label', error: err.message });
+    }
+  }
 });
-// --- [END CORRECTED SECTION - BUG FIX 3] ---
 
-
-// --- [NEW CODE SECTION START] (Delivery Boy Module) ---
-// ----------------------------------------------------
-// --------- Delivery Boy Routes ----------------------
-// ----------------------------------------------------
-
-// Get all available orders (unassigned) in the delivery boy's serviceable pincodes
 app.get('/api/delivery/available-orders', protect, authorizeRole('delivery'), async (req, res) => {
-  try {
-    const myPincodes = req.user.pincodes;
-    if (!myPincodes || myPincodes.length === 0) {
-      return res.json([]); // Return empty if no pincodes are set
-    }
+  try {
+    const myPincodes = req.user.pincodes;
+    if (!myPincodes || myPincodes.length === 0) {
+      return res.json([]);
+    }
 
-    const availableJobs = await DeliveryAssignment.find({
-      deliveryBoy: null, // Unassigned
-      status: 'Pending',
-      pincode: { $in: myPincodes } // In their service area
-    })
-    .populate({
-      path: 'order',
-      select: 'orderItems shippingAddress totalAmount paymentMethod seller user shippingFee discountAmount taxAmount',
-      populate: [
-        { path: 'seller', select: 'name pickupAddress' }, // Get seller's pickup location
-        { path: 'user', select: 'name' } // Get customer's name
-      ]
-    })
-    .sort({ createdAt: 1 }); // Oldest jobs first
+    const availableJobs = await DeliveryAssignment.find({
+      deliveryBoy: null,
+      status: 'Pending',
+      pincode: { $in: myPincodes }
+    })
+    .populate({
+      path: 'order',
+      select: 'orderItems shippingAddress totalAmount paymentMethod seller user shippingFee discountAmount taxAmount',
+      populate: [
+        { path: 'seller', select: 'name pickupAddress' },
+        { path: 'user', select: 'name' }
+      ]
+    })
+    .sort({ createdAt: 1 });
 
-    res.json(availableJobs);
-  } catch (err) {
-    console.error('Error fetching available orders:', err.message);
-    res.status(500).json({ message: 'Error fetching available orders', error: err.message });
-  }
+    res.json(availableJobs);
+  } catch (err) {
+    console.error('Error fetching available orders:', err.message);
+    res.status(500).json({ message: 'Error fetching available orders', error: err.message });
+  }
 });
 
-// Get all orders currently assigned to the logged-in delivery boy
 app.get('/api/delivery/my-orders', protect, authorizeRole('delivery'), async (req, res) => {
-  try {
-    const myJobs = await DeliveryAssignment.find({
-      deliveryBoy: req.user._id,
-      status: { $in: ['Accepted', 'PickedUp'] } // Active jobs
-    })
-    .populate({
-      path: 'order',
-      select: 'orderItems shippingAddress totalAmount paymentMethod seller user shippingFee discountAmount taxAmount',
-      populate: [
-        { path: 'seller', select: 'name pickupAddress' },
-        { path: 'user', select: 'name phone' } // Get customer name and phone
-      ]
-    })
-    .sort({ updatedAt: -1 });
+  try {
+    const myJobs = await DeliveryAssignment.find({
+      deliveryBoy: req.user._id,
+      status: { $in: ['Accepted', 'PickedUp'] }
+    })
+    .populate({
+      path: 'order',
+      select: 'orderItems shippingAddress totalAmount paymentMethod seller user shippingFee discountAmount taxAmount',
+      populate: [
+        { path: 'seller', select: 'name pickupAddress' },
+        { path: 'user', select: 'name phone' }
+      ]
+    })
+    .sort({ updatedAt: -1 });
 
-    res.json(myJobs);
-  } catch (err) {
-    res.status(500).json({ message: 'Error fetching my orders', error: err.message });
-  }
+    res.json(myJobs);
+  } catch (err) {
+    res.status(500).json({ message: 'Error fetching my orders', error: err.message });
+  }
 });
 
-// Accept an available order
 app.put('/api/delivery/assignments/:id/accept', protect, authorizeRole('delivery'), async (req, res) => {
-  try {
-    const assignmentId = req.params.id;
+  try {
+    const assignmentId = req.params.id;
 
-    // Atomically find an unassigned job and assign it to this user
-    const assignment = await DeliveryAssignment.findOneAndUpdate(
-      {
-        _id: assignmentId,
-        status: 'Pending',
-        deliveryBoy: null // Ensure it's not already taken
-      },
-      {
-        $set: {
-          deliveryBoy: req.user._id,
-          status: 'Accepted'
-        },
-        $push: { history: { status: 'Accepted' } }
-      },
-      { new: true } // Return the updated document
-    ).populate({
-        path: 'order',
-        select: 'seller user',
-        populate: [
-          { path: 'seller', select: 'name phone fcmToken' },
-          { path: 'user', select: 'name phone fcmToken' }
-        ]
-    });
+    const assignment = await DeliveryAssignment.findOneAndUpdate(
+      {
+        _id: assignmentId,
+        status: 'Pending',
+        deliveryBoy: null
+      },
+      {
+        $set: {
+          deliveryBoy: req.user._id,
+          status: 'Accepted'
+        },
+        $push: { history: { status: 'Accepted' } }
+      },
+      { new: true }
+    ).populate({
+        path: 'order',
+        select: 'seller user',
+        populate: [
+          { path: 'seller', select: 'name phone fcmToken' },
+          { path: 'user', select: 'name phone fcmToken' }
+        ]
+    });
 
-    if (!assignment) {
-      // If null, it means another delivery boy accepted it first
-      return res.status(409).json({ message: 'This order has just been accepted by someone else.' });
-    }
+    if (!assignment) {
+      return res.status(409).json({ message: 'This order has just been accepted by someone else.' });
+    }
 
-    const orderIdShort = assignment.order._id.toString().slice(-6);
+    const orderIdShort = assignment.order._id.toString().slice(-6);
 
-    // Notify Seller
-    const seller = assignment.order.seller;
-    if (seller) {
-      await sendWhatsApp(seller.phone, `Order Update: Delivery boy ${req.user.name} is on the way to pick up order #${orderIdShort}.`);
-      await sendPushNotification(
-        seller.fcmToken,
-        'Delivery Boy Assigned',
-        `${req.user.name} is picking up order #${orderIdShort}.`,
-        { orderId: assignment.order._id.toString(), type: 'DELIVERY_ASSIGNED' }
-      );
-    }
-    
-    // Notify Customer
-    const customer = assignment.order.user;
-    if (customer) {
-        await sendWhatsApp(customer.phone, `Your order #${orderIdShort} is being prepared! Delivery partner ${req.user.name} will pick it up soon.`);
-        await sendPushNotification(
-          customer.fcmToken,
-          'Order Update!',
-          `Delivery partner ${req.user.name} has accepted your order #${orderIdShort}.`,
-          { orderId: assignment.order._id.toString(), type: 'ORDER_STATUS' }
-        );
-    }
+    const seller = assignment.order.seller;
+    if (seller) {
+      await sendWhatsApp(seller.phone, `Order Update: Delivery boy ${req.user.name} is on the way to pick up order #${orderIdShort}.`);
+      await sendPushNotification(
+        seller.fcmToken,
+        'Delivery Boy Assigned',
+        `${req.user.name} is picking up order #${orderIdShort}.`,
+        { orderId: assignment.order._id.toString(), type: 'DELIVERY_ASSIGNED' }
+      );
+    }
+    
+    const customer = assignment.order.user;
+    if (customer) {
+        await sendWhatsApp(customer.phone, `Your order #${orderIdShort} is being prepared! Delivery partner ${req.user.name} will pick it up soon.`);
+        await sendPushNotification(
+          customer.fcmToken,
+          'Order Update!',
+          `Delivery partner ${req.user.name} has accepted your order #${orderIdShort}.`,
+          { orderId: assignment.order._id.toString(), type: 'ORDER_STATUS' }
+        );
+    }
 
-    res.json({ message: 'Order accepted successfully!', assignment });
+    res.json({ message: 'Order accepted successfully!', assignment });
 
-  } catch (err) {
-    console.error('Error accepting order:', err.message);
-    res.status(500).json({ message: 'Error accepting order', error: err.message });
-  }
+  } catch (err) {
+    console.error('Error accepting order:', err.message);
+    res.status(500).json({ message: 'Error accepting order', error: err.message });
+  }
 });
 
-// Update the status of an assigned order (PickedUp, Delivered)
 app.put('/api/delivery/assignments/:id/status', protect, authorizeRole('delivery'), async (req, res) => {
-  try {
-    const { status } = req.body; // Expected: 'PickedUp' or 'Delivered'
-    const assignmentId = req.params.id;
+  try {
+    const { status } = req.body;
+    const assignmentId = req.params.id;
 
-    if (!['PickedUp', 'Delivered', 'Cancelled'].includes(status)) {
-        return res.status(400).json({ message: 'Invalid status. Must be PickedUp, Delivered, or Cancelled.' });
-    }
+    if (!['PickedUp', 'Delivered', 'Cancelled'].includes(status)) {
+        return res.status(400).json({ message: 'Invalid status. Must be PickedUp, Delivered, or Cancelled.' });
+    }
 
-    const assignment = await DeliveryAssignment.findOne({
-      _id: assignmentId,
-      deliveryBoy: req.user._id
-    });
+    const assignment = await DeliveryAssignment.findOne({
+      _id: assignmentId,
+      deliveryBoy: req.user._id
+    });
 
-    if (!assignment) {
-      return res.status(404).json({ message: 'Delivery assignment not found or you are not authorized.' });
-    }
+    if (!assignment) {
+      return res.status(404).json({ message: 'Delivery assignment not found or you are not authorized.' });
+    }
 
-    // --- State Transition Logic ---
-    let newOrderStatus = '';
-    let newAssignmentStatus = '';
-    let notificationTitle = '';
-    let notificationBody = '';
+    let newOrderStatus = '';
+    let newAssignmentStatus = '';
+    let notificationTitle = '';
+    let notificationBody = '';
 
-    if (status === 'PickedUp' && assignment.status === 'Accepted') {
-      newAssignmentStatus = 'PickedUp';
-      newOrderStatus = 'Shipped'; // 'Shipped' means it's on its way
-      notificationTitle = 'Order Picked Up!';
-      notificationBody = `Your order (#${assignment.order.toString().slice(-6)}) is on its way!`;
+    if (status === 'PickedUp' && assignment.status === 'Accepted') {
+      newAssignmentStatus = 'PickedUp';
+      newOrderStatus = 'Shipped';
+      notificationTitle = 'Order Picked Up!';
+      notificationBody = `Your order (#${assignment.order.toString().slice(-6)}) is on its way!`;
 
-    } else if (status === 'Delivered' && assignment.status === 'PickedUp') {
-      newAssignmentStatus = 'Delivered';
-      newOrderStatus = 'Delivered';
-      notificationTitle = 'Order Delivered! 🎉';
-      notificationBody = `Your order (#${assignment.order.toString().slice(-6)}) has been successfully delivered. Thank you!`;
+    } else if (status === 'Delivered' && assignment.status === 'PickedUp') {
+      newAssignmentStatus = 'Delivered';
+      newOrderStatus = 'Delivered';
+      notificationTitle = 'Order Delivered! 🎉';
+      notificationBody = `Your order (#${assignment.order.toString().slice(-6)}) has been successfully delivered. Thank you!`;
 
-    } else if (status === 'Cancelled') {
-        // Allow cancellation if not yet delivered
-        newAssignmentStatus = 'Cancelled';
-        newOrderStatus = 'Cancelled'; // This will cancel the main order too
-        notificationTitle = 'Order Cancelled';
-        notificationBody = `We're sorry, but your order (#${assignment.order.toString().slice(-6)}) has been cancelled.`;
+    } else if (status === 'Cancelled') {
+        newAssignmentStatus = 'Cancelled';
+        newOrderStatus = 'Cancelled';
+        notificationTitle = 'Order Cancelled';
+        notificationBody = `We're sorry, but your order (#${assignment.order.toString().slice(-6)}) has been cancelled.`;
 
-    } else {
-      return res.status(400).json({ message: `Invalid status transition from ${assignment.status} to ${status}.` });
-    }
+    } else {
+      return res.status(400).json({ message: `Invalid status transition from ${assignment.status} to ${status}.` });
+    }
 
-    // Update both the Assignment and the main Order
-    assignment.status = newAssignmentStatus;
-    assignment.history.push({ status: newAssignmentStatus });
-    await assignment.save();
+    
+    assignment.status = newAssignmentStatus;
+    assignment.history.push({ status: newAssignmentStatus });
+    await assignment.save();
 
-    const order = await Order.findById(assignment.order);
-    if (!order) {
-        return res.status(404).json({ message: 'Associated order not found.' });
-    }
+    const order = await Order.findById(assignment.order);
+    if (!order) {
+        return res.status(404).json({ message: 'Associated order not found.' });
+    }
 
-    order.deliveryStatus = newOrderStatus;
-    order.history.push({ status: newOrderStatus, note: `Updated by Delivery Boy ${req.user.name}` });
+    order.deliveryStatus = newOrderStatus;
+    order.history.push({ status: newOrderStatus, note: `Updated by Delivery Boy ${req.user.name}` });
 
-    // If delivered, update payment status for COD or in-person payment
-    if (newOrderStatus === 'Delivered' && (order.paymentMethod === 'cod' || order.paymentMethod === 'razorpay_cod') && order.paymentStatus === 'pending') {
-      order.paymentStatus = 'completed';
-    }
+    if (newOrderStatus === 'Delivered' && (order.paymentMethod === 'cod' || order.paymentMethod === 'razorpay_cod') && order.paymentStatus === 'pending') {
+      order.paymentStatus = 'completed';
+    }
 
-    // If cancelled, restock items
-    if (newOrderStatus === 'Cancelled') {
-        // Only restock if the order was confirmed/paid (not if it failed payment initially)
-        if (order.paymentStatus !== 'failed' && order.deliveryStatus !== 'Payment Pending') {
-             for(const item of order.orderItems) {
-                await Product.findByIdAndUpdate(item.product, { $inc: { stock: item.qty } });
-            }
-        }
-        
-        // If it was a prepaid order, it needs a refund.
-        if (order.paymentMethod === 'razorpay' && order.paymentStatus === 'completed') {
-            await notifyAdmin(`Admin Alert: Order #${order._id} was CANCELLED by delivery boy after pickup. Please check for a manual refund.`);
-        }
-    }
+    if (newOrderStatus === 'Cancelled') {
+        if (order.paymentStatus !== 'failed' && order.deliveryStatus !== 'Payment Pending') {
+             for(const item of order.orderItems) {
+                await Product.findByIdAndUpdate(item.product, { $inc: { stock: item.qty } });
+            }
+        }
+        
+        if (order.paymentMethod === 'razorpay' && order.paymentStatus === 'completed') {
+            await notifyAdmin(`Admin Alert: Order #${order._id} was CANCELLED by delivery boy after pickup. Please check for a manual refund.`);
+        }
+    }
 
-    await order.save();
+    await order.save();
 
-    // Notify Customer
-    const customer = await User.findById(order.user).select('phone fcmToken');
-    if (customer) {
-        const orderIdShort = order._id.toString().slice(-6);
-        await sendWhatsApp(customer.phone, `${notificationTitle}\n${notificationBody}`);
-        await sendPushNotification(
-            customer.fcmToken,
-            notificationTitle,
-            notificationBody,
-            { orderId: order._id.toString(), type: 'ORDER_STATUS' }
-        );
-    }
-    
-    res.json({ message: `Order status updated to ${newAssignmentStatus}`, assignment });
+    const customer = await User.findById(order.user).select('phone fcmToken');
+    if (customer) {
+        const orderIdShort = order._id.toString().slice(-6);
+        await sendWhatsApp(customer.phone, `${notificationTitle}\n${notificationBody}`);
+        await sendPushNotification(
+            customer.fcmToken,
+            notificationTitle,
+            notificationBody,
+            { orderId: order._id.toString(), type: 'ORDER_STATUS' }
+        );
+    }
+    
+    res.json({ message: `Order status updated to ${newAssignmentStatus}`, assignment });
 
-  } catch (err) {
-    console.error('Error updating order status:', err.message);
-    res.status(500).json({ message: 'Error updating order status', error: err.message });
-  }
+  } catch (err) {
+    console.error('Error updating order status:', err.message);
+    res.status(500).json({ message: 'Error updating order status', error: err.message });
+  }
 });
 
-// Get all delivered orders (history) for a specific time range for the logged-in delivery boy
-// --- [NEW ROUTE START] ---
 app.get('/api/delivery/my-history', protect, authorizeRole('delivery'), async (req, res) => {
-  try {
-    const { startDate, endDate } = req.query;
-    if (!startDate || !endDate) {
-      return res.status(400).json({ message: 'startDate and endDate query parameters are required.' });
-    }
+  try {
+    const { startDate, endDate } = req.query;
+    if (!startDate || !endDate) {
+      return res.status(400).json({ message: 'startDate and endDate query parameters are required.' });
+    }
 
-    const start = new Date(startDate);
-    const end = new Date(endDate);
+    const start = new Date(startDate);
+    const end = new Date(endDate);
 
-    const historyJobs = await DeliveryAssignment.find({
-      deliveryBoy: req.user._id,
-      status: 'Delivered',
-      updatedAt: {
-        $gte: start,
-        $lte: end
-      }
-    })
-    .populate({
-      path: 'order',
-      select: 'orderItems totalAmount paymentMethod paymentStatus shippingFee discountAmount taxAmount',
-    })
-    .sort({ updatedAt: -1 });
+    const historyJobs = await DeliveryAssignment.find({
+      deliveryBoy: req.user._id,
+      status: 'Delivered',
+      updatedAt: {
+        $gte: start,
+        $lte: end
+      }
+    })
+    .populate({
+      path: 'order',
+      select: 'orderItems totalAmount paymentMethod paymentStatus shippingFee discountAmount taxAmount',
+    })
+    .sort({ updatedAt: -1 });
 
-    res.json(historyJobs);
-  } catch (err) {
-    res.status(500).json({ message: 'Error fetching delivery history', error: err.message });
-  }
+    res.json(historyJobs);
+  } catch (err) {
+    res.status(500).json({ message: 'Error fetching delivery history', error: err.message });
+  }
 });
-// --- [NEW ROUTE END] ---
 
-
-// --- [NEW ROUTES START] (QR Code Payment for Delivery) ---
-
-/**
- * @route   POST /api/delivery/orders/:id/generate-payment-link
- * @desc    Generate a Razorpay Payment Link & QR Code for a COD order
- * @access  Private (Delivery Boy)
- */
 app.post('/api/delivery/orders/:id/generate-payment-link', protect, authorizeRole('delivery'), async (req, res) => {
-  try {
-    const orderId = req.params.id;
+  try {
+    const orderId = req.params.id;
+    const assignment = await DeliveryAssignment.findOne({ 
+      order: orderId, 
+      deliveryBoy: req.user._id 
+    });
 
-    // 1. Find the assignment and verify the delivery boy
-    const assignment = await DeliveryAssignment.findOne({ 
-      order: orderId, 
-      deliveryBoy: req.user._id 
-    });
+    if (!assignment) {
+      return res.status(404).json({ message: 'No delivery assignment found for this order under your name.' });
+    }
 
-    if (!assignment) {
-      return res.status(404).json({ message: 'No delivery assignment found for this order under your name.' });
-    }
+    const order = await Order.findById(orderId).populate('user', 'name phone');
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found.' });
+    }
+    if (order.paymentMethod !== 'cod') {
+      return res.status(400).json({ message: 'This order is not a Cash on Delivery order.' });
+    }
+    if (order.paymentStatus === 'completed') {
+      return res.status(400).json({ message: 'This order has already been paid for.' });
+    }
 
-    // 2. Find the order and populate customer details
-    const order = await Order.findById(orderId).populate('user', 'name phone');
-    if (!order) {
-      return res.status(404).json({ message: 'Order not found.' });
-    }
+    if (order.razorpayPaymentLinkId) {
+      try {
+        const existingLink = await razorpay.paymentLink.fetch(order.razorpayPaymentLinkId);
+        if (existingLink.status === 'created' || existingLink.status === 'pending') {
+          const qrCodeDataUrl = await qrcode.toDataURL(existingLink.short_url);
+          return res.json({ 
+            message: 'Existing payment link retrieved.',
+            shortUrl: existingLink.short_url, 
+            qrCodeDataUrl,
+            paymentLinkId: existingLink.id
+          });
+        }
+      } catch (fetchErr) {
+        console.log('Could not fetch existing payment link, creating a new one.');
+      }
+    }
+    const amountToCollect = (order.totalAmount + order.shippingFee + order.taxAmount - order.discountAmount);
+    const orderIdShort = order._id.toString().slice(-6);
 
-    // 3. Check if payment is eligible (COD and still pending)
-    if (order.paymentMethod !== 'cod') {
-      return res.status(400).json({ message: 'This order is not a Cash on Delivery order.' });
-    }
-    if (order.paymentStatus === 'completed') {
-      return res.status(400).json({ message: 'This order has already been paid for.' });
-    }
+    const paymentLink = await razorpay.paymentLink.create({
+      amount: Math.round(amountToCollect * 100),
+      currency: "INR",
+      accept_partial: false,
+      description: `Payment for Order #${orderIdShort}`,
+      customer: {
+        name: order.user.name || 'Valued Customer',
+        phone: order.user.phone,
+      },
+      notify: {
+        sms: true,
+        email: false
+      },
+      reminder_enable: false,
+      notes: {
+        order_id: order._id.toString(),
+        delivery_boy_id: req.user._id.toString()
+      }
+    });
 
-    // 4. If a link already exists and is pending, return that
-    if (order.razorpayPaymentLinkId) {
-      try {
-        const existingLink = await razorpay.paymentLink.fetch(order.razorpayPaymentLinkId);
-        if (existingLink.status === 'created' || existingLink.status === 'pending') {
-          const qrCodeDataUrl = await qrcode.toDataURL(existingLink.short_url);
-          return res.json({ 
-            message: 'Existing payment link retrieved.',
-            shortUrl: existingLink.short_url, 
-            qrCodeDataUrl,
-            paymentLinkId: existingLink.id
-          });
-        }
-      } catch (fetchErr) {
-        // Link might be expired or invalid, proceed to create a new one
-        console.log('Could not fetch existing payment link, creating a new one.');
-      }
-    }
+    order.razorpayPaymentLinkId = paymentLink.id;
+    await order.save();
 
-    // 5. Create a new Razorpay Payment Link
-    // Grand Total calculation for payment link
-    const amountToCollect = (order.totalAmount + order.shippingFee + order.taxAmount - order.discountAmount);
-    const orderIdShort = order._id.toString().slice(-6);
+    const qrCodeDataUrl = await qrcode.toDataURL(paymentLink.short_url);
 
-    const paymentLink = await razorpay.paymentLink.create({
-      amount: Math.round(amountToCollect * 100), // Amount in paise
-      currency: "INR",
-      accept_partial: false,
-      description: `Payment for Order #${orderIdShort}`,
-      customer: {
-        name: order.user.name || 'Valued Customer',
-        phone: order.user.phone,
-      },
-      notify: {
-        sms: true,
-        email: false
-      },
-      reminder_enable: false,
-      notes: {
-        order_id: order._id.toString(),
-        delivery_boy_id: req.user._id.toString()
-      }
-    });
+    res.status(201).json({
+      message: 'Payment link generated successfully.',
+      shortUrl: paymentLink.short_url,
+      qrCodeDataUrl,
+      paymentLinkId: paymentLink.id
+    });
 
-    // 6. Save the new payment link ID to the order
-    order.razorpayPaymentLinkId = paymentLink.id;
-    await order.save();
-
-    // 7. Generate QR code from the short URL
-    const qrCodeDataUrl = await qrcode.toDataURL(paymentLink.short_url);
-
-    // 8. Return the URL and QR code to the app
-    res.status(201).json({
-      message: 'Payment link generated successfully.',
-      shortUrl: paymentLink.short_url,
-      qrCodeDataUrl,
-      paymentLinkId: paymentLink.id
-    });
-
-  } catch (err) {
-    console.error('Error generating payment link:', err.message);
-    res.status(500).json({ message: 'Error generating payment link', error: err.message });
-  }
+  } catch (err) {
+    console.error('Error generating payment link:', err.message);
+    res.status(500).json({ message: 'Error generating payment link', error: err.message });
+  }
 });
 
-/**
- * @route   GET /api/delivery/order-payment-status/:id
- * @desc    Check the status of a Razorpay Payment Link by order ID
- * @access  Private (Delivery Boy)
- */
 app.get('/api/delivery/order-payment-status/:id', protect, authorizeRole('delivery'), async (req, res) => {
-  try {
-    const orderId = req.params.id;
+  try {
+    const orderId = req.params.id;
 
-    const order = await Order.findById(orderId);
-    if (!order) {
-      return res.status(404).json({ message: 'Order not found.' });
-    }
+    const order = await Order.findById(orderId);
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found.' });
+    }
 
-    const assignment = await DeliveryAssignment.findOne({ order: orderId, deliveryBoy: req.user._id });
-    if (!assignment) {
-        return res.status(403).json({ message: 'Access denied. You are not assigned to this order.' });
-    }
+    const assignment = await DeliveryAssignment.findOne({ order: orderId, deliveryBoy: req.user._id });
+    if (!assignment) {
+        return res.status(403).json({ message: 'Access denied. You are not assigned to this order.' });
+    }
 
-    // If payment is already completed, return immediately
-    if (order.paymentStatus === 'completed') {
-      return res.json({ paymentStatus: 'completed' });
-    }
+    if (order.paymentStatus === 'completed') {
+      return res.json({ paymentStatus: 'completed' });
+    }
 
-    if (!order.razorpayPaymentLinkId) {
-      // If a link was never created, it's still pending
-      return res.json({ paymentStatus: 'pending' });
-    }
+    if (!order.razorpayPaymentLinkId) {
+      return res.json({ paymentStatus: 'pending' });
+    }
 
-    // Fetch the payment link status from Razorpay
-    const paymentLink = await razorpay.paymentLink.fetch(order.razorpayPaymentLinkId);
+    const paymentLink = await razorpay.paymentLink.fetch(order.razorpayPaymentLinkId);
 
-    if (paymentLink.status === 'paid') {
-      order.paymentStatus = 'completed';
-      order.paymentMethod = 'razorpay_cod'; // A new internal status to differentiate from regular prepaid orders
-      
-      if (paymentLink.payments && paymentLink.payments.length > 0) {
-        order.paymentId = paymentLink.payments[0].payment_id;
-      }
-      await order.save();
-      return res.json({ paymentStatus: 'completed' });
-    }
+    if (paymentLink.status === 'paid') {
+      order.paymentStatus = 'completed';
+      order.paymentMethod = 'razorpay_cod';
+      
+      if (paymentLink.payments && paymentLink.payments.length > 0) {
+        order.paymentId = paymentLink.payments[0].payment_id;
+      }
+      await order.save();
+      return res.json({ paymentStatus: 'completed' });
+    }
 
-    return res.json({ paymentStatus: 'pending' });
+    return res.json({ paymentStatus: 'pending' });
 
-  } catch (err) {
-    console.error('Error checking payment status:', err.message);
-    res.status(500).json({ message: 'Error checking payment status', error: err.message });
-  }
+  } catch (err) {
+    console.error('Error checking payment status:', err.message);
+    res.status(500).json({ message: 'Error checking payment status', error: err.message });
+  }
 });
-// --- [NEW ROUTES END] ---
 
-
-// --- [NEW CODE SECTION END] ---
-
-
-// --------- Admin Routes ----------
 app.get('/api/admin/products', protect, authorizeRole('admin'), async (req, res) => {
-  try {
-    const products = await Product.find({})
-      .populate('seller', 'name email')
-      .populate('category', 'name slug type isActive')
-      .populate('subcategory', 'name');
-    res.json(products);
-  } catch (err) {
-    res.status(500).json({ message: 'Error fetching all products', error: err.message });
-  }
+  try {
+    const products = await Product.find({})
+      .populate('seller', 'name email')
+      .populate('category', 'name slug type isActive')
+      .populate('subcategory', 'name');
+    res.json(products);
+  } catch (err) {
+    res.status(500).json({ message: 'Error fetching all products', error: err.message });
+  }
 });
 
 
 app.put('/api/admin/products/:id', protect, authorizeRole('admin'), productUpload, async (req, res) => {
-  try {
-    const { name, description, brand, originalPrice, price, stock, category, subcategory, childSubcategory, specifications, imagesToDelete, unit, isTrending, serviceDurationMinutes, returnPolicy, costPrice } = req.body;
-    const product = await Product.findById(req.params.id);
-    if (!product) return res.status(404).json({ message: 'Product not found' });
+  try {
+    const { name, description, brand, originalPrice, price, stock, category, subcategory, childSubcategory, specifications, imagesToDelete, unit, isTrending, serviceDurationMinutes, returnPolicy, costPrice } = req.body;
+    const product = await Product.findById(req.params.id);
+    if (!product) return res.status(404).json({ message: 'Product not found' });
 
-    if (req.user.role === 'seller' && product.seller.toString() !== req.user._id.toString()) {
-      return res.status(403).json({ message: 'Access denied: You do not own this product' });
-    }
+    if (req.user.role === 'seller' && product.seller.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'Access denied: You do not own this product' });
+    }
 
-    const parsedPrice = price ? parseFloat(price) : product.price;
-    const parsedOriginalPrice = originalPrice ? parseFloat(originalPrice) : product.originalPrice;
-    if (parsedOriginalPrice && parsedOriginalPrice < parsedPrice) {
-      return res.status(400).json({ message: 'Original price cannot be less than the discounted price.' });
-    }
+    const parsedPrice = price ? parseFloat(price) : product.price;
+    const parsedOriginalPrice = originalPrice ? parseFloat(originalPrice) : product.originalPrice;
+    if (parsedOriginalPrice && parsedOriginalPrice < parsedPrice) {
+      return res.status(400).json({ message: 'Original price cannot be less than the discounted price.' });
+    }
 
-    if (imagesToDelete) {
-      const idsToDelete = Array.isArray(imagesToDelete) ? idsToDelete : [imagesToDelete];
-      await Promise.all(idsToDelete.map(publicId => cloudinary.uploader.destroy(publicId)));
-      product.images = product.images.filter(img => !idsToDelete.includes(img.publicId));
-    }
+    if (imagesToDelete) {
+      const idsToDelete = Array.isArray(imagesToDelete) ? idsToDelete : [imagesToDelete];
+      await Promise.all(idsToDelete.map(publicId => cloudinary.uploader.destroy(publicId)));
+      product.images = product.images.filter(img => !idsToDelete.includes(img.publicId));
+    }
 
-    if (req.files.images && req.files.images.length > 0) {
-      const newImages = req.files.images.map(file => ({ url: file.path, publicId: file.filename }));
-      product.images.push(...newImages);
-    }
+    if (req.files.images && req.files.images.length > 0) {
+      const newImages = req.files.images.map(file => ({ url: file.path, publicId: file.filename }));
+      product.images.push(...newImages);
+    }
 
-    if (req.files.video && req.files.video.length > 0) {
-      const newVideoFile = req.files.video[0];
-      if (product.uploadedVideo && product.uploadedVideo.publicId) {
-        await cloudinary.uploader.destroy(product.uploadedVideo.publicId, { resource_type: 'video' });
-      }
-      product.uploadedVideo = {
-        url: newVideoFile.path,
-        publicId: newVideoFile.filename
-      };
-    }
+    if (req.files.video && req.files.video.length > 0) {
+      const newVideoFile = req.files.video[0];
+      if (product.uploadedVideo && product.uploadedVideo.publicId) {
+        await cloudinary.uploader.destroy(product.uploadedVideo.publicId, { resource_type: 'video' });
+      }
+      product.uploadedVideo = {
+        url: newVideoFile.path,
+        publicId: newVideoFile.filename
+      };
+    }
 
-    if (name) product.name = name;
-    if (description) product.description = description;
-    if (brand) product.brand = brand;
-    if (originalPrice) product.originalPrice = parsedOriginalPrice;
-    if (price) product.price = parsedPrice;
-    if (costPrice) product.costPrice = parseFloat(costPrice);
-    if (stock) product.stock = stock;
-    if (unit) product.unit = unit;
-    if (category) product.category = category;
-    if (returnPolicy) product.otherInformation.returnPolicy = returnPolicy;
-    if (serviceDurationMinutes) product.serviceDurationMinutes = parseInt(serviceDurationMinutes);
-    if (typeof isTrending !== 'undefined') product.isTrending = isTrending;
+    if (name) product.name = name;
+    if (description) product.description = description;
+    if (brand) product.brand = brand;
+    if (originalPrice) product.originalPrice = parsedOriginalPrice;
+    if (price) product.price = parsedPrice;
+    if (costPrice) product.costPrice = parseFloat(costPrice);
+    if (stock) product.stock = stock;
+    if (unit) product.unit = unit;
+    if (category) product.category = category;
+    if (returnPolicy) product.otherInformation.returnPolicy = returnPolicy;
+    if (serviceDurationMinutes) product.serviceDurationMinutes = parseInt(serviceDurationMinutes);
+    if (typeof isTrending !== 'undefined') product.isTrending = isTrending;
 
-    const finalSubcategory = childSubcategory || subcategory;
-    if (finalSubcategory) product.subcategory = finalSubcategory;
-    if (specifications) product.specifications = JSON.parse(specifications);
+    const finalSubcategory = childSubcategory || subcategory;
+    if (finalSubcategory) product.subcategory = finalSubcategory;
+    if (specifications) product.specifications = JSON.parse(specifications);
 
-    await product.save();
-    res.json(product);
-  } catch (err) {
-    console.error('Admin update product error:', err.message);
-    res.status(500).json({ message: 'Error updating product', error: err.message });
-  }
+    await product.save();
+    res.json(product);
+  } catch (err) {
+    console.error('Admin update product error:', err.message);
+    res.status(500).json({ message: 'Error updating product', error: err.message });
+  }
 });
 
 
 app.get('/api/admin/users', protect, authorizeRole('admin'), async (req, res) => {
-  try {
-    const users = await User.find({ role: 'user' }).select('-password');
-    res.json(users);
-  } catch (err) {
-    res.status(500).json({ message: 'Error fetching users' });
-  }
+  try {
+    const users = await User.find({ role: 'user' }).select('-password');
+    res.json(users);
+  } catch (err) {
+    res.status(500).json({ message: 'Error fetching users' });
+  }
 });
 
 app.get('/api/admin/sellers', protect, authorizeRole('admin'), async (req, res) => {
-  try {
-    const sellers = await User.find({ role: 'seller' }).select('-password');
-    res.json(sellers);
-  } catch (err) {
-    res.status(500).json({ message: 'Error fetching sellers' });
-  }
+  try {
+    const sellers = await User.find({ role: 'seller' }).select('-password');
+    res.json(sellers);
+  } catch (err) {
+    res.status(500).json({ message: 'Error fetching sellers' });
+  }
 });
 
-// --- [NEW CODE START] (Delivery Boy Module) ---
 app.get('/api/admin/delivery-boys', protect, authorizeRole('admin'), async (req, res) => {
-  try {
-    const deliveryBoys = await User.find({ role: 'delivery' }).select('-password');
-    res.json(deliveryBoys);
-  } catch (err) {
-    res.status(500).json({ message: 'Error fetching delivery boys' });
-  }
+  try {
+    const deliveryBoys = await User.find({ role: 'delivery' }).select('-password');
+    res.json(deliveryBoys);
+  } catch (err) {
+    res.status(500).json({ message: 'Error fetching delivery boys' });
+  }
 });
-// --- [NEW CODE END] ---
 
 app.put('/api/admin/users/:id/role', protect, authorizeRole('admin'), async (req, res) => {
-  try {
-    const { role, approved } = req.body;
-    const user = await User.findById(req.params.id);
-    if (!user) return res.status(404).json({ message: 'User not found' });
-    if (role) user.role = role;
-    if (typeof approved !== 'undefined') {
-      if(user.role === 'seller' && approved === true && user.approved === false) {
-        const msg = "Congratulations! Your seller account has been approved. You can now log in and start selling.";
-        await sendWhatsApp(user.phone, msg);
-        
-        if (user.fcmToken) {
-          await sendPushNotification(
-            user.fcmToken,
-            'Account Approved!',
-            'Congratulations! Your seller account has been approved. You can now log in and start selling.',
-            { type: 'ACCOUNT_APPROVED' }
-          );
-        }
-      }
-      user.approved = approved;
-    }
-    await user.save();
-    res.json({ message: 'User role updated successfully', user });
-  } catch (err) {
-    res.status(500).json({ message: 'Error updating user role' });
-  }
+  try {
+    const { role, approved } = req.body;
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    if (role) user.role = role;
+    if (typeof approved !== 'undefined') {
+      if(user.role === 'seller' && approved === true && user.approved === false) {
+        const msg = "Congratulations! Your seller account has been approved. You can now log in and start selling.";
+        await sendWhatsApp(user.phone, msg);
+        
+        if (user.fcmToken) {
+          await sendPushNotification(
+            user.fcmToken,
+            'Account Approved!',
+            'Congratulations! Your seller account has been approved. You can now log in and start selling.',
+            { type: 'ACCOUNT_APPROVED' }
+          );
+        }
+      }
+      user.approved = approved;
+    }
+    await user.save();
+    res.json({ message: 'User role updated successfully', user });
+  } catch (err) {
+    res.status(500).json({ message: 'Error updating user role' });
+  }
 });
 
 app.delete('/api/admin/users/:id', protect, authorizeRole('admin'), async (req, res) => {
-  try {
-    const user = await User.findById(req.params.id);
-    if (!user) return res.status(404).json({ message: 'User not found' });
-    await user.deleteOne();
-    res.json({ message: 'User deleted successfully' });
-  } catch (err) {
-    res.status(500).json({ message: 'Error deleting user' });
-  }
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    await user.deleteOne();
+    res.json({ message: 'User deleted successfully' });
+  } catch (err) {
+    res.status(500).json({ message: 'Error deleting user' });
+  }
 });
 
 app.get('/api/admin/orders', protect, authorizeRole('admin', 'seller'), async (req, res) => {
-  try {
-    const filter = {};
-    if (req.user.role === 'seller') {
-      filter.seller = req.user._id;
-      // CRITICAL: Filter out orders that are awaiting payment verification and failed ones for sellers
-      filter.deliveryStatus = { $ne: 'Payment Pending' };
-      filter.paymentStatus = { $ne: 'failed' };
-    }
+  try {
+    const filter = {};
+    if (req.user.role === 'seller') {
+      filter.seller = req.user._id;
+      filter.deliveryStatus = { $ne: 'Payment Pending' };
+      filter.paymentStatus = { $ne: 'failed' };
+    }
 
-    const orders = await Order.find(filter)
-      .populate('user', 'name email phone')
-      .populate('seller', 'name email')
-      .populate('orderItems.product', 'name images price unit')
-      .sort({ createdAt: -1 });
-    res.json(orders);
-  } catch (err) {
-    res.status(500).json({ message: 'Error fetching all orders' });
-  }
+    const orders = await Order.find(filter)
+      .populate('user', 'name email phone')
+      .populate('seller', 'name email')
+      .populate('orderItems.product', 'name images price unit')
+      .sort({ createdAt: -1 });
+    res.json(orders);
+  } catch (err) {
+    res.status(500).json({ message: 'Error fetching all orders' });
+  }
 });
 
 app.put('/api/admin/orders/:id/status', protect, authorizeRole('admin', 'seller'), async (req, res) => {
-  try {
-    const { status } = req.body;
-    const order = await Order.findById(req.params.id).populate('user');
-    if (!order) return res.status(404).json({ message: 'Order not found' });
-    if (req.user.role === 'seller' && order.seller.toString() !== req.user._id.toString()) {
-      return res.status(403).json({ message: 'Access denied' });
-    }
-    order.deliveryStatus = status;
-    order.history.push({ status: status });
-    await order.save();
-    
-    // --- [NEW CODE START] (Delivery Boy Module) ---
-    // If admin/seller cancels, update assignment
-    if (status === 'Cancelled') {
-        try {
-            const assignment = await DeliveryAssignment.findOneAndUpdate(
-              { order: order._id },
-              { $set: { status: 'Cancelled' }, $push: { history: { status: 'Cancelled' } } },
-              { new: true }
-            ).populate('deliveryBoy', 'fcmToken');
-            
-            // If it was already accepted, notify the delivery boy
-            if (assignment && assignment.deliveryBoy && assignment.status !== 'Pending') {
-                await sendPushNotification(
-                    assignment.deliveryBoy.fcmToken,
-                    'Order Cancelled',
-                    `Order #${order._id.toString().slice(-6)} has been cancelled by the ${req.user.role}.`,
-                    { orderId: order._id.toString(), type: 'ORDER_CANCELLED' }
-                );
-            }
+  try {
+    const { status } = req.body;
+    const order = await Order.findById(req.params.id).populate('user');
+    if (!order) return res.status(404).json({ message: 'Order not found' });
+    if (req.user.role === 'seller' && order.seller.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+    order.deliveryStatus = status;
+    order.history.push({ status: status });
+    await order.save();
+    
+    
+    if (status === 'Cancelled') {
+        try {
+            const assignment = await DeliveryAssignment.findOneAndUpdate(
+              { order: order._id },
+              { $set: { status: 'Cancelled' }, $push: { history: { status: 'Cancelled' } } },
+              { new: true }
+            ).populate('deliveryBoy', 'fcmToken');
+            
+            
+            if (assignment && assignment.deliveryBoy && assignment.status !== 'Pending') {
+                await sendPushNotification(
+                    assignment.deliveryBoy.fcmToken,
+                    'Order Cancelled',
+                    `Order #${order._id.toString().slice(-6)} has been cancelled by the ${req.user.role}.`,
+                    { orderId: order._id.toString(), type: 'ORDER_CANCELLED' }
+                );
+            }
 
-            // Restock items only if they were deducted (i.e., not a 'Payment Pending' or 'failed' order)
-            if (order.paymentStatus !== 'failed' && order.deliveryStatus !== 'Payment Pending') {
-                for(const item of order.orderItems) {
-                    await Product.findByIdAndUpdate(item.product, { $inc: { stock: item.qty } });
-                }
-            }
+            if (order.paymentStatus !== 'failed' && order.deliveryStatus !== 'Payment Pending') {
+                for(const item of order.orderItems) {
+                    await Product.findByIdAndUpdate(item.product, { $inc: { stock: item.qty } });
+                }
+            }
 
-        } catch(assignErr) {
-            console.error("Error updating assignment on admin cancel:", assignErr.message);
-        }
-    }
-    // --- [NEW CODE END] ---
+        } catch(assignErr) {
+            console.error("Error updating assignment on admin cancel:", assignErr.message);
+        }
+    }
+    const orderIdShort = order._id.toString().slice(-6);
+    const userMessage = `Order Update: Your order #${orderIdShort} has been updated to: ${status}.`;
+    await sendWhatsApp(order.user.phone, userMessage);
 
-    const orderIdShort = order._id.toString().slice(-6);
-    const userMessage = `Order Update: Your order #${orderIdShort} has been updated to: ${status}.`;
-    await sendWhatsApp(order.user.phone, userMessage);
-
-    const user = await User.findById(order.user._id).select('fcmToken');
-    if (user && user.fcmToken) {
-      await sendPushNotification(
-        user.fcmToken,
-        'Order Status Updated',
-        `Your order #${orderIdShort} is now: ${status}.`,
-        { orderId: order._id.toString(), type: 'ORDER_STATUS' }
-      );
-    }
-    res.json(order);
-  } catch (err) {
-    res.status(500).json({ message: 'Error updating order status', error: err.message });
-  }
+    const user = await User.findById(order.user._id).select('fcmToken');
+    if (user && user.fcmToken) {
+      await sendPushNotification(
+        user.fcmToken,
+        'Order Status Updated',
+        `Your order #${orderIdShort} is now: ${status}.`,
+        { orderId: order._id.toString(), type: 'ORDER_STATUS' }
+      );
+    }
+    res.json(order);
+  } catch (err) {
+    res.status(500).json({ message: 'Error updating order status', error: err.message });
+  }
 });
-
-
-// --- [UPDATED CODE SECTION 3] (Feature Update) ---
 app.post('/api/admin/broadcast', protect, authorizeRole('admin'), async (req, res) => {
-  try {
-    // Add 'title' and 'imageUrl' to destructuring
-    const { title, message, target, imageUrl } = req.body; 
-    
-    // Add 'title' to validation
-    if (!title || !message || !target) { 
-      return res.status(400).json({ message: 'Title, message, and target audience are required.' });
-    }
+  try {
+    const { title, message, target, imageUrl } = req.body; 
+    
+    if (!title || !message || !target) { 
+      return res.status(400).json({ message: 'Title, message, and target audience are required.' });
+    }
 
-    let query = {};
-    if (target === 'users') {
-      query = { role: 'user' };
-    } else if (target === 'sellers') {
-      query = { role: 'seller', approved: true };
-    // --- [NEW CODE START] (Delivery Boy Module) ---
-    } else if (target === 'delivery_boys') {
-      query = { role: 'delivery', approved: true };
-    // --- [NEW CODE END] ---
-    } else if (target !== 'all') {
-      return res.status(400).json({ message: "Invalid target. Must be 'users', 'sellers', 'delivery_boys', or 'all'." });
-    }
+    let query = {};
+    if (target === 'users') {
+      query = { role: 'user' };
+    } else if (target === 'sellers') {
+      query = { role: 'seller', approved: true };
+    } else if (target === 'delivery_boys') {
+      query = { role: 'delivery', approved: true };
+    } else if (target !== 'all') {
+      return res.status(400).json({ message: "Invalid target. Must be 'users', 'sellers', 'delivery_boys', or 'all'." });
+    }
 
-    const recipients = await User.find(query).select('phone fcmToken');
-    
-    let successCount = 0;
-    const fcmTokens = [];
+    const recipients = await User.find(query).select('phone fcmToken');
+    
+    let successCount = 0;
+    const fcmTokens = [];
 
-    for (const recipient of recipients) {
-      if (recipient.phone) {
-        // Send a more structured WhatsApp message
-        await sendWhatsApp(recipient.phone, `*${title}*\n\n${message}`);
-        successCount++;
-      }
-      if (recipient.fcmToken) {
-        fcmTokens.push(recipient.fcmToken);
-      }
-    }
+    for (const recipient of recipients) {
+      if (recipient.phone) {
+        await sendWhatsApp(recipient.phone, `*${title}*\n\n${message}`);
+        successCount++;
+      }
+      if (recipient.fcmToken) {
+        fcmTokens.push(recipient.fcmToken);
+      }
+    }
 
-    if (fcmTokens.length > 0) {
-      // Pass all new parameters to the updated function
-      await sendPushNotification(
-        fcmTokens, 
-        title, 
-        message, 
-        { type: 'BROADCAST' },
-        imageUrl // Pass the image URL
-      );
-    }
+    if (fcmTokens.length > 0) {
+      await sendPushNotification(
+        fcmTokens, 
+        title, 
+        message, 
+        { type: 'BROADCAST' },
+        imageUrl
+      );
+    }
 
-    res.json({ message: `Broadcast sent successfully to ${successCount} recipients.` });
+    res.json({ message: `Broadcast sent successfully to ${successCount} recipients.` });
 
-  } catch (err) {
-    console.error('Broadcast error:', err.message);
-    res.status(500).json({ message: 'Error sending broadcast message', error: err.message });
-  }
+  } catch (err) {
+    console.error('Broadcast error:', err.message);
+    res.status(500).json({ message: 'Error sending broadcast message', error: err.message });
+  }
 });
-// --- [END UPDATED CODE SECTION 3] ---
 
-
-// --------- Banner & Splash Routes ----------
 app.post('/api/admin/banners', protect, authorizeRole('admin'), uploadSingleMedia, async (req, res) => {
-  try {
-    const { title, link, isActive, position, type } = req.body;
-    const file = req.file;
-    if (!file) {
-      return res.status(400).json({ message: 'Media file (image or video) is required' });
-    }
-    const bannerData = {
-      title: title || 'New Banner',
-      link: link || '',
-      isActive: isActive === 'true',
-      position: position || 'top',
-      type: type || (file.mimetype.startsWith('video') ? 'video' : 'image'),
-    };
-    if (bannerData.type === 'image') {
-      bannerData.image = { url: file.path, publicId: file.filename };
-    } else if (bannerData.type === 'video') {
-      bannerData.video = { url: file.path, publicId: file.filename };
-    }
-    const newBanner = await Banner.create(bannerData);
-    res.status(201).json(newBanner);
-  } catch (err) {
-    console.error('Create banner error:', err.message);
-    res.status(500).json({ message: 'Error creating banner', error: err.message });
-  }
+  try {
+    const { title, link, isActive, position, type } = req.body;
+    const file = req.file;
+    if (!file) {
+      return res.status(400).json({ message: 'Media file (image or video) is required' });
+    }
+    const bannerData = {
+      title: title || 'New Banner',
+      link: link || '',
+      isActive: isActive === 'true',
+      position: position || 'top',
+      type: type || (file.mimetype.startsWith('video') ? 'video' : 'image'),
+    };
+    if (bannerData.type === 'image') {
+      bannerData.image = { url: file.path, publicId: file.filename };
+    } else if (bannerData.type === 'video') {
+      bannerData.video = { url: file.path, publicId: file.filename };
+    }
+    const newBanner = await Banner.create(bannerData);
+    res.status(201).json(newBanner);
+  } catch (err) {
+    console.error('Create banner error:', err.message);
+    res.status(500).json({ message: 'Error creating banner', error: err.message });
+  }
 });
 
 app.get('/api/banners/hero', async (req, res) => {
-  try {
-    const banners = await Banner.find({ isActive: true, position: 'top' }).sort({ createdAt: -1 });
-    res.json(banners);
-  } catch (err) {
-    console.error('Error fetching hero banners:', err.message);
-    res.status(500).json({ message: 'Error fetching hero banners' });
-  }
+  try {
+    const banners = await Banner.find({ isActive: true, position: 'top' }).sort({ createdAt: -1 });
+    res.json(banners);
+  } catch (err) {
+    console.error('Error fetching hero banners:', err.message);
+    res.status(500).json({ message: 'Error fetching hero banners' });
+  }
 });
 
 app.get('/api/banners/dynamic', async (req, res) => {
-  try {
-    const banners = await Banner.find({ isActive: true, position: { $in: ['middle', 'bottom'] } }).sort({ createdAt: -1 });
-    res.json(banners);
-  } catch (err) {
-    console.error('Error fetching dynamic banners:', err.message);
-    res.status(500).json({ message: 'Error fetching dynamic banners' });
-  }
+  try {
+    const banners = await Banner.find({ isActive: true, position: { $in: ['middle', 'bottom'] } }).sort({ createdAt: -1 });
+    res.json(banners);
+  } catch (err) {
+    console.error('Error fetching dynamic banners:', err.message);
+    res.status(500).json({ message: 'Error fetching dynamic banners' });
+  }
 });
 
 app.get('/api/admin/banners', protect, authorizeRole('admin'), async (req, res) => {
-  try {
-    const banners = await Banner.find().sort({ createdAt: -1 });
-    res.json(banners);
-  } catch (err) {
-    res.status(500).json({ message: 'Error fetching banners', error: err.message });
-  }
+  try {
+    const banners = await Banner.find().sort({ createdAt: -1 });
+    res.json(banners);
+  } catch (err) {
+    res.status(500).json({ message: 'Error fetching banners', error: err.message });
+  }
 });
 
 app.put('/api/admin/banners/:id', protect, authorizeRole('admin'), uploadSingleMedia, async (req, res) => {
-  try {
-    const { title, link, isActive, position, type } = req.body;
-    const banner = await Banner.findById(req.params.id);
-    if (!banner) return res.status(404).json({ message: 'Banner not found' });
-    const file = req.file;
-    if (file) {
-      if (banner.image && banner.image.publicId) {
-        await cloudinary.uploader.destroy(banner.image.publicId);
-      }
-      if (banner.video && banner.video.publicId) {
-        await cloudinary.uploader.destroy(banner.video.publicId, { resource_type: 'video' });
-      }
-      
-      const newType = type || (file.mimetype.startsWith('video') ? 'video' : 'image');
-      banner.type = newType;
-      if (newType === 'image') {
-        banner.image = { url: file.path, publicId: file.filename };
-        banner.video = { url: null, publicId: null };
-      } else {
-        banner.video = { url: file.path, publicId: file.filename };
-        banner.image = { url: null, publicId: null };
-      }
+  try {
+    const { title, link, isActive, position, type } = req.body;
+    const banner = await Banner.findById(req.params.id);
+    if (!banner) return res.status(404).json({ message: 'Banner not found' });
+    const file = req.file;
+    if (file) {
+      if (banner.image && banner.image.publicId) {
+        await cloudinary.uploader.destroy(banner.image.publicId);
+      }
+      if (banner.video && banner.video.publicId) {
+        await cloudinary.uploader.destroy(banner.video.publicId, { resource_type: 'video' });
+      }
+      
+      const newType = type || (file.mimetype.startsWith('video') ? 'video' : 'image');
+      banner.type = newType;
+      if (newType === 'image') {
+        banner.image = { url: file.path, publicId: file.filename };
+        banner.video = { url: null, publicId: null };
+      } else {
+        banner.video = { url: file.path, publicId: file.filename };
+        banner.image = { url: null, publicId: null };
+      }
 
-    } else if (type) {
-      banner.type = type;
-      if (type === 'image' && banner.video.publicId) {
-          banner.video = { url: null, publicId: null };
-      } else if (type === 'video' && banner.image.publicId) {
-          banner.image = { url: null, publicId: null };
-      }
-    }
-    
-    if (title) banner.title = title;
-    if (link) banner.link = link;
-    if (typeof isActive !== 'undefined') banner.isActive = isActive === 'true';
-    if (position) banner.position = position;
+    } else if (type) {
+      banner.type = type;
+      if (type === 'image' && banner.video.publicId) {
+          banner.video = { url: null, publicId: null };
+      } else if (type === 'video' && banner.image.publicId) {
+          banner.image = { url: null, publicId: null };
+      }
+    }
+    
+    if (title) banner.title = title;
+    if (link) banner.link = link;
+    if (typeof isActive !== 'undefined') banner.isActive = isActive === 'true';
+    if (position) banner.position = position;
 
-    await banner.save();
-    res.json(banner);
-  } catch (err) {
-    console.error('Update banner error:', err.message);
-    res.status(500).json({ message: 'Error updating banner', error: err.message });
-  }
+    await banner.save();
+    res.json(banner);
+  } catch (err) {
+    console.error('Update banner error:', err.message);
+    res.status(500).json({ message: 'Error updating banner', error: err.message });
+  }
 });
 
 app.delete('/api/admin/banners/:id', protect, authorizeRole('admin'), async (req, res) => {
-  try {
-    const banner = await Banner.findById(req.params.id);
-    if (!banner) return res.status(404).json({ message: 'Banner not found' });
-    if (banner.image && banner.image.publicId) await cloudinary.uploader.destroy(banner.image.publicId);
-    if (banner.video && banner.video.publicId) await cloudinary.uploader.destroy(banner.video.publicId, { resource_type: 'video' });
-    await banner.deleteOne();
-    res.json({ message: 'Banner deleted successfully' });
-  } catch (err) {
-    console.status(500).json({ message: 'Error deleting banner', error: err.message });
-  }
+  try {
+    const banner = await Banner.findById(req.params.id);
+    if (!banner) return res.status(404).json({ message: 'Banner not found' });
+    if (banner.image && banner.image.publicId) await cloudinary.uploader.destroy(banner.image.publicId);
+    if (banner.video && banner.video.publicId) await cloudinary.uploader.destroy(banner.video.publicId, { resource_type: 'video' });
+    await banner.deleteOne();
+    res.json({ message: 'Banner deleted successfully' });
+  } catch (err) {
+    console.status(500).json({ message: 'Error deleting banner', error: err.message });
+  }
 });
 
 app.get('/api/splash', async (req, res) => {
-  try {
-    const allSplashes = await Splash.find({ isActive: true });
-    const defaultSplash = allSplashes.find(s => s.type === 'default');
-    const scheduledSplashes = allSplashes.filter(s => s.type === 'scheduled');
-    res.json({ defaultSplash, scheduledSplashes });
-  } catch (err) {
-    console.error('Error fetching splash screens:', err.message);
-    res.status(500).json({ message: 'Error fetching splash screens' });
-  }
+  try {
+    const allSplashes = await Splash.find({ isActive: true });
+    const defaultSplash = allSplashes.find(s => s.type === 'default');
+    const scheduledSplashes = allSplashes.filter(s => s.type === 'scheduled');
+    res.json({ defaultSplash, scheduledSplashes });
+  } catch (err) {
+    console.error('Error fetching splash screens:', err.message);
+    res.status(500).json({ message: 'Error fetching splash screens' });
+  }
 });
 
-
-// --------- ADMIN APP SETTINGS ROUTES ----------
 app.get('/api/admin/settings', protect, authorizeRole('admin'), async (req, res) => {
-  try {
-    const settings = await AppSettings.findOne({ singleton: true });
-    if (!settings) {
-      const newSettings = await AppSettings.create({ singleton: true, platformCommissionRate: 0.05 });
-      return res.json(newSettings);
-    }
-    res.json(settings);
-  } catch (err) {
-    console.error('Error fetching settings:', err.message);
-    res.status(500).json({ message: 'Error fetching app settings', error: err.message });
-  }
+  try {
+    const settings = await AppSettings.findOne({ singleton: true });
+    if (!settings) {
+      const newSettings = await AppSettings.create({ singleton: true, platformCommissionRate: 0.05 });
+      return res.json(newSettings);
+    }
+    res.json(settings);
+  } catch (err) {
+    console.error('Error fetching settings:', err.message);
+    res.status(500).json({ message: 'Error fetching app settings', error: err.message });
+  }
 });
 
 app.put('/api/admin/settings', protect, authorizeRole('admin'), async (req, res) => {
-  try {
-    const { platformCommissionRate } = req.body;
-    
-    const updateData = {};
-    if (typeof platformCommissionRate !== 'undefined') {
-      const rate = parseFloat(platformCommissionRate);
-      if (rate < 0 || rate > 1) {
-        return res.status(400).json({ message: 'Commission rate must be between 0 (0%) and 1 (100%).' });
-      }
-      updateData.platformCommissionRate = rate;
-    }
+  try {
+    const { platformCommissionRate } = req.body;
+    
+    const updateData = {};
+    if (typeof platformCommissionRate !== 'undefined') {
+      const rate = parseFloat(platformCommissionRate);
+      if (rate < 0 || rate > 1) {
+        return res.status(400).json({ message: 'Commission rate must be between 0 (0%) and 1 (100%).' });
+      }
+      updateData.platformCommissionRate = rate;
+    }
 
-    const updatedSettings = await AppSettings.findOneAndUpdate(
-      { singleton: true },
-      { $set: updateData },
-      { new: true, upsert: true, runValidators: true }
-    );
+    const updatedSettings = await AppSettings.findOneAndUpdate(
+      { singleton: true },
+      { $set: updateData },
+      { new: true, upsert: true, runValidators: true }
+    );
 
-    res.json(updatedSettings);
-  } catch (err) {
-    console.error('Error updating settings:', err.message);
-    if (err.name === 'ValidationError') {
-      return res.status(400).json({ message: 'Validation failed', error: err.message });
-    }
-    res.status(500).json({ message: 'Error updating app settings', error: err.message });
-  }
+    res.json(updatedSettings);
+  } catch (err) {
+    console.error('Error updating settings:', err.message);
+    if (err.name === 'ValidationError') {
+      return res.status(400).json({ message: 'Validation failed', error: err.message });
+    }
+    res.status(500).json({ message: 'Error updating app settings', error: err.message });
+  }
 });
 
-
-// --------- Reports Routes ----------
 app.get('/api/admin/reports/sales', protect, authorizeRole('admin'), async (req, res) => {
-  try {
-    const salesReport = await Order.aggregate([
-      { $match: { deliveryStatus: 'Delivered', paymentStatus: 'completed' } },
-      // Note: Using Grand Total for true sales value
-      { $group: { 
-        _id: { $dateToString: { format: "%Y-%m", date: "$createdAt" } }, 
-        totalSales: { $sum: { $add: ["$totalAmount", "$shippingFee", "$taxAmount", { $multiply: ["$discountAmount", -1] }] } },
-        totalOrders: { $sum: 1 } 
-      }},
-      { $sort: { _id: 1 } }
-    ]);
-    res.json(salesReport);
-  } catch (err) {
-    res.status(500).json({ message: 'Error generating sales report', error: err.message });
-  }
+  try {
+    const salesReport = await Order.aggregate([
+      { $match: { deliveryStatus: 'Delivered', paymentStatus: 'completed' } },
+      { $group: { 
+        _id: { $dateToString: { format: "%Y-%m", date: "$createdAt" } }, 
+        totalSales: { $sum: { $add: ["$totalAmount", "$shippingFee", "$taxAmount", { $multiply: ["$discountAmount", -1] }] } },
+        totalOrders: { $sum: 1 } 
+      }},
+      { $sort: { _id: 1 } }
+    ]);
+    res.json(salesReport);
+  } catch (err) {
+    res.status(500).json({ message: 'Error generating sales report', error: err.message });
+  }
 });
 
 app.get('/api/admin/reports/products', protect, authorizeRole('admin'), async (req, res) => {
-  try {
-    const topProducts = await Order.aggregate([
-      { $match: { deliveryStatus: 'Delivered' } },
-      { $unwind: "$orderItems" },
-      { $group: { _id: "$orderItems.product", totalQuantitySold: { $sum: "$orderItems.qty" }, totalRevenue: { $sum: { $multiply: ["$orderItems.price", "$orderItems.qty"] } } } },
-      { $sort: { totalQuantitySold: -1 } },
-      { $limit: 10 },
-      { $lookup: { from: 'products', localField: '_id', foreignField: '_id', as: 'productInfo' } },
-      { $unwind: { path: "$productInfo", preserveNullAndEmptyArrays: true } },
-      { $project: { name: { $ifNull: [ "$productInfo.name", "Deleted Product" ] }, totalQuantitySold: 1 } }
-    ]);
-    res.json(topProducts);
-  } catch (err) {
-    res.status(500).json({ message: 'Error generating top products report', error: err.message });
-  }
+  try {
+    const topProducts = await Order.aggregate([
+      { $match: { deliveryStatus: 'Delivered' } },
+      { $unwind: "$orderItems" },
+      { $group: { _id: "$orderItems.product", totalQuantitySold: { $sum: "$orderItems.qty" }, totalRevenue: { $sum: { $multiply: ["$orderItems.price", "$orderItems.qty"] } } } },
+      { $sort: { totalQuantitySold: -1 } },
+      { $limit: 10 },
+      { $lookup: { from: 'products', localField: '_id', foreignField: '_id', as: 'productInfo' } },
+      { $unwind: { path: "$productInfo", preserveNullAndEmptyArrays: true } },
+      { $project: { name: { $ifNull: [ "$productInfo.name", "Deleted Product" ] }, totalQuantitySold: 1 } }
+    ]);
+    res.json(topProducts);
+  } catch (err) {
+    res.status(500).json({ message: 'Error generating top products report', error: err.message });
+  }
 });
 
 app.get('/api/admin/reports/financial-summary', protect, authorizeRole('admin'), async (req, res) => {
-  try {
-    const salesSummary = await Order.aggregate([
-      { $match: { paymentStatus: 'completed', deliveryStatus: { $ne: 'Cancelled' } } },
-      {
-        $group: {
-          _id: null,
-          totalSales: { $sum: '$totalAmount' }, // Pre-Tax/Shipping Subtotal
-          totalTax: { $sum: '$taxAmount' }, // Total Tax Collected
-          totalShipping: { $sum: '$shippingFee' }, // Total Shipping Collected
-          totalDiscount: { $sum: '$discountAmount' }, // Total Discount Given
-          totalRefunds: { $sum: '$totalRefunded' },
-          totalOrders: { $sum: 1 }
-        }
-      }
-    ]);
-    
-    const appSettings = await AppSettings.findOne({ singleton: true });
-    const PLATFORM_COMMISSION_RATE = appSettings ? appSettings.platformCommissionRate : 0.05;
+  try {
+    const salesSummary = await Order.aggregate([
+      { $match: { paymentStatus: 'completed', deliveryStatus: { $ne: 'Cancelled' } } },
+      {
+        $group: {
+          _id: null,
+          totalSales: { $sum: '$totalAmount' },
+          totalTax: { $sum: '$taxAmount' },
+          totalShipping: { $sum: '$shippingFee' },
+          totalDiscount: { $sum: '$discountAmount' },
+          totalRefunds: { $sum: '$totalRefunded' },
+          totalOrders: { $sum: 1 }
+        }
+      }
+    ]);
+    
+    const appSettings = await AppSettings.findOne({ singleton: true });
+    const PLATFORM_COMMISSION_RATE = appSettings ? appSettings.platformCommissionRate : 0.05;
 
-    const summary = salesSummary.length > 0 ? salesSummary[0] : { totalSales: 0, totalTax: 0, totalShipping: 0, totalDiscount: 0, totalRefunds: 0, totalOrders: 0 };
-    
-    // Net Sales (Grand Total of everything sold)
-    const grossRevenue = summary.totalSales + summary.totalTax + summary.totalShipping - summary.totalDiscount;
-    // Platform earnings is based on pre-tax subtotal (totalSales)
-    const platformEarnings = summary.totalSales * PLATFORM_COMMISSION_RATE;
-    const netRevenue = grossRevenue - summary.totalRefunds;
+    const summary = salesSummary.length > 0 ? salesSummary[0] : { totalSales: 0, totalTax: 0, totalShipping: 0, totalDiscount: 0, totalRefunds: 0, totalOrders: 0 };
+    
+    const grossRevenue = summary.totalSales + summary.totalTax + summary.totalShipping - summary.totalDiscount;
+    const platformEarnings = summary.totalSales * PLATFORM_COMMISSION_RATE;
+    const netRevenue = grossRevenue - summary.totalRefunds;
 
-    res.json({
-      totalSales: summary.totalSales, // Subtotal
-      totalTax: summary.totalTax,
-      totalShipping: summary.totalShipping,
-      totalDiscount: summary.totalDiscount,
-      totalOrders: summary.totalOrders,
-      grossRevenue: grossRevenue, // Final customer-paid amount
-      netRevenue: netRevenue,
-      platformEarnings: platformEarnings,
-      commissionRate: PLATFORM_COMMISSION_RATE
-    });
+    res.json({
+      totalSales: summary.totalSales,
+      totalTax: summary.totalTax,
+      totalShipping: summary.totalShipping,
+      totalDiscount: summary.totalDiscount,
+      totalOrders: summary.totalOrders,
+      grossRevenue: grossRevenue,
+      netRevenue: netRevenue,
+      platformEarnings: platformEarnings,
+      commissionRate: PLATFORM_COMMISSION_RATE
+    });
 
-  } catch (err) {
-    console.error('Error generating financial summary:', err.message);
-    res.status(500).json({ message: 'Error generating financial summary report', error: err.message });
-  }
+  } catch (err) {
+    console.error('Error generating financial summary:', err.message);
+    res.status(500).json({ message: 'Error generating financial summary report', error: err.message });
+  }
 });
 
 app.get('/api/admin/statistics/dashboard', protect, authorizeRole('admin'), async (req, res) => {
-  try {
-    const [
-      orderStatusCounts,
-      topSellingProducts,
-      topSellingSellers,
-      topCustomers,
-      financialSummaryData,
-      paymentCounts,
-      appSettings
-    ] = await Promise.all([
+  try {
+    const [
+      orderStatusCounts,
+      topSellingProducts,
+      topSellingSellers,
+      topCustomers,
+      financialSummaryData,
+      paymentCounts,
+      appSettings
+    ] = await Promise.all([
 
-      // 1. Order Status Counts
-      Order.aggregate([
-        { $group: { _id: "$deliveryStatus", count: { $sum: 1 } } }
-      ]),
+      Order.aggregate([
+        { $group: { _id: "$deliveryStatus", count: { $sum: 1 } } }
+      ]),
 
-      // 2. Top 5 Products
-      Order.aggregate([
-        { $match: { deliveryStatus: 'Delivered' } },
-        { $unwind: "$orderItems" },
-        { $group: {
-          _id: "$orderItems.product",
-          totalQuantitySold: { $sum: "$orderItems.qty" }
-        }},
-        { $sort: { totalQuantitySold: -1 } },
-        { $limit: 5 },
-        { $lookup: { from: 'products', localField: '_id', foreignField: '_id', as: 'productInfo' } },
-        { $unwind: { path: "$productInfo", preserveNullAndEmptyArrays: true } },
-        { $project: { name: { $ifNull: [ "$productInfo.name", "Deleted Product" ] }, totalQuantitySold: 1 } }
-      ]),
+      Order.aggregate([
+        { $match: { deliveryStatus: 'Delivered' } },
+        { $unwind: "$orderItems" },
+        { $group: {
+          _id: "$orderItems.product",
+          totalQuantitySold: { $sum: "$orderItems.qty" }
+        }},
+        { $sort: { totalQuantitySold: -1 } },
+        { $limit: 5 },
+        { $lookup: { from: 'products', localField: '_id', foreignField: '_id', as: 'productInfo' } },
+        { $unwind: { path: "$productInfo", preserveNullAndEmptyArrays: true } },
+        { $project: { name: { $ifNull: [ "$productInfo.name", "Deleted Product" ] }, totalQuantitySold: 1 } }
+      ]),
 
-      // 3. Top 5 Sellers (by revenue)
-      Order.aggregate([
-        { $match: { deliveryStatus: 'Delivered' } },
-        { $group: {
-          _id: "$seller",
-          totalRevenue: { $sum: "$totalAmount" } // Using subtotal
-        }},
-        { $sort: { totalRevenue: -1 } },
-        { $limit: 5 },
-        { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'sellerInfo' } },
-        { $unwind: { path: "$sellerInfo", preserveNullAndEmptyArrays: true } },
-        { $project: { name: { $ifNull: [ "$sellerInfo.name", "Deleted Seller" ] }, totalRevenue: 1 } }
-      ]),
+      Order.aggregate([
+        { $match: { deliveryStatus: 'Delivered' } },
+        { $group: {
+          _id: "$seller",
+          totalRevenue: { $sum: "$totalAmount" }
+        }},
+        { $sort: { totalRevenue: -1 } },
+        { $limit: 5 },
+        { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'sellerInfo' } },
+        { $unwind: { path: "$sellerInfo", preserveNullAndEmptyArrays: true } },
+        { $project: { name: { $ifNull: [ "$sellerInfo.name", "Deleted Seller" ] }, totalRevenue: 1 } }
+      ]),
 
-      // 4. Top 5 Customers (by revenue)
-      Order.aggregate([
-        { $match: { deliveryStatus: 'Delivered' } },
-        { $group: {
-          _id: "$user",
-          totalSpent: { $sum: '$totalAmount' } // Using subtotal
-        }},
-        { $sort: { totalSpent: -1 } },
-        { $limit: 5 },
-        { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'userInfo' } },
-        { $unwind: { path: "$userInfo", preserveNullAndEmptyArrays: true } },
-        { $project: { name: { $ifNull: [ "$userInfo.name", "Deleted User" ] }, totalSpent: 1 } }
-      ]),
+      Order.aggregate([
+        { $match: { deliveryStatus: 'Delivered' } },
+        { $group: {
+          _id: "$user",
+          totalSpent: { $sum: '$totalAmount' }
+        }},
+        { $sort: { totalSpent: -1 } },
+        { $limit: 5 },
+        { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'userInfo' } },
+        { $unwind: { path: "$userInfo", preserveNullAndEmptyArrays: true } },
+        { $project: { name: { $ifNull: [ "$userInfo.name", "Deleted User" ] }, totalSpent: 1 } }
+      ]),
 
-      // 5. Financial Summary
-      Order.aggregate([
-        { $match: { paymentStatus: 'completed', deliveryStatus: { $ne: 'Cancelled' } } },
-        {
-          $group: {
-            _id: null,
-            totalSales: { $sum: '$totalAmount' }, // Subtotal
-            totalTax: { $sum: '$taxAmount' },
-            totalShipping: { $sum: '$shippingFee' },
-            totalDiscount: { $sum: '$discountAmount' },
-            totalRefunds: { $sum: '$totalRefunded' }
-          }
-        }
-      ]),
+      Order.aggregate([
+        { $match: { paymentStatus: 'completed', deliveryStatus: { $ne: 'Cancelled' } } },
+        {
+          $group: {
+            _id: null,
+            totalSales: { $sum: '$totalAmount' },
+            totalTax: { $sum: '$taxAmount' },
+            totalShipping: { $sum: '$shippingFee' },
+            totalDiscount: { $sum: '$discountAmount' },
+            totalRefunds: { $sum: '$totalRefunded' }
+          }
+        }
+      ]),
 
-      // 6. Payment Method Counts
-      Order.aggregate([
-        { $match: { paymentStatus: 'completed' } },
-        { $group: { _id: "$paymentMethod", count: { $sum: 1 } } }
-      ]),
+      Order.aggregate([
+        { $match: { paymentStatus: 'completed' } },
+        { $group: { _id: "$paymentMethod", count: { $sum: 1 } } }
+      ]),
 
-      // 7. Get App Settings
-      AppSettings.findOne({ singleton: true })
-    ]);
+      AppSettings.findOne({ singleton: true })
+    ]);
 
-    const orderStatsFormatted = {};
-    orderStatusCounts.forEach(stat => {
-      orderStatsFormatted[stat._id] = stat.count;
-    });
+    const orderStatsFormatted = {};
+    orderStatusCounts.forEach(stat => {
+      orderStatsFormatted[stat._id] = stat.count;
+    });
 
-    const paymentStatsFormatted = {};
-    paymentCounts.forEach(stat => {
-      paymentStatsFormatted[stat._id] = stat.count;
-    });
+    const paymentStatsFormatted = {};
+    paymentCounts.forEach(stat => {
+      paymentStatsFormatted[stat._id] = stat.count;
+    });
 
-    const financials = financialSummaryData[0] || { totalSales: 0, totalTax: 0, totalShipping: 0, totalDiscount: 0, totalRefunds: 0 };
-    
-    const PLATFORM_COMMISSION_RATE = appSettings ? appSettings.platformCommissionRate : 0.05;
-    const grossRevenue = financials.totalSales + financials.totalTax + financials.totalShipping - financials.totalDiscount;
-    const platformEarnings = financials.totalSales * PLATFORM_COMMISSION_RATE; // Based on subtotal
-    const netRevenue = grossRevenue - financials.totalRefunds;
+    const financials = financialSummaryData[0] || { totalSales: 0, totalTax: 0, totalShipping: 0, totalDiscount: 0, totalRefunds: 0 };
+    
+    const PLATFORM_COMMISSION_RATE = appSettings ? appSettings.platformCommissionRate : 0.05;
+    const grossRevenue = financials.totalSales + financials.totalTax + financials.totalShipping - financials.totalDiscount;
+    const platformEarnings = financials.totalSales * PLATFORM_COMMISSION_RATE;
+    const netRevenue = grossRevenue - financials.totalRefunds;
 
-    res.json({
-      orderStats: orderStatsFormatted,
-      paymentMethodStats: paymentStatsFormatted,
-      topProducts: topSellingProducts,
-      topSellers: topSellingSellers,
-      topCustomers: topCustomers,
-      financials: {
-        totalSales: financials.totalSales, // Subtotal
-        totalTax: financials.totalTax,
-        totalShipping: financials.totalShipping,
-        totalDiscount: financials.totalDiscount,
-        totalRefunds: financials.totalRefunds,
-        grossRevenue: grossRevenue, // Final customer-paid amount
-        netRevenue: netRevenue,
-        platformEarnings: platformEarnings,
-        commissionRate: PLATFORM_COMMISSION_RATE
-      }
-    });
+    res.json({
+      orderStats: orderStatsFormatted,
+      paymentMethodStats: paymentStatsFormatted,
+      topProducts: topSellingProducts,
+      topSellers: topSellingSellers,
+      topCustomers: topCustomers,
+      financials: {
+        totalSales: financials.totalSales,
+        totalTax: financials.totalTax,
+        totalShipping: financials.totalShipping,
+        totalDiscount: financials.totalDiscount,
+        totalRefunds: financials.totalRefunds,
+        grossRevenue: grossRevenue,
+        netRevenue: netRevenue,
+        platformEarnings: platformEarnings,
+        commissionRate: PLATFORM_COMMISSION_RATE
+      }
+    });
 
-  } catch (err) {
-    console.error('Error generating dashboard statistics:', err.message);
-    res.status(500).json({ message: 'Error fetching dashboard statistics', error: err.message });
-  }
+  } catch (err) {
+    console.error('Error generating dashboard statistics:', err.message);
+    res.status(500).json({ message: 'Error fetching dashboard statistics', error: err.message });
+  }
 });
 
 app.post('/api/admin/orders/:id/refund', protect, authorizeRole('admin'), async (req, res) => {
-  try {
-    const { amount, reason } = req.body;
-    const order = await Order.findById(req.params.id).populate('user');
+  try {
+    const { amount, reason } = req.body;
+    const order = await Order.findById(req.params.id).populate('user');
 
-    if (!order) {
-      return res.status(404).json({ message: 'Order not found.' });
-    }
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found.' });
+    }
 
-    if ((order.paymentMethod !== 'razorpay' && order.paymentMethod !== 'razorpay_cod') || order.paymentStatus !== 'completed') {
-      return res.status(400).json({ message: 'Refunds are only available for completed Razorpay payments.' });
-    }
-    
-    const paymentId = order.paymentId;
-    if (!paymentId.startsWith('pay_') && !paymentId.startsWith('plink_')) {
-      return res.status(400).json({ message: 'Invalid payment ID associated with this order. Cannot refund.' });
-    }
+    if ((order.paymentMethod !== 'razorpay' && order.paymentMethod !== 'razorpay_cod') || order.paymentStatus !== 'completed') {
+      return res.status(400).json({ message: 'Refunds are only available for completed Razorpay payments.' });
+    }
+    
+    const paymentId = order.paymentId;
+    if (!paymentId.startsWith('pay_') && !paymentId.startsWith('plink_')) {
+      return res.status(400).json({ message: 'Invalid payment ID associated with this order. Cannot refund.' });
+    }
 
-    // Grand Total calculation
-    const orderGrandTotal = (order.totalAmount + order.shippingFee + order.taxAmount) - order.discountAmount;
-    const refundableAmount = orderGrandTotal - order.totalRefunded;
-    const requestedAmount = parseFloat(amount);
+    const orderGrandTotal = (order.totalAmount + order.shippingFee + order.taxAmount) - order.discountAmount;
+    const refundableAmount = orderGrandTotal - order.totalRefunded;
+    const requestedAmount = parseFloat(amount);
 
-    if (!requestedAmount || requestedAmount <= 0 || requestedAmount > refundableAmount) {
-      return res.status(400).json({ message: `Invalid refund amount. Max refundable amount is ${refundableAmount.toFixed(2)}.` });
-    }
+    if (!requestedAmount || requestedAmount <= 0 || requestedAmount > refundableAmount) {
+      return res.status(400).json({ message: `Invalid refund amount. Max refundable amount is ${refundableAmount.toFixed(2)}.` });
+    }
 
-    const refund = await razorpay.payments.refund(paymentId, {
-      amount: Math.round(requestedAmount * 100),
-      speed: 'normal',
-      notes: { reason: reason }
-    });
+    const refund = await razorpay.payments.refund(paymentId, {
+      amount: Math.round(requestedAmount * 100),
+      speed: 'normal',
+      notes: { reason: reason }
+    });
 
-    const newRefundEntry = {
-      amount: refund.amount / 100,
-      reason: reason || 'Not specified',
-      status: refund.status === 'processed' ? 'completed' : 'processing',
-      razorpayRefundId: refund.id,
-      processedBy: req.user._id,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    };
+    const newRefundEntry = {
+      amount: refund.amount / 100,
+      reason: reason || 'Not specified',
+      status: refund.status === 'processed' ? 'completed' : 'processing',
+      razorpayRefundId: refund.id,
+      processedBy: req.user._id,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
 
-    order.refunds.push(newRefundEntry);
-    order.totalRefunded += newRefundEntry.amount;
-    order.history.push({ status: 'Refund Initiated', note: `Refund of ${newRefundEntry.amount} initiated by Admin.` });
-    
-    if (order.totalRefunded >= orderGrandTotal) {
-      order.paymentStatus = 'refunded';
-    }
+    order.refunds.push(newRefundEntry);
+    order.totalRefunded += newRefundEntry.amount;
+    order.history.push({ status: 'Refund Initiated', note: `Refund of ${newRefundEntry.amount} initiated by Admin.` });
+    
+    if (order.totalRefunded >= orderGrandTotal) {
+      order.paymentStatus = 'refunded';
+    }
+    await order.save();
 
-    await order.save();
+    const user = order.user;
+    if (user && user.phone) {
+      const message = `💸 Refund Alert!\n\nYour refund of ₹${newRefundEntry.amount} for order #${order._id.toString().slice(-6)} has been initiated. The amount will be credited to your account shortly.`;
+      await sendWhatsApp(user.phone, message);
 
-    const user = order.user;
-    if (user && user.phone) {
-      const message = `💸 Refund Alert!\n\nYour refund of ₹${newRefundEntry.amount} for order #${order._id.toString().slice(-6)} has been initiated. The amount will be credited to your account shortly.`;
-      await sendWhatsApp(user.phone, message);
+      if (user.fcmToken) {
+        await sendPushNotification(
+          user.fcmToken,
+          '💸 Refund Initiated',
+          `Your refund of ₹${newRefundEntry.amount} for order #${order._id.toString().slice(-6)} has been initiated.`,
+          { orderId: order._id.toString(), type: 'REFUND' }
+        );
+      }
+    }
 
-      if (user.fcmToken) {
-        await sendPushNotification(
-          user.fcmToken,
-          '💸 Refund Initiated',
-          `Your refund of ₹${newRefundEntry.amount} for order #${order._id.toString().slice(-6)} has been initiated.`,
-          { orderId: order._id.toString(), type: 'REFUND' }
-        );
-      }
-    }
+    res.status(200).json({
+      message: 'Refund initiated successfully.',
+      refund,
+      order
+    });
 
-    res.status(200).json({
-      message: 'Refund initiated successfully.',
-      refund,
-      order
-    });
-
-  } catch (err) {
-    console.error('Error initiating refund:', err.message);
-    res.status(500).json({
-      message: 'Failed to initiate refund.',
-      error: err.message
-    });
-  }
+  } catch (err) {
+    console.error('Error initiating refund:', err.message);
+    res.status(500).json({
+      message: 'Failed to initiate refund.',
+      error: err.message
+    });
+  }
 });
-
-
-// --- [UPDATED CODE SECTION 4] (Feature Update) ---
-// --- NEW ROUTES FOR NOTIFICATION SCHEDULING ---
 app.post('/api/admin/notifications/schedule', protect, authorizeRole('admin'), async (req, res) => {
-  try {
-    // Add 'imageUrl'
-    const { title, body, target, scheduledAt, imageUrl } = req.body; 
-    
-    if (!title || !body || !target || !scheduledAt) {
-      return res.status(400).json({ message: 'Title, message, scheduled time, and target audience are required.' });
-    }
-    const scheduledDate = new Date(scheduledAt);
-    if (isNaN(scheduledDate.getTime()) || scheduledDate < new Date()) {
-      return res.status(400).json({ message: 'Invalid or past scheduled date.' });
-    }
-    
-    // Add 'imageUrl' to the create object
-    const newNotification = await ScheduledNotification.create({ 
-      title, 
-      body, 
-      target, 
-      scheduledAt: scheduledDate,
-      imageUrl: imageUrl || null // Add this
-    });
-    
-    res.status(201).json({ message: 'Notification scheduled successfully.', notification: newNotification });
-  } catch (err) {
-    console.error('Schedule notification error:', err.message);
-    res.status(500).json({ message: 'Error scheduling notification.', error: err.message });
-  }
+  try {
+    const { title, body, target, scheduledAt, imageUrl } = req.body; 
+    
+    if (!title || !body || !target || !scheduledAt) {
+      return res.status(400).json({ message: 'Title, message, scheduled time, and target audience are required.' });
+    }
+    const scheduledDate = new Date(scheduledAt);
+    if (isNaN(scheduledDate.getTime()) || scheduledDate < new Date()) {
+      return res.status(400).json({ message: 'Invalid or past scheduled date.' });
+    }
+    
+    const newNotification = await ScheduledNotification.create({ 
+      title, 
+      body, 
+      target, 
+      scheduledAt: scheduledDate,
+      imageUrl: imageUrl || null
+    });
+    
+    res.status(201).json({ message: 'Notification scheduled successfully.', notification: newNotification });
+  } catch (err) {
+    console.error('Schedule notification error:', err.message);
+    res.status(500).json({ message: 'Error scheduling notification.', error: err.message });
+  }
 });
-// --- [END UPDATED CODE SECTION 4] ---
-
 
 app.get('/api/admin/notifications', protect, authorizeRole('admin'), async (req, res) => {
-  try {
-    const notifications = await ScheduledNotification.find().sort({ scheduledAt: -1 });
-    res.json(notifications);
-  } catch (err) {
-    console.error('Get notifications error:', err.message);
-    res.status(500).json({ message: 'Error fetching notifications.', error: err.message });
-  }
+  try {
+    const notifications = await ScheduledNotification.find().sort({ scheduledAt: -1 });
+    res.json(notifications);
+  } catch (err) {
+    console.error('Get notifications error:', err.message);
+    res.status(500).json({ message: 'Error fetching notifications.', error: err.message });
+  }
 });
 
 // --------- GLOBAL ERROR HANDLER ----------
 app.use((err, req, res, next) => {
-  console.error('🆘 UNHANDLED ERROR 🆘:', err.message);
-  console.error(err.stack);
+  console.error('🆘 UNHANDLED ERROR 🆘:', err.message);
+  console.error(err.stack);
 
-  if (err instanceof multer.MulterError) {
-    return res.status(400).json({ message: 'File upload error', error: err.message });
-  }
+  if (err instanceof multer.MulterError) {
+    return res.status(400).json({ message: 'File upload error', error: err.message });
+  }
 
-  if (err.http_code) {
-    return res.status(err.http_code).json({ message: 'Cloud storage error', error: err.message });
-  }
+  if (err.http_code) {
+    return res.status(err.http_code).json({ message: 'Cloud storage error', error: err.message });
+  }
 
-  res.status(500).json({
-    message: 'An unexpected server error occurred',
-    error: err.message || 'Unknown error'
-  });
+  res.status(500).json({
+    message: 'An unexpected server error occurred',
+    error: err.message || 'Unknown error'
+  });
 });
 
 
-// --- [UPDATED CODE SECTION 5] (Feature Update + Bug Fix 1) ---
-// --- CRON JOB: Check for scheduled notifications every minute ---
+
 cron.schedule('* * * * *', async () => {
-  console.log('Running scheduled notification check...');
-  const now = new Date();
-  try {
-    const notificationsToSend = await ScheduledNotification.find({
-      scheduledAt: { $lte: now },
-      isSent: false
-    });
+  console.log('Running scheduled notification check...');
+  const now = new Date();
+  try {
+    const notificationsToSend = await ScheduledNotification.find({
+      scheduledAt: { $lte: now },
+      isSent: false
+    });
 
-    for (const notification of notificationsToSend) {
-      let query = {};
-      if (notification.target === 'users') {
-        query = { role: 'user' };
-      } else if (notification.target === 'sellers') {
-        query = { role: 'seller', approved: true };
-      // --- [NEW CODE START] (Delivery Boy Module) ---
-      } else if (notification.target === 'delivery_boys') {
-        query = { role: 'delivery', approved: true };
-      // --- [NEW CODE END] ---
-      } else if (notification.target !== 'all') {
-        continue;
-      }
+    for (const notification of notificationsToSend) {
+      let query = {};
+      if (notification.target === 'users') {
+        query = { role: 'user' };
+      } else if (notification.target === 'sellers') {
+        query = { role: 'seller', approved: true };
+      } else if (notification.target === 'delivery_boys') {
+        query = { role: 'delivery', approved: true };
+      } else if (notification.target !== 'all') {
+        continue;
+      }
 
-      const recipients = await User.find(query).select('fcmToken');
-      const fcmTokens = recipients.map(r => r.fcmToken).filter(Boolean);
+      const recipients = await User.find(query).select('fcmToken');
+      const fcmTokens = recipients.map(r => r.fcmToken).filter(Boolean);
 
-      if (fcmTokens.length > 0) {
-        // Pass the 'notification.imageUrl' from the DB
-        await sendPushNotification(
-          fcmTokens, 
-          notification.title, 
-          notification.body,
-          { type: 'BROADCAST' },
-          notification.imageUrl // <-- ADD THIS
-        );
-      }
+      if (fcmTokens.length > 0) {
+        
+        await sendPushNotification(
+          fcmTokens, 
+          notification.title, 
+          notification.body,
+          { type: 'BROADCAST' },
+          notification.imageUrl
+        );
+      }
 
-      notification.isSent = true;
-      notification.sentAt = new Date();
-      await notification.save();
-      console.log(`Sent scheduled notification: "${notification.title}" to ${fcmTokens.length} recipients.`);
-    }
+      notification.isSent = true;
+      notification.sentAt = new Date();
+      await notification.save();
+      console.log(`Sent scheduled notification: "${notification.title}" to ${fcmTokens.length} recipients.`);
+    }
 
-  } catch (err) {
-    console.error('Scheduled task failed:', err.message);
-  }
+  } catch (err) {
+    console.error('Scheduled task failed:', err.message);
+  }
 });
-// --- [END UPDATED CODE SECTION 5] ---
 
-// =============================================================
-// === NEW: ABANDONED CART REMINDER CRON JOB (Runs daily at 3 AM) ====
-// =============================================================
 cron.schedule('0 3 * * *', async () => {
   console.log('Running Abandoned Cart Reminder check...');
   
-  // Find carts that haven't been updated in the last 48 hours (48 * 60 * 60 * 1000 ms)
   const cutoffDate = new Date(Date.now() - 48 * 60 * 60 * 1000); 
 
   try {
     const abandonedCarts = await Cart.find({
-      updatedAt: { $lt: cutoffDate }, // Cart not updated since cutoff
-      'items.0': { '$exists': true } // Ensure cart is not empty
-    }).populate('user', 'name fcmToken'); // Populate user data to get token
+      updatedAt: { $lt: cutoffDate },
+      'items.0': { '$exists': true }
+    }).populate('user', 'name fcmToken');
 
     for (const cart of abandonedCarts) {
       const user = cart.user;
@@ -3854,8 +3637,7 @@ cron.schedule('0 3 * * *', async () => {
         );
         console.log(`Sent cart reminder to user: ${user.name}`);
         
-        // Optional: Update the cart's updatedAt timestamp to prevent spamming the user 
-        // until they interact with the cart again or 48 hours pass after this reminder.
+        
         await Cart.updateOne({ _id: cart._id }, { $set: { updatedAt: new Date() } });
       }
     }
@@ -3865,17 +3647,14 @@ cron.schedule('0 3 * * *', async () => {
     console.error('Abandoned Cart Cron Job Failed:', err.message);
   }
 });
-// =============================================================
 
-
-// --------- Other Routes ----------
 app.get('/', (req, res) => {
-  res.send('E-Commerce Backend API is running!');
+  res.send('E-Commerce Backend API is running!');
 });
 
 const IP = '0.0.0.0';
 const PORT = process.env.PORT || 5001;
 
 app.listen(PORT, IP, () => {
-  console.log(`🚀 Server running on http://${IP}:${PORT}`);
+  console.log(`🚀 Server running on http://${IP}:${PORT}`);
 });
