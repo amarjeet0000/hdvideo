@@ -1,4 +1,4 @@
-// server.js - Full E-Commerce Backend (Patched with all new features + Delivery Module + Tax/GST)
+// server.js - Full E-Commerce Backend (Patched with all new features + Delivery Module + Tax/GST + Razorpay Webhook)
 
 // Load environment variables from .env file
 require('dotenv').config();
@@ -153,11 +153,9 @@ async function sendPushNotification(tokens, title, body, data = {}, imageUrl = n
         aps: {
           sound: 'default',
           badge: 1,
-          // Tells iOS to allow modification for image download
           ...(imageUrl && { 'mutable-content': 1 })
         }
       },
-      // FCM bridge for iOS images
       ...(imageUrl && { 
         fcm_options: { 
           image: imageUrl 
@@ -848,7 +846,6 @@ app.post('/api/auth/register', async (req, res) => {
         return res.status(400).json({ message: 'Email is required for seller registration.' });
     }
     if ((role === 'user' || role === 'delivery') && !phone) {
-      // Although phone is checked above, ensuring consistency here.
       return res.status(400).json({ message: 'Phone number is required for user/delivery registration.' });
     }
 
@@ -1612,7 +1609,6 @@ app.post('/api/orders', protect, async (req, res) => {
 
 app.get('/api/orders', protect, async (req, res) => {
   try {
-    // MODIFICATION: Removed the filter that was hiding failed orders.
     const orders = await Order.find({ user: req.user._id })
       .populate({
         path: 'orderItems.product',
@@ -1735,9 +1731,124 @@ app.put('/api/orders/:id/cancel', protect, async (req, res) => {
   }
 });
 
-app.post('/api/payment/create-order', protect, async (req, res) => {
-  res.status(501).json({ message: 'This endpoint is not fully implemented. Payment is initiated via the /api/orders route.' });
-});
+// --------- Payments Routes ----------
+
+// --- [NEW] PAYMENT HELPER FUNCTIONS (REFACTORED FOR WEBHOOK) ---
+
+/**
+ * Handles all logic for a successful payment.
+ * @param {string} order_id - The Razorpay Order ID.
+ * @param {string} payment_id - The Razorpay Payment ID.
+ */
+async function handleSuccessfulPayment(order_id, payment_id) {
+    console.log(`Handling successful payment for Razorpay Order ID: ${order_id}`);
+    const orders = await Order.find({ paymentId: order_id, paymentStatus: 'pending' });
+
+    if (!orders || orders.length === 0) {
+      console.log(`No pending orders found for Razorpay Order ID: ${order_id}. Might be already processed.`);
+      return;
+    }
+    
+    const paymentHistoryEntries = [];
+    let customerId = orders[0].user;
+    
+    for (const order of orders) {
+      // 1. Update Order Status
+      order.paymentStatus = 'completed';
+      order.deliveryStatus = 'Pending';
+      order.history.push({ status: 'Payment Completed', note: 'Razorpay verification successful.' });
+      order.paymentId = payment_id;
+      await order.save();
+      
+      // 2. Deduct Stock
+      for(const item of order.orderItems) {
+        await Product.findByIdAndUpdate(item.product, { $inc: { stock: -item.qty } });
+      }
+
+      // 3. Create Delivery Assignment
+      try {
+        const orderPincode = order.pincode;
+        await DeliveryAssignment.create({
+          order: order._id,
+          deliveryBoy: null,
+          status: 'Pending',
+          pincode: orderPincode,
+          history: [{ status: 'Pending' }]
+        });
+
+        const nearbyDeliveryBoys = await User.find({ role: 'delivery', approved: true, pincodes: orderPincode }).select('fcmToken');
+        const deliveryTokens = nearbyDeliveryBoys.map(db => db.fcmToken).filter(Boolean);
+        
+        if (deliveryTokens.length > 0) {
+          await sendPushNotification(
+            deliveryTokens,
+            'New Delivery Available! 🛵',
+            `A new paid order (#${order._id.toString().slice(-6)}) is available for pickup.`,
+            { orderId: order._id.toString(), type: 'NEW_DELIVERY_AVAILABLE' }
+          );
+        }
+      } catch (deliveryErr) {
+        console.error('Failed to create delivery assignment or notify boys:', deliveryErr.message);
+      }
+
+      // 4. Send Seller Notifications
+      const seller = await User.findById(order.seller).select('phone fcmToken name');
+      const sellerMessage = `🎉 New Paid Order!\nYou've received a new order #${order._id.toString().slice(-6)}. Item Total: ₹${order.totalAmount.toFixed(2)}.`;
+      await sendWhatsApp(seller.phone, sellerMessage);
+
+      // 5. Add to Payment History
+      paymentHistoryEntries.push({
+        user: order.user,
+        order: order._id,
+        razorpayOrderId: order_id,
+        razorpayPaymentId: payment_id,
+        amount: order.totalAmount,
+        status: 'completed',
+      });
+    }
+    
+    await PaymentHistory.insertMany(paymentHistoryEntries);
+    
+    // 6. Clear Cart
+    await Cart.deleteOne({ user: customerId });
+    
+    // 7. Final User Notification
+    const customerInfo = await User.findById(customerId).select('name phone fcmToken');
+    if (customerInfo) {
+      await sendWhatsApp(customerInfo.phone, `✅ Your payment has been confirmed and your order is being processed! Thank you, ${customerInfo.name}!`);
+      await sendPushNotification(customerInfo.fcmToken, 'Payment Confirmed! ✅', `Your order is now being processed!`);
+    }
+}
+
+/**
+ * Handles all logic for a failed payment.
+ * @param {string} order_id - The Razorpay Order ID.
+ */
+async function handleFailedPayment(order_id) {
+    console.log(`Handling failed payment for Razorpay Order ID: ${order_id}`);
+    const ordersToFail = await Order.find({ paymentId: order_id, paymentStatus: 'pending' });
+
+    if (!ordersToFail || ordersToFail.length === 0) {
+        console.log(`No pending orders to fail for Razorpay Order ID: ${order_id}.`);
+        return;
+    }
+
+    for (const order of ordersToFail) {
+        order.paymentStatus = 'failed';
+        order.deliveryStatus = 'Cancelled';
+        order.history.push({ status: 'Payment Failed', note: 'Razorpay verification failed. Order cancelled.' });
+        await order.save();
+        
+        console.log(`Order ${order._id} payment failed. Status set to Failed/Cancelled. Cart preserved.`);
+        await notifyAdmin(`Payment FAILED for Order #${order._id.toString().slice(-6)}. Status set to Failed/Cancelled.`);
+        
+        const customerInfo = await User.findById(order.user).select('phone fcmToken');
+        if (customerInfo && customerInfo.phone) {
+            await sendWhatsApp(customerInfo.phone, `❌ Your payment for order #${order._id.toString().slice(-6)} failed. Your items are still in your cart. Please try again.`);
+        }
+    }
+}
+
 
 app.post('/api/payment/verify', async (req, res) => {
   try {
@@ -1747,105 +1858,80 @@ app.post('/api/payment/verify', async (req, res) => {
     const digest = shasum.digest('hex');
 
     if (digest === signature) {
-
-      const orders = await Order.find({ paymentId: order_id, paymentStatus: 'pending' });
-      if (orders && orders.length > 0) {
-        
-        const paymentHistoryEntries = [];
-        let customerId = orders[0].user; 
-        
-        for (const order of orders) {
-          order.paymentStatus = 'completed';
-          order.deliveryStatus = 'Pending';
-          order.history.push({ status: 'Payment Completed', note: 'Razorpay verification successful.' });
-          order.paymentId = payment_id;
-          await order.save();
-          
-          for(const item of order.orderItems) {
-            await Product.findByIdAndUpdate(item.product, { $inc: { stock: -item.qty } });
-          }
-
-          try {
-              const orderPincode = order.pincode;
-              await DeliveryAssignment.create({
-                order: order._id,
-                deliveryBoy: null,
-                status: 'Pending',
-                pincode: orderPincode,
-                history: [{ status: 'Pending' }]
-              });
-
-              const nearbyDeliveryBoys = await User.find({
-                role: 'delivery', approved: true, pincodes: orderPincode
-              }).select('fcmToken');
-              const deliveryTokens = nearbyDeliveryBoys.map(db => db.fcmToken).filter(Boolean);
-              
-              if (deliveryTokens.length > 0) {
-                await sendPushNotification(
-                  deliveryTokens,
-                  'New Delivery Available! 🛵',
-                  `A new paid order (#${order._id.toString().slice(-6)}) is available for pickup.`,
-                  { orderId: order._id.toString(), type: 'NEW_DELIVERY_AVAILABLE' }
-                );
-              }
-            } catch (deliveryErr) {
-              console.error('Failed to create delivery assignment or notify boys:', deliveryErr.message);
-            }
-
-          const seller = await User.findById(order.seller).select('phone fcmToken name');
-          const sellerMessage = `🎉 New Paid Order!\nYou've received a new order #${order._id.toString().slice(-6)}. Item Total: ₹${order.totalAmount.toFixed(2)}.`;
-          await sendWhatsApp(seller.phone, sellerMessage);
-
-          paymentHistoryEntries.push({
-            user: order.user,
-            order: order._id,
-            razorpayOrderId: order_id,
-            razorpayPaymentId: payment_id,
-            amount: order.totalAmount,
-            status: 'completed',
-          });
-        }
-        
-        await PaymentHistory.insertMany(paymentHistoryEntries);
-        
-        await Cart.deleteOne({ user: customerId });
-        
-        const customerInfo = await User.findById(customerId).select('name phone fcmToken');
-        if (customerInfo) {
-            await sendWhatsApp(customerInfo.phone, `✅ Your payment for order has been confirmed and the order is being processed! Thank you, ${customerInfo.name}!`);
-            await sendPushNotification(customerInfo.fcmToken, 'Payment Confirmed! ✅', `Your order is now being processed!`);
-        }
-
-        return res.json({ status: 'success', message: 'Payment verified successfully' });
-      }
+      await handleSuccessfulPayment(order_id, payment_id);
+      return res.json({ status: 'success', message: 'Payment verified successfully' });
+    } else {
+      await handleFailedPayment(order_id);
+      return res.status(400).json({ status: 'failure', message: 'Payment verification failed' });
     }
-    
-    const ordersToFail = await Order.find({ paymentId: order_id, paymentStatus: 'pending' });
-    if (ordersToFail && ordersToFail.length > 0) {
-        for (const order of ordersToFail) {
-            order.paymentStatus = 'failed';
-            order.deliveryStatus = 'Cancelled';
-            order.history.push({ status: 'Payment Failed', note: 'Razorpay verification failed. Order cancelled.' });
-
-            
-            await order.save();
-            
-            console.log(`Order ${order._id} payment failed. Status set to Failed/Cancelled. Cart preserved.`);
-            await notifyAdmin(`Payment FAILED for Order #${order._id.toString().slice(-6)}. Status set to Failed/Cancelled.`);
-            
-            const customerInfo = await User.findById(order.user).select('phone fcmToken');
-            if(customerInfo && customerInfo.phone) {
-                await sendWhatsApp(customerInfo.phone, `❌ Your payment for order #${order._id.toString().slice(-6)} failed. Your items are still in your cart. Please try again.`);
-            }
-        }
-    }
-
-    
-    res.status(400).json({ status: 'failure', message: 'Payment verification failed' });
   } catch (err) {
     res.status(500).json({ message: 'Error verifying payment', error: err.message });
   }
 });
+
+// --- [NEW] RAZORPAY WEBHOOK HANDLER ---
+app.post('/api/payment/razorpay-webhook', async (req, res) => {
+    const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+    console.log('Razorpay webhook called!');
+
+    try {
+        const shasum = crypto.createHmac('sha256', secret);
+        shasum.update(JSON.stringify(req.body));
+        const digest = shasum.digest('hex');
+
+        if (digest === req.headers['x-razorpay-signature']) {
+            console.log('Webhook signature verified.');
+            const event = req.body.event;
+            const payload = req.body.payload;
+
+            // Handle different events
+            switch (event) {
+                case 'payment.captured':
+                    const paymentEntity = payload.payment.entity;
+                    await handleSuccessfulPayment(paymentEntity.order_id, paymentEntity.id);
+                    break;
+                case 'payment.failed':
+                    const failedPaymentEntity = payload.payment.entity;
+                    await handleFailedPayment(failedPaymentEntity.order_id);
+                    break;
+                case 'payment_link.paid':
+                    const linkEntity = payload.payment_link.entity;
+                    const orderId = linkEntity.notes.order_id;
+                    const paymentId = linkEntity.payments.length > 0 ? linkEntity.payments[0].payment_id : null;
+
+                    if (orderId) {
+                      const order = await Order.findById(orderId);
+                      if (order && order.paymentStatus !== 'completed') {
+                          order.paymentStatus = 'completed';
+                          order.paymentMethod = 'razorpay_cod';
+                          if (paymentId) {
+                            order.paymentId = paymentId;
+                          }
+                          await order.save();
+                          console.log(`COD Order ${orderId} updated to paid via webhook.`);
+                          
+                          const customerInfo = await User.findById(order.user).select('name phone fcmToken');
+                          if (customerInfo) {
+                            await sendWhatsApp(customerInfo.phone, `✅ We've received your payment for order #${order._id.toString().slice(-6)}. Thank you!`);
+                          }
+                      }
+                    }
+                    break;
+                default:
+                    console.log(`Unhandled webhook event: ${event}`);
+            }
+
+            res.status(200).json({ status: 'ok' });
+        } else {
+            console.error('Webhook signature validation failed.');
+            res.status(400).send('Invalid signature');
+        }
+    } catch (error) {
+        console.error('Error in Razorpay webhook handler:', error.message);
+        res.status(500).send('Webhook processing error');
+    }
+});
+
 
 app.get('/api/payment/history', protect, async (req, res) => {
   try {
