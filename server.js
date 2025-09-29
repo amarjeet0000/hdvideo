@@ -1886,76 +1886,55 @@ app.post('/api/payment/verify', async (req, res) => {
     res.status(500).json({ message: 'Error verifying payment', error: err.message });
   }
 });
+
+// --- [NEW] RAZORPAY WEBHOOK HANDLER ---
 app.post('/api/payment/razorpay-webhook', async (req, res) => {
     const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
-    console.log('🛠 Razorpay webhook called!');
-    console.log('Webhook body:', req.body);
+    console.log('Razorpay webhook called!');
 
     try {
         const shasum = crypto.createHmac('sha256', secret);
         shasum.update(JSON.stringify(req.body));
         const digest = shasum.digest('hex');
 
-        console.log('Computed digest:', digest);
-        console.log('Received signature:', req.headers['x-razorpay-signature']);
-
         if (digest === req.headers['x-razorpay-signature']) {
             console.log('Webhook signature verified.');
             const event = req.body.event;
             const payload = req.body.payload;
 
-            console.log('Webhook event type:', event);
-
+            // Handle different events
             switch (event) {
                 case 'payment.captured':
-                    console.log('🔹 Payment captured event received.');
                     const paymentEntity = payload.payment.entity;
                     await handleSuccessfulPayment(paymentEntity.order_id, paymentEntity.id);
                     break;
-
                 case 'payment.failed':
-                    console.log('⚠ Payment failed event received.');
                     const failedPaymentEntity = payload.payment.entity;
                     await handleFailedPayment(failedPaymentEntity.order_id);
                     break;
-
                 case 'payment_link.paid':
-                    console.log('💳 Payment link paid event received.');
                     const linkEntity = payload.payment_link.entity;
                     const orderId = linkEntity.notes.order_id;
                     const paymentId = linkEntity.payments.length > 0 ? linkEntity.payments[0].payment_id : null;
 
                     if (orderId) {
-                        const order = await Order.findById(orderId);
-                        if (order && order.paymentStatus !== 'completed') {
-                            order.paymentStatus = 'completed';
-                            order.paymentMethod = 'razorpay_cod';
-                            if (paymentId) {
-                                order.paymentId = paymentId;
-                            }
-                            await order.save();
-                            console.log(`✅ COD Order ${orderId} updated to paid via webhook.`);
-                        }
+                      const order = await Order.findById(orderId);
+                      if (order && order.paymentStatus !== 'completed') {
+                          order.paymentStatus = 'completed';
+                          order.paymentMethod = 'razorpay_cod';
+                          if (paymentId) {
+                            order.paymentId = paymentId;
+                          }
+                          await order.save();
+                          console.log(`COD Order ${orderId} updated to paid via webhook.`);
+                          
+                          const customerInfo = await User.findById(order.user).select('name phone fcmToken');
+                          if (customerInfo) {
+                            await sendWhatsApp(customerInfo.phone, `✅ We've received your payment for order #${order._id.toString().slice(-6)}. Thank you!`);
+                          }
+                      }
                     }
                     break;
-
-                case 'payment_link.failed': // 🔹 Add this case for cancellations
-                    console.log('❌ Payment link failed event received.');
-                    const failedLinkEntity = payload.payment_link.entity;
-                    const failedOrderId = failedLinkEntity.notes.order_id;
-
-                    if (failedOrderId) {
-                        const order = await Order.findById(failedOrderId);
-                        if (order) {
-                            order.paymentStatus = 'failed';
-                            await order.save();
-                            console.log(`❌ Order ${failedOrderId} updated to FAILED in DB.`);
-                        } else {
-                            console.log('Order not found for failed payment:', failedOrderId);
-                        }
-                    }
-                    break;
-
                 default:
                     console.log(`Unhandled webhook event: ${event}`);
             }
