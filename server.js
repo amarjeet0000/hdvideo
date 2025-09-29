@@ -52,7 +52,7 @@ cloudinary.config({
 const BASE_PINCODE = process.env.BASE_PINCODE || '804425'; // Default Pincode
 const LOCAL_DELIVERY_FEE = 20; // UPDATED: Same Pincode delivery cost (₹20)
 const REMOTE_DELIVERY_FEE = 40; // UPDATED: Different Pincode delivery cost (₹40)
-const GST_RATE = 0.18; // 18% GST for all products (as requested)
+const GST_RATE = 0.0; // 18% GST for all products (as requested)
 // --- END CONSTANTS ---
 
 // Connect to MongoDB
@@ -3762,3 +3762,4 @@ const PORT = process.env.PORT || 5001;
 app.listen(PORT, IP, () => {
   console.log(`🚀 Server running on http://${IP}:${PORT}`);
 });     
+
