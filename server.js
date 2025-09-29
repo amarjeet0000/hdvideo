@@ -1587,8 +1587,7 @@ app.post('/api/orders', protect, async (req, res) => {
     res.status(201).json({
       message: effectivePaymentMethod === 'razorpay' ? 'Order initiated, awaiting payment verification.' : 'Orders created successfully',
       orders: createdOrders.map(o => o._id),
-      razorpayOrder: razorpayOrder ? { id: razorpayOrder.id, amount: razorpayOrder.amount } : undefined,
-      key_id: process.env.RAZORPAY_KEY_ID,
+      razorpayOrder: razorpayOrder ? { id: razorpayOrder.id, amount: razorpayOrder.amount, key_id: process.env.RAZORPAY_KEY_ID } : undefined,
       user: { name: req.user.name, email: req.user.email, phone: req.user.phone },
       paymentMethod: effectivePaymentMethod,
       grandTotal: finalAmountForPayment,
@@ -1654,6 +1653,25 @@ app.get('/api/orders/:id', protect, async (req, res) => {
     res.json(order);
   } catch (err) {
     res.status(500).json({ message: 'Error fetching order details' });
+  }
+});
+
+app.get('/api/orders/:id/payment-status', protect, async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.id);
+
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found' });
+    }
+    // Ensure the user owns this order
+    if (order.user.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    res.json({ paymentStatus: order.paymentStatus });
+
+  } catch (err) {
+    res.status(500).json({ message: 'Error fetching payment status', error: err.message });
   }
 });
 
@@ -3595,7 +3613,7 @@ app.post('/api/admin/notifications/schedule', protect, authorizeRole('admin'), a
   try {
     const { title, body, target, scheduledAt, imageUrl } = req.body; 
     
-    if (!title || !body || !target || !scheduledAt) {
+    if (!title || !body || !target || !scheduledAt) { 
       return res.status(400).json({ message: 'Title, message, scheduled time, and target audience are required.' });
     }
     const scheduledDate = new Date(scheduledAt);
@@ -3743,4 +3761,4 @@ const PORT = process.env.PORT || 5001;
 
 app.listen(PORT, IP, () => {
   console.log(`🚀 Server running on http://${IP}:${PORT}`);
-});
+});     
