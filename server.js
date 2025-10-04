@@ -1035,9 +1035,9 @@ app.get('/api/products', async (req, res) => {
     if (sellerId) filter.seller = sellerId;
     if (excludeProductId) filter._id = { $ne: excludeProductId };
 
-    // FIX APPLIED: Removed 'pincodes' from seller population as requested.
+    // FIX APPLIED: Removed 'pincodes' from seller population to ensure all products are returned without server-side pincode filtering.
     const products = await Product.find(filter)
-        .populate('seller', 'name email phone') // Removed 'pincodes' to stop client-side filtering
+        .populate('seller', 'name email phone') 
         .populate('subcategory', 'name image')
         .populate('category', 'name image');
 
@@ -2345,11 +2345,6 @@ app.put('/api/seller/products/:id', protect, authorizeRole('seller', 'admin'), c
       product.images = product.images.filter(img => !idsToDelete.includes(img.publicId));
     }
 
-    if (req.files.images && req.files.images.length > 0) {
-      const newImages = req.files.images.map(file => ({ url: file.path, publicId: file.filename }));
-      product.images.push(...newImages);
-    }
-
     if (req.files.video && req.files.video.length > 0) {
       const newVideoFile = req.files.video[0];
       if (product.uploadedVideo && product.uploadedVideo.publicId) {
@@ -2888,11 +2883,6 @@ app.put('/api/admin/products/:id', protect, authorizeRole('admin'), productUploa
       const idsToDelete = Array.isArray(imagesToDelete) ? idsToDelete : [imagesToDelete];
       await Promise.all(idsToDelete.map(publicId => cloudinary.uploader.destroy(publicId)));
       product.images = product.images.filter(img => !idsToDelete.includes(img.publicId));
-    }
-
-    if (req.files.images && req.files.images.length > 0) {
-      const newImages = req.files.images.map(file => ({ url: file.path, publicId: file.filename }));
-      product.images.push(...newImages);
     }
 
     if (req.files.video && req.files.video.length > 0) {
