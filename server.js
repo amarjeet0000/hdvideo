@@ -52,7 +52,7 @@ cloudinary.config({
 const BASE_PINCODE = process.env.BASE_PINCODE || '804425'; // Default Pincode
 const LOCAL_DELIVERY_FEE = 20; // UPDATED: Same Pincode delivery cost (₹20)
 const REMOTE_DELIVERY_FEE = 40; // UPDATED: Different Pincode delivery cost (₹40)
-const GST_RATE = 0.0; // 0% GST for all products
+const GST_RATE = 0.0; // 18% GST for all products (as requested)
 // --- END CONSTANTS ---
 
 // Connect to MongoDB
@@ -219,7 +219,7 @@ const userSchema = new mongoose.Schema({
   role: { type: String, enum: ['user', 'seller', 'admin', 'delivery'], default: 'user', index: true },
   pincodes: { type: [String], default: [] },
   approved: { type: Boolean, default: true, index: true },
-  passwordResetOTP: String, // Used for both password reset and temporary OTP registration flow
+  passwordResetOTP: String,
   passwordResetOTPExpire: Date,
   pickupAddress: {
     street: String,
@@ -594,219 +594,254 @@ function checkSellerApproved(req, res, next) {
   next();
 }
 
-
-// --------------------------------------------------------------------------------
-// --------- AUTH ROUTES (Includes new OTP Registration and existing Firebase/Login) ----------
-// --------------------------------------------------------------------------------
-
-// --- NEW OTP REGISTRATION ENDPOINTS ---
-
-// [NEW] 1. Endpoint to send the OTP for registration
-app.post('/api/auth/send-otp-register', async (req, res) => {
-    try {
-        const { phone } = req.body;
-        if (!phone) return res.status(400).json({ message: 'Phone number is required.' });
-
-        // 1. Ensure user does not already exist
-        const existingUser = await User.findOne({ phone, role: 'user' });
-        if (existingUser) {
-            return res.status(409).json({ message: 'User with this phone number is already registered. Please log in.' });
-        }
-
-        // 2. Generate and Hash OTP
-        const otp = Math.floor(100000 + Math.random() * 900000).toString();
-        const hashedOTP = await bcrypt.hash(otp, 10);
-        const otpExpire = Date.now() + 10 * 60 * 1000; // 10 minutes expiry
-
-        // 3. Temporarily store OTP and expiry on the phone number
-        // This is a simple way without a dedicated OTP table. We'll use the user model's fields temporarily.
-        // If a user is half-way through registration, we can't search them. So, we use the temporary fields on a temp user or a unique key.
-        
-        // We'll use a placeholder record based on phone/email structure for now to attach the OTP.
-        let tempUser = await User.findOne({ phone });
-        
-        if (!tempUser) {
-            // Create a temporary record (if not using phone-based login for non-users)
-            tempUser = new User({
-                name: `TEMP-${phone.slice(-4)}`,
-                email: `temp-${phone.substring(1).replace(/\+/g, '')}@otp-reg.com`,
-                phone: phone,
-                password: 'temp_password_hash', // Dummy, will be overwritten if user registers
-                role: 'user',
-                approved: false // Mark as unapproved/pending registration
-            });
-            await tempUser.save();
-        }
-        
-        tempUser.passwordResetOTP = hashedOTP;
-        tempUser.passwordResetOTPExpire = otpExpire;
-        await tempUser.save();
-
-
-        // 4. Send OTP
-        console.log(`[REGISTRATION OTP for ${phone}]: ${otp}`);
-        const message = `Namaste! Your OTP for registration is ${otp}. This OTP is valid for 10 minutes.`;
-        await sendWhatsApp(phone, message); 
-
-        res.status(200).json({ message: 'OTP sent successfully. Proceed to verification.' });
-
-    } catch (err) {
-        console.error('Send OTP for registration error:', err.message);
-        res.status(500).json({ message: 'Server error sending OTP.' });
-    }
-});
-
-
-// [NEW] 2. Endpoint to verify OTP and finalize registration
-app.post('/api/auth/register-with-otp', async (req, res) => {
-    try {
-        const { name, email, phone, pincode, otp } = req.body;
-        
-        if (!name || !phone || !pincode || !otp) {
-            return res.status(400).json({ message: 'Name, phone, pincode, and OTP are required for registration.' });
-        }
-
-        // 1. Find the user record with the temporary OTP
-        const user = await User.findOne({
-            phone,
-            passwordResetOTPExpire: { $gt: Date.now() },
-        });
-
-        if (!user) {
-            return res.status(400).json({ message: 'Registration failed. OTP expired or phone number not found.' });
-        }
-
-        // 2. Verify the OTP
-        const isMatch = await bcrypt.compare(otp, user.passwordResetOTP);
-
-        if (!isMatch) {
-            return res.status(400).json({ message: 'Invalid OTP. Please try again.' });
-        }
-
-        // 3. Finalize User Creation/Update
-        const finalEmail = email || `${phone.substring(1).replace(/\+/g, '')}@user-reg.com`;
-        
-        // Ensure email uniqueness if provided
-        if (email && finalEmail !== user.email) {
-            const emailCheck = await User.findOne({ email: finalEmail });
-            if (emailCheck && emailCheck.phone !== phone) {
-                return res.status(409).json({ message: 'This email address is already in use.' });
-            }
-        }
-        
-        // Create a real password hash (since the password field is required)
-        const newPassword = crypto.randomBytes(16).toString('hex');
-        const finalPasswordHash = await bcrypt.hash(newPassword, 10);
-
-
-        user.name = name;
-        user.email = finalEmail; 
-        user.password = finalPasswordHash;
-        user.pincodes = [pincode];
-        user.approved = true; 
-        user.passwordResetOTP = undefined;
-        user.passwordResetOTPExpire = undefined;
-        await user.save();
-
-
-        // 4. Registration successful, generate local JWT token
-        const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
-        
-        await sendWhatsApp(user.phone, `🎉 Welcome, ${user.name}! Your account is created. You can now log in and start shopping.`);
-        
-        res.status(201).json({ 
-            token, 
-            message: 'Registration successful!',
-            user: { id: user._id, name: user.name, email: user.email, phone: user.phone, role: user.role, pincodes: user.pincodes, approved: user.approved } 
-        });
-
-    } catch (err) {
-        console.error('Register with OTP error:', err.message);
-        if (err.code === 11000) {
-            return res.status(409).json({ message: 'An account with this email/phone already exists. Please log in.' });
-        }
-        res.status(500).json({ message: 'Server error during OTP registration.' });
-    }
-});
-
-
-// --- MODIFIED: Verify Firebase ID Token and handle auto-registration ---
-app.post('/api/auth/verify-login-otp', async (req, res) => {
+// --------- Category Routes ----------
+app.get('/api/categories', async (req, res) => {
   try {
-    const { firebaseToken } = req.body;
-    if (!firebaseToken) {
-      return res.status(400).json({ message: 'Firebase ID Token is required.' });
-    }
-
-    // 1. Verify the Firebase ID Token
-    const decodedToken = await admin.auth().verifyIdToken(firebaseToken);
-    const phoneNumber = decodedToken.phone_number;
-    
-    if (!phoneNumber) {
-        return res.status(401).json({ message: 'Firebase token missing phone number.' });
-    }
-
-    // 2. Find the user in the local database
-    let user = await User.findOne({ phone: phoneNumber, role: 'user' });
-
-    if (!user) {
-        // *** FIX: Auto-Register New User ***
-        const randomString = crypto.randomBytes(8).toString('hex');
-        const defaultName = `User-${phoneNumber.slice(-4)}`;
-        // Create a temporary password hash (required by schema)
-        const temporaryPasswordHash = await bcrypt.hash(crypto.randomBytes(16).toString('hex'), 10);
-        
-        user = await User.create({
-            name: defaultName,
-            // Create a unique placeholder email
-            email: `${phoneNumber.substring(1).replace(/\+/g, '')}@temp-${randomString}.com`, 
-            phone: phoneNumber,
-            password: temporaryPasswordHash, 
-            role: 'user',
-            approved: true
-        });
-        console.log(`✅ Auto-registered new user: ${user.phone}`);
-    }
-
-    if (user.role !== 'user') {
-        return res.status(403).json({ message: 'Phone login is restricted to user accounts.' });
-    }
-    
-    if (user.role === 'seller' && !user.approved) {
-      return res.status(403).json({ message: 'Seller account awaiting admin approval' });
-    }
-
-    // 3. Login successful, generate local JWT token
-    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
-    res.json({ 
-        token, 
-        user: { 
-            id: user._id, 
-            name: user.name, 
-            email: user.email, 
-            phone: user.phone, 
-            role: user.role, 
-            pincodes: user.pincodes, 
-            approved: user.approved 
-        } 
-    });
-
+    const { active } = req.query;
+    const filter = {};
+    if (typeof active !== 'undefined') filter.isActive = active === 'true';
+    const categories = await Category.find(filter)
+      .sort({ sortOrder: 1, name: 1 })
+      .select('name slug isActive image type sortOrder');
+    res.json(categories);
   } catch (err) {
-    let message = 'Error verifying Firebase token. Please ensure Phone Sign-in is enabled in Firebase Console.';
-    if (err.code && err.code.startsWith('auth/')) {
-        message = `Firebase Auth Error: ${err.message}`;
-    }
-    console.error('Verify Login OTP/Firebase Token Error:', err.message);
-    res.status(401).json({ message: message });
+    res.status(500).json({ message: 'Error fetching categories', error: err.message });
   }
 });
+
+app.get('/api/categories/:id', async (req, res) => {
+  try {
+    const category = await Category.findById(req.params.id);
+    if (!category) return res.status(404).json({ message: 'Category not found' });
+    res.json(category);
+  } catch (err) {
+    res.status(500).json({ message: 'Error fetching category', error: err.message });
+  }
+});
+
+app.get('/api/admin/categories', protect, authorizeRole('admin'), async (req, res) => {
+  try {
+    const { active } = req.query;
+    const filter = {};
+    if (typeof active !== 'undefined') filter.isActive = active === 'true';
+    const categories = await Category.find(filter)
+      .sort({ sortOrder: 1, name: 1 })
+      .select('name slug isActive image type sortOrder');
+    res.json(categories);
+  } catch (err) {
+    res.status(500).json({ message: 'Error fetching categories', error: err.message });
+  }
+});
+
+app.post('/api/admin/categories', protect, authorizeRole('admin'), upload.single('image'), async (req, res) => {
+  try {
+    const { name, type, sortOrder } = req.body;
+    if (!name) return res.status(400).json({ message: 'Category name is required' });
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    const category = await Category.create({
+      name,
+      slug,
+      type: type || 'product',
+      sortOrder: sortOrder || 0,
+      image: {
+        url: req.file ? req.file.path : undefined,
+        publicId: req.file ? req.file.filename : undefined,
+      }
+    });
+    res.status(201).json(category);
+  } catch (err) {
+    if (err.code === 11000) return res.status(409).json({ message: 'Category with this name already exists' });
+    res.status(500).json({ message: 'Error creating category', error: err.message });
+  }
+});
+
+app.put('/api/admin/categories/:id', protect, authorizeRole('admin'), upload.single('image'), async (req, res) => {
+  try {
+    const { name, isActive, type, sortOrder } = req.body;
+    const category = await Category.findById(req.params.id);
+    if (!category) return res.status(404).json({ message: 'Category not found' });
+    if (req.file) {
+      if (category.image && category.image.publicId) await cloudinary.uploader.destroy(category.image.publicId);
+      category.image = { url: req.file.path, publicId: req.file.filename };
+    }
+    if (name) {
+      category.name = name;
+      category.slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    }
+    if (typeof isActive !== 'undefined') category.isActive = isActive;
+    if (type) category.type = type;
+    if (typeof sortOrder !== 'undefined') category.sortOrder = sortOrder;
+
+    await category.save();
+    res.json(category);
+  } catch (err) {
+    if (err.code === 11000) return res.status(409).json({ message: 'Category with this name already exists' });
+    res.status(500).json({ message: 'Error updating category', error: err.message });
+  }
+});
+
+app.put('/api/admin/categories/reorder', protect, authorizeRole('admin'), async (req, res) => {
+  try {
+    const { order } = req.body;
+    if (!Array.isArray(order)) {
+      return res.status(400).json({ message: 'Invalid data. "order" must be an array.' });
+    }
+
+    const bulkOps = order.map(item => ({
+      updateOne: {
+        filter: { _id: item.id },
+        update: { $set: { sortOrder: item.order } }
+      }
+    }));
+
+    await Category.bulkWrite(bulkOps);
+
+    res.json({ message: 'Categories reordered successfully.' });
+  } catch (err) {
+    console.error("Category reorder error:", err.message);
+    res.status(500).json({ message: 'Error reordering categories', error: err.message });
+  }
+});
+
+app.delete('/api/admin/categories/:id', protect, authorizeRole('admin'), async (req, res) => {
+  try {
+    const category = await Category.findById(req.params.id);
+    if (!category) return res.status(404).json({ message: 'Category not found' });
+    const productsCount = await Product.countDocuments({ category: category._id });
+    if (productsCount > 0) return res.status(400).json({ message: 'Cannot delete category with products', productsCount });
+    const subcategoriesCount = await Subcategory.countDocuments({ category: category._id });
+    if (subcategoriesCount > 0) return res.status(400).json({ message: 'Cannot delete category with subcategories', subcategoriesCount });
+    if (category.image && category.image.publicId) await cloudinary.uploader.destroy(category.image.publicId);
+    await category.deleteOne();
+    res.json({ message: 'Category deleted successfully' });
+  } catch (err) {
+    res.status(500).json({ message: 'Error deleting category', error: err.message });
+  }
+});
+
+
+// --------- Subcategory Routes ----------
+app.get('/api/subcategories', async (req, res) => {
+  try {
+    const { active, categoryId, parentId } = req.query;
+    const filter = {};
+    if (typeof active !== 'undefined') filter.isActive = active === 'true';
+    if (categoryId) filter.category = categoryId;
+    if (parentId) {
+      filter.parent = parentId;
+    } else {
+      filter.isTopLevel = true;
+    }
+    const subcategories = await Subcategory.find(filter).populate('category', 'name slug image').sort({ name: 1 });
+    res.json(subcategories);
+  } catch (err) {
+    res.status(500).json({ message: 'Error fetching subcategories', error: err.message });
+  }
+});
+
+app.get('/api/subcategories/:id', async (req, res) => {
+  try {
+    const subcategory = await Subcategory.findById(req.params.id).populate('category', 'name slug image').populate('parent');
+    if (!subcategory) return res.status(404).json({ message: 'Subcategory not found' });
+    res.json(subcategory);
+  } catch (err) {
+    res.status(500).json({ message: 'Error fetching subcategory', error: err.message });
+  }
+});
+
+app.get('/api/admin/subcategories', protect, authorizeRole('admin'), async (req, res) => {
+  try {
+    const { active, categoryId, parentId, isTopLevel } = req.query;
+    const filter = {};
+    if (typeof active !== 'undefined') filter.isActive = active === 'true';
+    if (categoryId) filter.category = categoryId;
+    if (parentId) {
+      filter.parent = parentId;
+    }
+    if (isTopLevel) {
+      filter.isTopLevel = isTopLevel === 'true';
+    }
+    const subcategories = await Subcategory.find(filter).populate('category', 'name slug image').sort({ name: 1 });
+    res.json(subcategories);
+  } catch (err) {
+    res.status(500).json({ message: 'Error fetching subcategories', error: err.message });
+  }
+});
+
+app.post('/api/admin/subcategories', protect, authorizeRole('admin'), upload.single('image'), async (req, res) => {
+  try {
+    const { name, categoryId, parentId } = req.body;
+    if (!name || !categoryId) return res.status(400).json({ message: 'Name and category are required' });
+
+    const isTopLevel = parentId ? false : true;
+
+    const subcategory = await Subcategory.create({
+      name,
+      category: categoryId,
+      parent: parentId,
+      isTopLevel,
+      image: {
+        url: req.file ? req.file.path : undefined,
+        publicId: req.file ? req.file.filename : undefined,
+      }
+    });
+    res.status(201).json(subcategory);
+  } catch (err) {
+    res.status(500).json({ message: 'Error creating subcategory', error: err.message });
+  }
+});
+
+app.put('/api/admin/subcategories/:id', protect, authorizeRole('admin'), upload.single('image'), async (req, res) => {
+  try {
+    const { name, categoryId, parentId, isActive } = req.body;
+    const subcategory = await Subcategory.findById(req.params.id);
+    if (!subcategory) return res.status(404).json({ message: 'Subcategory not found' });
+
+    const isTopLevel = parentId ? false : true;
+
+    if (req.file) {
+      if (subcategory.image && subcategory.image.publicId) await cloudinary.uploader.destroy(subcategory.image.publicId);
+      subcategory.image = { url: req.file.path, publicId: req.file.filename };
+    }
+    if (name) subcategory.name = name;
+    if (categoryId) subcategory.category = categoryId;
+    if (typeof parentId !== 'undefined') subcategory.parent = parentId;
+    if (typeof isActive !== 'undefined') subcategory.isActive = isActive;
+    subcategory.isTopLevel = isTopLevel;
+
+    await subcategory.save();
+    res.json(subcategory);
+  } catch (err) {
+    res.status(500).json({ message: 'Error updating subcategory', error: err.message });
+  }
+});
+
+app.delete('/api/admin/subcategories/:id', protect, authorizeRole('admin'), async (req, res) => {
+  try {
+    const subcategory = await Subcategory.findById(req.params.id);
+    if (!subcategory) return res.status(404).json({ message: 'Subcategory not found' });
+
+    const nestedSubcategoriesCount = await Subcategory.countDocuments({ parent: subcategory._id });
+    if (nestedSubcategoriesCount > 0) return res.status(400).json({ message: 'Cannot delete subcategory with nested subcategories' });
+
+    const productsCount = await Product.countDocuments({ subcategory: subcategory._id });
+    if (productsCount > 0) return res.status(400).json({ message: 'Cannot delete subcategory with products', productsCount });
+
+    if (subcategory.image && subcategory.image.publicId) await cloudinary.uploader.destroy(subcategory.image.publicId);
+    await subcategory.deleteOne();
+    res.json({ message: 'Subcategory deleted successfully' });
+  } catch (err) {
+    res.status(500).json({ message: 'Error deleting subcategory', error: err.message });
+  }
+});
+
 
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { name, email, password, phone, role = 'user', pincodes } = req.body;
     if (!name || !password || !phone) return res.status(400).json({ message: 'Name, password, and phone number are required' });
 
-    
+  
     if (role === 'seller' && !email) {
         return res.status(400).json({ message: 'Email is required for seller registration.' });
     }
@@ -1035,12 +1070,7 @@ app.get('/api/products', async (req, res) => {
     if (sellerId) filter.seller = sellerId;
     if (excludeProductId) filter._id = { $ne: excludeProductId };
 
-    // FIX APPLIED: Removed 'pincodes' from seller population to ensure all products are returned for the general user view.
-    const products = await Product.find(filter)
-        .populate('seller', 'name email phone') 
-        .populate('subcategory', 'name image')
-        .populate('category', 'name image');
-
+    const products = await Product.find(filter).populate('seller', 'name email phone pincodes').populate('subcategory', 'name image').populate('category', 'name image');
     res.json(products);
   } catch (err) {
     console.error("Get Products Error:", err.message);
@@ -2345,6 +2375,11 @@ app.put('/api/seller/products/:id', protect, authorizeRole('seller', 'admin'), c
       product.images = product.images.filter(img => !idsToDelete.includes(img.publicId));
     }
 
+    if (req.files.images && req.files.images.length > 0) {
+      const newImages = req.files.images.map(file => ({ url: file.path, publicId: file.filename }));
+      product.images.push(...newImages);
+    }
+
     if (req.files.video && req.files.video.length > 0) {
       const newVideoFile = req.files.video[0];
       if (product.uploadedVideo && product.uploadedVideo.publicId) {
@@ -2665,7 +2700,7 @@ app.put('/api/delivery/assignments/:id/status', protect, authorizeRole('delivery
 
     if (newOrderStatus === 'Cancelled') {
         if (order.paymentStatus !== 'failed' && order.deliveryStatus !== 'Payment Pending') {
-            for(const item of order.orderItems) {
+             for(const item of order.orderItems) {
                 await Product.findByIdAndUpdate(item.product, { $inc: { stock: item.qty } });
             }
         }
@@ -2883,6 +2918,11 @@ app.put('/api/admin/products/:id', protect, authorizeRole('admin'), productUploa
       const idsToDelete = Array.isArray(imagesToDelete) ? idsToDelete : [imagesToDelete];
       await Promise.all(idsToDelete.map(publicId => cloudinary.uploader.destroy(publicId)));
       product.images = product.images.filter(img => !idsToDelete.includes(img.publicId));
+    }
+
+    if (req.files.images && req.files.images.length > 0) {
+      const newImages = req.files.images.map(file => ({ url: file.path, publicId: file.filename }));
+      product.images.push(...newImages);
     }
 
     if (req.files.video && req.files.video.length > 0) {
@@ -3721,4 +3761,4 @@ const PORT = process.env.PORT || 5001;
 
 app.listen(PORT, IP, () => {
   console.log(`🚀 Server running on http://${IP}:${PORT}`);
-});
+});     
