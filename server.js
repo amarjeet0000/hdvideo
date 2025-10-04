@@ -1035,7 +1035,12 @@ app.get('/api/products', async (req, res) => {
     if (sellerId) filter.seller = sellerId;
     if (excludeProductId) filter._id = { $ne: excludeProductId };
 
-    const products = await Product.find(filter).populate('seller', 'name email phone pincodes').populate('subcategory', 'name image').populate('category', 'name image');
+    // FIX APPLIED: Removed 'pincodes' from seller population as requested.
+    const products = await Product.find(filter)
+        .populate('seller', 'name email phone') // Removed 'pincodes' to stop client-side filtering
+        .populate('subcategory', 'name image')
+        .populate('category', 'name image');
+
     res.json(products);
   } catch (err) {
     console.error("Get Products Error:", err.message);
