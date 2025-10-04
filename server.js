@@ -1035,7 +1035,7 @@ app.get('/api/products', async (req, res) => {
     if (sellerId) filter.seller = sellerId;
     if (excludeProductId) filter._id = { $ne: excludeProductId };
 
-    // FIX APPLIED: Removed 'pincodes' from seller population to ensure all products are returned without server-side pincode filtering.
+    // FIX APPLIED: Removed 'pincodes' from seller population to ensure all products are returned for the general user view.
     const products = await Product.find(filter)
         .populate('seller', 'name email phone') 
         .populate('subcategory', 'name image')
