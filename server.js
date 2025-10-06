@@ -124,63 +124,49 @@ async function notifyAdmin(message) {
 async function sendPushNotification(tokens, title, body, data = {}, imageUrl = null) {
   try {
     if (!tokens) return;
-
-    const validTokens = (Array.isArray(tokens) ? tokens : [tokens])
-      .filter(t => typeof t === 'string' && t.length > 0);
-
+    const validTokens = (Array.isArray(tokens) ? tokens : [tokens]).filter(t => typeof t === 'string' && t.length > 0);
     if (validTokens.length === 0) {
-      console.log('Push Notification: No valid FCM tokens to send to.');
+      console.log('Push Notification: No valid FCM tokens.');
       return;
     }
     
-    // Base notification payload
     const notificationPayload = { title, body };
+    // The key must be 'image', not 'imageUrl'
     if (imageUrl) {
-      notificationPayload.imageUrl = imageUrl;
+      notificationPayload.image = imageUrl;
     }
 
-    // Android-specific payload
-    const androidNotificationPayload = {
-      sound: 'default',
-      clickAction: 'FLUTTER_NOTIFICATION_CLICK',
-    };
-    if (imageUrl) {
-      androidNotificationPayload.imageUrl = imageUrl;
-    }
-
-    // APNs (iOS)-specific payload
-    const apnsPayload = {
-      payload: {
-        aps: {
-          sound: 'default',
-          badge: 1,
-          ...(imageUrl && { 'mutable-content': 1 })
-        }
-      },
-      ...(imageUrl && { 
-        fcm_options: { 
-          image: imageUrl 
-        }
-      })
-    };
-    
     const message = {
       notification: notificationPayload,
       data: data,
       tokens: validTokens,
       android: {
-        notification: androidNotificationPayload
+        notification: {
+          sound: 'default',
+          clickAction: 'FLUTTER_NOTIFICATION_CLICK',
+        }
       },
-      apns: apnsPayload
+      apns: {
+        payload: {
+          aps: {
+            sound: 'default',
+            badge: 1,
+            ...(imageUrl && { 'mutable-content': 1 })
+          }
+        },
+        ...(imageUrl && { 
+          fcm_options: { 
+            image: imageUrl 
+          }
+        })
+      }
     };
 
     const response = await getMessaging().sendEachForMulticast(message);
     console.log(`Push Notification: Sent to ${response.successCount} users.`);
-    
     if (response.failureCount > 0) {
       console.error(`Push Notification: Failed to send to ${response.failureCount} users.`);
     }
-
   } catch (err) {
     console.error('Push Notification Failed:', err.message);
   }
@@ -3334,13 +3320,17 @@ app.put('/api/admin/orders/:id/status', protect, authorizeRole('admin', 'seller'
     res.status(500).json({ message: 'Error updating order status', error: err.message });
   }
 });
-app.post('/api/admin/broadcast', protect, authorizeRole('admin'), async (req, res) => {
+// ✅ UPDATED: This route now handles a file upload named 'media'
+app.post('/api/admin/broadcast', protect, authorizeRole('admin'), uploadSingleMedia, async (req, res) => {
   try {
-    const { title, message, target, imageUrl } = req.body; 
+    const { title, message, target } = req.body;
     
     if (!title || !message || !target) { 
       return res.status(400).json({ message: 'Title, message, and target audience are required.' });
     }
+
+    // Check if a file was uploaded and get its URL from Cloudinary
+    const imageUrl = req.file ? req.file.path : null;
 
     let query = {};
     if (target === 'users') {
@@ -3350,7 +3340,7 @@ app.post('/api/admin/broadcast', protect, authorizeRole('admin'), async (req, re
     } else if (target === 'delivery_boys') {
       query = { role: 'delivery', approved: true };
     } else if (target !== 'all') {
-      return res.status(400).json({ message: "Invalid target. Must be 'users', 'sellers', 'delivery_boys', or 'all'." });
+      return res.status(400).json({ message: "Invalid target." });
     }
 
     const recipients = await User.find(query).select('phone fcmToken');
@@ -3359,6 +3349,7 @@ app.post('/api/admin/broadcast', protect, authorizeRole('admin'), async (req, re
     const fcmTokens = [];
 
     for (const recipient of recipients) {
+      // WhatsApp does not support images in this simple way, so we only send text.
       if (recipient.phone) {
         await sendWhatsApp(recipient.phone, `*${title}*\n\n${message}`);
         successCount++;
@@ -3374,18 +3365,17 @@ app.post('/api/admin/broadcast', protect, authorizeRole('admin'), async (req, re
         title, 
         message, 
         { type: 'BROADCAST' },
-        imageUrl
+        imageUrl // Use the uploaded image URL here
       );
     }
 
-    res.json({ message: `Broadcast sent successfully to ${successCount} recipients.` });
+    res.json({ message: `Broadcast sent successfully to ${fcmTokens.length} devices.` });
 
   } catch (err) {
     console.error('Broadcast error:', err.message);
     res.status(500).json({ message: 'Error sending broadcast message', error: err.message });
   }
 });
-
 app.post('/api/admin/banners', protect, authorizeRole('admin'), uploadSingleMedia, async (req, res) => {
   try {
     const { title, link, isActive, position, type } = req.body;
@@ -3952,40 +3942,50 @@ app.post('/api/admin/orders/:id/refund', protect, authorizeRole('admin'), async 
     });
   }
 });
-app.post('/api/admin/notifications/schedule', protect, authorizeRole('admin'), async (req, res) => {
+app.post('/api/admin/notifications/schedule', protect, authorizeRole('admin'), upload.single('image'), async (req, res) => {
   try {
-    const { title, body, target, scheduledAt, imageUrl } = req.body; 
-    
-    if (!title || !body || !target || !scheduledAt) { 
+    const { title, body, target, scheduledAt } = req.body;
+
+    if (!title || !body || !target || !scheduledAt) {
       return res.status(400).json({ message: 'Title, message, scheduled time, and target audience are required.' });
     }
+
     const scheduledDate = new Date(scheduledAt);
     if (isNaN(scheduledDate.getTime()) || scheduledDate < new Date()) {
       return res.status(400).json({ message: 'Invalid or past scheduled date.' });
     }
-    
-    const newNotification = await ScheduledNotification.create({ 
-      title, 
-      body, 
-      target, 
-      scheduledAt: scheduledDate,
-      imageUrl: imageUrl || null
-    });
-    
-    res.status(201).json({ message: 'Notification scheduled successfully.', notification: newNotification });
-  } catch (err) {
-    console.error('Schedule notification error:', err.message);
-    res.status(500).json({ message: 'Error scheduling notification.', error: err.message });
-  }
-});
 
-app.get('/api/admin/notifications', protect, authorizeRole('admin'), async (req, res) => {
-  try {
-    const notifications = await ScheduledNotification.find().sort({ scheduledAt: -1 });
-    res.json(notifications);
+    let imageUrl = null;
+
+    // ✅ Upload to Cloudinary (if image file provided)
+    if (req.file) {
+      const uploadResult = await cloudinary.uploader.upload(req.file.path, {
+        folder: 'notifications'
+      });
+      imageUrl = uploadResult.secure_url;
+      console.log('✅ Image uploaded:', imageUrl);
+    }
+
+    // ✅ Save notification data in DB
+    const newNotification = await ScheduledNotification.create({
+      title,
+      body,
+      target,
+      scheduledAt: scheduledDate,
+      imageUrl
+    });
+
+    res.status(201).json({
+      message: 'Notification scheduled successfully.',
+      notification: newNotification
+    });
+
   } catch (err) {
-    console.error('Get notifications error:', err.message);
-    res.status(500).json({ message: 'Error fetching notifications.', error: err.message });
+    console.error('❌ Schedule notification error:', err.message);
+    res.status(500).json({
+      message: 'Error scheduling notification.',
+      error: err.message
+    });
   }
 });
 
@@ -4213,6 +4213,28 @@ app.get('/api/coupons', protect, async (req, res) => {
     res.status(500).json({ message: 'Error fetching coupons' });
   }
 });
+// In server.js, add this new route (e.g., after the admin broadcast route)
+
+app.get('/api/notifications/history', protect, async (req, res) => {
+    try {
+        const userRole = req.user.role; // 'user', 'seller', etc.
+        
+        // Find notifications that were sent and targeted 'all' or the user's specific role
+        const notifications = await ScheduledNotification.find({
+            isSent: true,
+            target: { $in: ['all', userRole] }
+        })
+        .sort({ sentAt: -1 }) // Show newest first
+        .limit(50); // Limit to the last 50 notifications
+
+        res.json(notifications);
+
+    } catch (err) {
+        console.error('Error fetching notification history:', err.message);
+        res.status(500).json({ message: 'Error fetching notification history' });
+    }
+});
+
 
 const IP = '0.0.0.0';
 const PORT = process.env.PORT || 5001;
