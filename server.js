@@ -1,3 +1,4 @@
+
 // server.js - Full E-Commerce Backend (Patched with all new features + Delivery Module + Tax/GST + Razorpay Webhook)
 
 // Load environment variables from .env file
@@ -3500,18 +3501,135 @@ app.delete('/api/admin/banners/:id', protect, authorizeRole('admin'), async (req
   }
 });
 
-app.get('/api/splash', async (req, res) => {
+// --------------------------------------------------------------------------------
+// --------- ADMIN SPLASH SCREEN ROUTES ----------
+// --------------------------------------------------------------------------------
+
+// GET all splash screens for the admin panel
+app.get('/api/admin/splash', protect, authorizeRole('admin'), async (req, res) => {
   try {
-    const allSplashes = await Splash.find({ isActive: true });
-    const defaultSplash = allSplashes.find(s => s.type === 'default');
-    const scheduledSplashes = allSplashes.filter(s => s.type === 'scheduled');
-    res.json({ defaultSplash, scheduledSplashes });
+    const splashes = await Splash.find().sort({ createdAt: -1 });
+    res.json(splashes);
   } catch (err) {
-    console.error('Error fetching splash screens:', err.message);
-    res.status(500).json({ message: 'Error fetching splash screens' });
+    res.status(500).json({ message: 'Error fetching splash screens', error: err.message });
   }
 });
 
+// POST a new splash screen
+app.post('/api/admin/splash', protect, authorizeRole('admin'), uploadSingleMedia, async (req, res) => {
+  try {
+    const { title, link, type = 'default', isActive = 'true', startDate, endDate } = req.body;
+    const file = req.file;
+
+    if (!file) {
+      return res.status(400).json({ message: 'An image or video file is required.' });
+    }
+
+    const newSplash = await Splash.create({
+      title,
+      link,
+      type,
+      isActive: isActive === 'true',
+      startDate: type === 'scheduled' ? startDate : null,
+      endDate: type === 'scheduled' ? endDate : null,
+      image: {
+        url: file.path,
+        publicId: file.filename
+      }
+    });
+
+    res.status(201).json(newSplash);
+  } catch (err) {
+    console.error('Create splash screen error:', err.message);
+    res.status(500).json({ message: 'Error creating splash screen', error: err.message });
+  }
+});
+
+// PUT (edit) an existing splash screen
+app.put('/api/admin/splash/:id', protect, authorizeRole('admin'), uploadSingleMedia, async (req, res) => {
+  try {
+    const { title, link, type, isActive, startDate, endDate } = req.body;
+    const splash = await Splash.findById(req.params.id);
+
+    if (!splash) {
+      return res.status(404).json({ message: 'Splash screen not found.' });
+    }
+
+    if (req.file) {
+      // Delete old image from Cloudinary if it exists
+      if (splash.image && splash.image.publicId) {
+        await cloudinary.uploader.destroy(splash.image.publicId);
+      }
+      splash.image = { url: req.file.path, publicId: req.file.filename };
+    }
+    
+    if (title) splash.title = title;
+    if (link) splash.link = link;
+    if (type) splash.type = type;
+    if (typeof isActive !== 'undefined') splash.isActive = isActive === 'true';
+    splash.startDate = type === 'scheduled' ? startDate : null;
+    splash.endDate = type === 'scheduled' ? endDate : null;
+
+    await splash.save();
+    res.json(splash);
+  } catch (err) {
+    res.status(500).json({ message: 'Error updating splash screen', error: err.message });
+  }
+});
+
+// DELETE a splash screen
+app.delete('/api/admin/splash/:id', protect, authorizeRole('admin'), async (req, res) => {
+  try {
+    const splash = await Splash.findById(req.params.id);
+    if (!splash) {
+      return res.status(404).json({ message: 'Splash screen not found.' });
+    }
+
+    // Delete image from Cloudinary
+    if (splash.image && splash.image.publicId) {
+      await cloudinary.uploader.destroy(splash.image.publicId);
+    }
+
+    await splash.deleteOne();
+    res.json({ message: 'Splash screen deleted successfully.' });
+  } catch (err) {
+    res.status(500).json({ message: 'Error deleting splash screen', error: err.message });
+  }
+});
+
+// REPLACE your old /api/splash route with this one
+app.get('/api/splash', async (req, res) => {
+  try {
+    const now = new Date();
+    let activeSplash = null;
+
+    // 1. Look for an active, scheduled splash screen for the current date
+    const scheduledSplash = await Splash.findOne({
+      isActive: true,
+      type: 'scheduled',
+      startDate: { $lte: now },
+      endDate: { $gte: now }
+    });
+
+    if (scheduledSplash) {
+      activeSplash = scheduledSplash;
+    } else {
+      // 2. If no scheduled splash is active, find the default one
+      const defaultSplash = await Splash.findOne({
+        isActive: true,
+        type: 'default'
+      });
+      activeSplash = defaultSplash;
+    }
+
+    // Return the single active splash screen (or null if none found)
+    res.json({ splash: activeSplash });
+
+  } catch (err) {
+    console.error('Error fetching splash screen for app:', err.message);
+    res.status(500).json({ message: 'Error fetching splash screen' });
+  }
+});
 app.get('/api/admin/settings', protect, authorizeRole('admin'), async (req, res) => {
   try {
     const settings = await AppSettings.findOne({ singleton: true });
@@ -3979,6 +4097,121 @@ cron.schedule('0 3 * * *', async () => {
 
 app.get('/', (req, res) => {
   res.send('E-Commerce Backend API is running!');
+});
+// --------------------------------------------------------------------------------
+// --------- ADMIN COUPON ROUTES ----------
+// --------------------------------------------------------------------------------
+
+// GET all coupons (Admin only)
+app.get('/api/admin/coupons', protect, authorizeRole('admin'), async (req, res) => {
+  try {
+    const coupons = await Coupon.find().sort({ expiryDate: -1 });
+    res.json(coupons);
+  } catch (err) {
+    res.status(500).json({ message: 'Error fetching coupons', error: err.message });
+  }
+});
+
+// POST to create a new coupon (Admin only)
+app.post('/api/admin/coupons', protect, authorizeRole('admin'), async (req, res) => {
+  try {
+    const { 
+      code, 
+      discountType, 
+      discountValue, 
+      minPurchaseAmount, 
+      maxDiscountAmount, 
+      expiryDate 
+    } = req.body;
+
+    if (!code || !discountType || !discountValue || !expiryDate) {
+      return res.status(400).json({ message: 'Code, discount type, value, and expiry date are required.' });
+    }
+
+    const newCoupon = await Coupon.create({
+      code: code.toUpperCase(),
+      discountType,
+      discountValue,
+      minPurchaseAmount,
+      maxDiscountAmount,
+      expiryDate
+    });
+
+    res.status(201).json(newCoupon);
+  } catch (err) {
+    if (err.code === 11000) {
+      return res.status(409).json({ message: `Coupon code "${req.body.code}" already exists.` });
+    }
+    res.status(500).json({ message: 'Error creating coupon', error: err.message });
+  }
+});
+
+// PUT to update an existing coupon (Admin only)
+app.put('/api/admin/coupons/:id', protect, authorizeRole('admin'), async (req, res) => {
+  try {
+    const { 
+      discountType, 
+      discountValue, 
+      minPurchaseAmount, 
+      maxDiscountAmount, 
+      expiryDate,
+      isActive
+    } = req.body;
+
+    const coupon = await Coupon.findById(req.params.id);
+    if (!coupon) {
+      return res.status(404).json({ message: 'Coupon not found.' });
+    }
+
+    // Update fields if they are provided
+    if (discountType) coupon.discountType = discountType;
+    if (discountValue) coupon.discountValue = discountValue;
+    if (minPurchaseAmount) coupon.minPurchaseAmount = minPurchaseAmount;
+    if (maxDiscountAmount) coupon.maxDiscountAmount = maxDiscountAmount;
+    if (expiryDate) coupon.expiryDate = expiryDate;
+    if (typeof isActive !== 'undefined') coupon.isActive = isActive;
+
+    await coupon.save();
+    res.json(coupon);
+  } catch (err) {
+    res.status(500).json({ message: 'Error updating coupon', error: err.message });
+  }
+});
+
+// DELETE a coupon (Admin only)
+app.delete('/api/admin/coupons/:id', protect, authorizeRole('admin'), async (req, res) => {
+  try {
+    const coupon = await Coupon.findByIdAndDelete(req.params.id);
+
+    if (!coupon) {
+      return res.status(404).json({ message: 'Coupon not found.' });
+    }
+
+    res.json({ message: 'Coupon deleted successfully.' });
+  } catch (err) {
+    res.status(500).json({ message: 'Error deleting coupon', error: err.message });
+  }
+});
+// --------------------------------------------------------------------------------
+// --------- COUPON ROUTES (FOR USERS) ----------
+// --------------------------------------------------------------------------------
+
+// GET all active and valid coupons
+app.get('/api/coupons', protect, async (req, res) => {
+  try {
+    const now = new Date();
+    
+    // Find coupons that are active and not expired
+    const availableCoupons = await Coupon.find({
+      isActive: true,
+      expiryDate: { $gt: now } 
+    }).sort({ minPurchaseAmount: 1 }); // Sort by minimum purchase amount
+
+    res.json(availableCoupons);
+  } catch (err) {
+    console.error('Error fetching available coupons:', err.message);
+    res.status(500).json({ message: 'Error fetching coupons' });
+  }
 });
 
 const IP = '0.0.0.0';
