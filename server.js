@@ -303,6 +303,14 @@ const productSchema = new mongoose.Schema({
     tags: [String],
   },
   serviceDurationMinutes: { type: Number },
+  
+  // 🔑 FIX: ADD THE PINCODES FIELD HERE
+  pincodes: [{ 
+    type: String, 
+    required: false,
+    index: true // Optional: Add index for faster filtering in the future
+  }], 
+  
   seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
   isTrending: { type: Boolean, default: false, index: true }
 }, { timestamps: true });
@@ -1006,28 +1014,78 @@ app.post('/api/auth/save-fcm-token', protect, async (req, res) => {
 // --------- Category Routes (User's Requested Block) ----------
 // --------------------------------------------------------------------------------
 
+// Assuming you have imported your Mongoose models: Product and Category
+
+// Node.js/Express Route: /api/categories
+
 app.get('/api/categories', async (req, res) => {
-  try {
-    const { active } = req.query;
-    const filter = {};
-    if (typeof active !== 'undefined') filter.isActive = active === 'true';
-    const categories = await Category.find(filter)
-      .sort({ sortOrder: 1, name: 1 })
-      .select('name slug isActive image type sortOrder');
-    res.json(categories);
-  } catch (err) {
-    res.status(500).json({ message: 'Error fetching categories', error: err.message });
-  }
+    try {
+        const { active, userPincode } = req.query;
+
+        const categoryFilter = {};
+        if (typeof active !== 'undefined') categoryFilter.isActive = active === 'true';
+
+        let categories;
+
+        if (userPincode) {
+            // AGGREGATION: Find categories that are linked to products available in the userPincode
+            categories = await Product.aggregate([
+                // Stage 1: Filter products by Pincode and Active status
+                { $match: {
+                    isActive: true, 
+                    pincodes: userPincode 
+                }},
+                // Stage 2: Group by Category ID to get a list of relevant categories
+                { $group: { _id: '$category', count: { $sum: 1 } } },
+                // Stage 3: Join back to the Category collection to get category details
+                { $lookup: {
+                    from: 'categories', // Collection name
+                    localField: '_id',
+                    foreignField: '_id',
+                    as: 'categoryDetails'
+                }},
+                { $unwind: '$categoryDetails' },
+                // Stage 4: Apply original category filters (e.g., isActive)
+                { $match: { 
+                    'categoryDetails.isActive': categoryFilter.isActive !== undefined ? categoryFilter.isActive : { $exists: true } 
+                }},
+                // Stage 5: Shape the output
+                { $project: {
+                    _id: '$categoryDetails._id',
+                    name: '$categoryDetails.name',
+                    slug: '$categoryDetails.slug',
+                    isActive: '$categoryDetails.isActive',
+                    image: '$categoryDetails.image',
+                    type: '$categoryDetails.type',
+                    sortOrder: '$categoryDetails.sortOrder',
+                }},
+                // Stage 6: Sort
+                { $sort: { sortOrder: 1, name: 1 } }
+            ]);
+
+        } else {
+            // Default: If no pincode, return all categories
+            categories = await Category.find(categoryFilter)
+                .sort({ sortOrder: 1, name: 1 })
+                .select('name slug isActive image type sortOrder');
+        }
+
+        res.json(categories);
+    } catch (err) {
+        console.error('Error fetching categories with pincode filter:', err); 
+        res.status(500).json({ message: 'Error fetching categories', error: err.message });
+    }
 });
 
 app.get('/api/categories/:id', async (req, res) => {
-  try {
-    const category = await Category.findById(req.params.id);
-    if (!category) return res.status(404).json({ message: 'Category not found' });
-    res.json(category);
-  } catch (err) {
-    res.status(500).json({ message: 'Error fetching category', error: err.message });
-  }
+    // This route does not need modification as it fetches a single category by ID.
+    try {
+        const category = await Category.findById(req.params.id);
+        if (!category) return res.status(404).json({ message: 'Category not found' });
+        res.json(category);
+    } catch (err) {
+        res.status(500).json({ message: 'Error fetching category', error: err.message });
+    }
 });
 
 app.get('/api/admin/categories', protect, authorizeRole('admin'), async (req, res) => {
@@ -1261,8 +1319,10 @@ app.get('/api/products', async (req, res) => {
     const { search, minPrice, maxPrice, categoryId, brand, subcategoryId, sellerId, userPincode } = req.query;
     const { ObjectId } = mongoose.Types;
 
+    // --- 1. Build match conditions ---
     const matchStage = {};
 
+    // 🔍 Search filter
     if (search) {
       matchStage.$or = [
         { name: { $regex: search, $options: "i" } },
@@ -1270,55 +1330,123 @@ app.get('/api/products', async (req, res) => {
       ];
     }
 
+    // 💰 Price range filter
     if (minPrice || maxPrice) {
       matchStage.price = {};
       if (minPrice) matchStage.price.$gte = Number(minPrice);
       if (maxPrice) matchStage.price.$lte = Number(maxPrice);
     }
 
-    if (categoryId && categoryId !== "null") matchStage.category = new ObjectId(categoryId);
-    if (brand) matchStage.brand = { $regex: brand, $options: "i" };
-    if (subcategoryId && subcategoryId !== "null") matchStage.subcategory = new ObjectId(subcategoryId);
-    if (sellerId) matchStage.seller = new ObjectId(sellerId);
-    
-    if (userPincode) {
-      const coveringSellers = await User.find({ pincodes: userPincode }).select("_id");
-      const sellerIds = coveringSellers.map(s => s._id);
-      // Important: If a seller filter already exists, this will overwrite it.
-      // If you need both, you should use $and operator.
-      matchStage.seller = { $in: sellerIds };
+    // 🏷️ Category filter
+    if (categoryId && mongoose.isValidObjectId(categoryId)) {
+      matchStage.category = new ObjectId(categoryId);
     }
 
-    const products = await Product.aggregate([
-      { $match: matchStage },
-      { $sample: { size: 50 } }, // Always take a random sample of 50 products
-      { $lookup: { from: "users", localField: "seller", foreignField: "_id", as: "seller" } },
-      // ✅ IMPROVEMENT: Added preserveNullAndEmptyArrays to prevent products from disappearing if seller is missing.
-      { $unwind: { path: "$seller", preserveNullAndEmptyArrays: true } }, 
-      { $lookup: { from: "categories", localField: "category", foreignField: "_id", as: "category" } },
+    // 🧩 Subcategory filter
+    if (subcategoryId && mongoose.isValidObjectId(subcategoryId)) {
+      matchStage.subcategory = new ObjectId(subcategoryId);
+    }
+
+    // 🏭 Brand filter
+    if (brand) matchStage.brand = { $regex: brand, $options: "i" };
+
+    // 👨‍💼 Seller filter
+    if (sellerId && mongoose.isValidObjectId(sellerId)) {
+      matchStage.seller = new ObjectId(sellerId);
+    }
+
+    // --- 2. Build aggregation pipeline ---
+    const pipeline = [];
+
+    // 🏠 If userPincode is given — join seller table first
+    if (userPincode) {
+      pipeline.push(
+        {
+          $lookup: {
+            from: "users",
+            localField: "seller",
+            foreignField: "_id",
+            as: "sellerDetails"
+          }
+        },
+        { $unwind: "$sellerDetails" },
+        {
+          $match: {
+            ...matchStage, // include all previous filters
+            "sellerDetails.pincodes": userPincode // ✅ match by user’s pincode
+          }
+        },
+        { $addFields: { seller: "$sellerDetails" } },
+        { $unset: "sellerDetails" }
+      );
+    } else {
+      // 🔹 If no pincode, just match normally
+      pipeline.push({ $match: matchStage });
+      pipeline.push(
+        {
+          $lookup: {
+            from: "users",
+            localField: "seller",
+            foreignField: "_id",
+            as: "seller"
+          }
+        },
+        { $unwind: { path: "$seller", preserveNullAndEmptyArrays: true } }
+      );
+    }
+
+    // --- 3. Randomize order for homepage ---
+    pipeline.push({ $sample: { size: 50 } });
+
+    // --- 4. Enrich category & subcategory info ---
+    pipeline.push(
+      {
+        $lookup: {
+          from: "categories",
+          localField: "category",
+          foreignField: "_id",
+          as: "category"
+        }
+      },
       { $unwind: { path: "$category", preserveNullAndEmptyArrays: true } },
-      { $lookup: { from: "subcategories", localField: "subcategory", foreignField: "_id", as: "subcategory" } },
+      {
+        $lookup: {
+          from: "subcategories",
+          localField: "subcategory",
+          foreignField: "_id",
+          as: "subcategory"
+        }
+      },
       { $unwind: { path: "$subcategory", preserveNullAndEmptyArrays: true } },
-      // Select only the fields you need, to make the response smaller
-      { $project: {
+      {
+        $project: {
           name: 1,
           price: 1,
           originalPrice: 1,
           images: 1,
+          stock: 1,
           unit: 1,
-          'seller.name': 1,
-          'seller.email': 1,
-          'category.name': 1,
-          'subcategory.name': 1
-      }}
-    ]);
+          brand: 1,
+          "seller._id": 1,
+          "seller.name": 1,
+          "seller.email": 1,
+          "category.name": 1,
+          "subcategory.name": 1,
+          createdAt: 1
+        }
+      }
+    );
 
+    // --- 5. Execute query ---
+    const products = await Product.aggregate(pipeline);
     res.json(products);
   } catch (err) {
-    console.error("Get Products Error:", err);
+    console.error("❌ Get Products Error:", err);
     res.status(500).json({ message: "Error fetching products" });
   }
 });
+
+
 
 app.get('/api/products/:id', async (req, res) => {
     try {
@@ -1332,6 +1460,74 @@ app.get('/api/products/:id', async (req, res) => {
       res.status(500).json({ message: 'Error fetching product details' });
     }
 });
+
+
+// [NEW] API Endpoint to get products available in a specific pincode
+app.get('/api/products/pincode/:pincode', async (req, res) => {
+    try {
+        const userPincode = req.params.pincode;
+        if (!userPincode) {
+            return res.status(400).json({ message: 'Pincode is required for this search.' });
+        }
+
+        // --- Aggregation Pipeline for Pincode Filtering ---
+        const products = await Product.aggregate([
+            // Stage 1: Filter products by Pincode directly on the product document (new field)
+            { $match: { 
+                pincodes: userPincode,
+                stock: { $gt: 0 } // Only show in-stock products
+            }},
+            // Stage 2: Join with Seller (User) details to get seller's name/info
+            { $lookup: {
+                from: "users",
+                localField: "seller",
+                foreignField: "_id",
+                as: "seller"
+            }},
+            { $unwind: { path: "$seller", preserveNullAndEmptyArrays: true } },
+            
+            // Stage 3: Join with Category details
+            { $lookup: {
+                from: "categories",
+                localField: "category",
+                foreignField: "_id",
+                as: "category"
+            }},
+            { $unwind: { path: "$category", preserveNullAndEmptyArrays: true } },
+            
+            // Stage 4: Project only the necessary fields
+            { $project: {
+                name: 1,
+                price: 1,
+                originalPrice: 1,
+                images: 1,
+                stock: 1,
+                unit: 1,
+                brand: 1,
+                shortDescription: 1,
+                isTrending: 1,
+                "seller.name": 1,
+                "category.name": 1,
+                createdAt: 1,
+                pincodes: 1, // Show which pincodes this product covers
+            }},
+            // Stage 5: Sort by newest first
+            { $sort: { createdAt: -1 } }
+        ]);
+
+        if (products.length === 0) {
+            return res.status(404).json({ message: `No products available for delivery to pincode ${userPincode}.` });
+        }
+
+        res.json(products);
+    } catch (err) {
+        console.error('❌ Error fetching products by pincode:', err.message);
+        res.status(500).json({ message: 'Error fetching products by pincode', error: err.message });
+    }
+});
+
+
+
 
 
 
@@ -2400,120 +2596,134 @@ app.get('/api/seller/financials', protect, authorizeRole('seller'), async (req, 
 });
 
 
+// ... (Assumed imports: Product, Category, User models, generateUniqueSku function, protect middleware, etc.)
+
+// ... (Assumed imports)
+
 app.post('/api/seller/products', protect, authorizeRole('seller', 'admin'), checkSellerApproved, productUpload, async (req, res) => {
-  try {
-    const {
-      productTitle, brand, category, subcategory, childCategory,
-      mrp, sellingPrice, costPrice, stockQuantity, unit, minOrderQty,
-      shortDescription, fullDescription, videoLink,
-      specifications, colors, sizes, storages,
-      shippingWeight, shippingLength, shippingWidth, shippingHeight, shippingType,
-      warranty, returnPolicy, tags,
-      serviceDurationMinutes
-    } = req.body;
+    try {
+        const {
+            productTitle, brand, category, subcategory, childCategory,
+            mrp, sellingPrice, costPrice, stockQuantity, unit, minOrderQty,
+            shortDescription, fullDescription, videoLink,
+            specifications, colors, sizes, storages,
+            shippingWeight, shippingLength, shippingWidth, shippingHeight, shippingType,
+            warranty, returnPolicy, tags,
+            serviceDurationMinutes,
+            pincode: inputPincode // Input is ignored in favor of automatic fetch
+        } = req.body;
 
-    if (!productTitle || !sellingPrice || !category || !stockQuantity) {
-      return res.status(400).json({ message: 'Product title, selling price, stock, and category are required.' });
+        if (!productTitle || !sellingPrice || !category || !stockQuantity) {
+            return res.status(400).json({ message: 'Product title, selling price, stock, and category are required.' });
+        }
+        
+        // --- Pincode Automation and Mandatory Check ---
+        const sellerPincodes = req.user.pincodes || [];
+        
+        // --- Validation Logic ---
+        const parentCategory = await Category.findById(category);
+        if (!parentCategory) {
+            return res.status(404).json({ message: 'Selected category not found.' });
+        }
+        
+        if (parentCategory.type === 'service') {
+            if (!serviceDurationMinutes || parseInt(serviceDurationMinutes) <= 0) {
+                return res.status(400).json({ message: 'Services must have a valid "Service Duration (in minutes)".' });
+            }
+        } else if (parentCategory.type === 'product') {
+            if (!unit) {
+                return res.status(400).json({ message: 'Products must have a "Unit" (e.g., kg, pcs).' });
+            }
+        }
+        
+        // 🔑 FIX: Missing SKU generation logic restored here
+        const newSku = generateUniqueSku(category, productTitle); 
+        
+        const parsedSellingPrice = parseFloat(sellingPrice);
+        const parsedMrp = mrp ? parseFloat(mrp) : null;
+        if (parsedMrp && parsedMrp < parsedSellingPrice) {
+            return res.status(400).json({ message: 'MRP cannot be less than the selling price.' });
+        }
+
+        if (!req.files.images || req.files.images.length === 0) {
+            return res.status(400).json({ message: 'At least one image is required.' });
+        }
+        const images = req.files.images.map(file => ({
+            url: file.path,
+            publicId: file.filename,
+        }));
+        
+        let uploadedVideo = null;
+        if (req.files.video && req.files.video.length > 0) {
+            const videoFile = req.files.video[0];
+            uploadedVideo = {
+                url: videoFile.path,
+                publicId: videoFile.filename
+            };
+        }
+
+        // --- Parsing remaining fields (Rest of your original code) ---
+        const parsedSpecifications = specifications ? JSON.parse(specifications) : {};
+        const parsedTags = tags ? JSON.parse(tags) : [];
+        const parsedVariants = {
+            colors: colors ? JSON.parse(colors) : [],
+            sizes: sizes ? JSON.parse(sizes) : [],
+            storages: storages ? JSON.parse(storages) : [],
+        };
+        const parsedShippingDetails = {
+            weight: shippingWeight ? parseFloat(shippingWeight) : null,
+            dimensions: {
+                length: shippingLength ? parseFloat(shippingLength) : null,
+                width: shippingWidth ? parseFloat(shippingWidth) : null,
+            },
+            shippingType: shippingType || 'Free',
+        };
+        const parsedOtherInfo = {
+            warranty: warranty || null,
+            returnPolicy: returnPolicy || 'Non-Returnable',
+            tags: parsedTags,
+        };
+        const finalSubcategory = childCategory || subcategory;
+        // -----------------------------------------------------------
+
+        const product = await Product.create({
+            name: productTitle,
+            sku: newSku, // <-- Now correctly defined
+            brand,
+            category,
+            subcategory: finalSubcategory,
+            originalPrice: parsedMrp,
+            price: parsedSellingPrice,
+            costPrice: costPrice ? parseFloat(costPrice) : undefined,
+            stock: parseInt(stockQuantity),
+            unit: parentCategory.type === 'product' ? unit : undefined,
+            minOrderQty: minOrderQty ? parseInt(minOrderQty) : 1,
+            shortDescription,
+            fullDescription,
+            images,
+            videoLink,
+            uploadedVideo: uploadedVideo,
+            specifications: parsedSpecifications,
+            variants: parsedVariants,
+            shippingDetails: parsedShippingDetails,
+            otherInformation: parsedOtherInfo,
+            seller: req.user._id,
+            
+            // 🔑 Automatic Pincode Storage
+            pincodes: sellerPincodes, 
+            
+            serviceDurationMinutes: parentCategory.type === 'service' ? parseInt(serviceDurationMinutes) : undefined,
+        });
+
+        res.status(201).json(product);
+    } catch (err) {
+        console.error('Create product error:', err.message);
+        if (err.name === 'ValidationError') {
+            return res.status(400).json({ message: 'Validation failed', error: err.message });
+        }
+        res.status(500).json({ message: 'Error creating product', error: err.message });
     }
-
-    const parentCategory = await Category.findById(category);
-    if (!parentCategory) {
-      return res.status(404).json({ message: 'Selected category not found.' });
-    }
-
-    if (parentCategory.type === 'service') {
-      if (!serviceDurationMinutes || parseInt(serviceDurationMinutes) <= 0) {
-        return res.status(400).json({ message: 'Services must have a valid "Service Duration (in minutes)".' });
-      }
-    } else if (parentCategory.type === 'product') {
-      if (!unit) {
-        return res.status(400).json({ message: 'Products must have a "Unit" (e.g., kg, pcs).' });
-      }
-    }
-
-    const newSku = generateUniqueSku(category, productTitle);
-
-    const parsedSellingPrice = parseFloat(sellingPrice);
-    const parsedMrp = mrp ? parseFloat(mrp) : null;
-    if (parsedMrp && parsedMrp < parsedSellingPrice) {
-      return res.status(400).json({ message: 'MRP cannot be less than the selling price.' });
-    }
-
-    if (!req.files.images || req.files.images.length === 0) {
-      return res.status(400).json({ message: 'At least one image is required.' });
-    }
-    const images = req.files.images.map(file => ({
-      url: file.path,
-      publicId: file.filename,
-    }));
-
-    let uploadedVideo = null;
-    if (req.files.video && req.files.video.length > 0) {
-      const videoFile = req.files.video[0];
-      uploadedVideo = {
-        url: videoFile.path,
-        publicId: videoFile.filename
-      };
-    }
-
-    const parsedSpecifications = specifications ? JSON.parse(specifications) : {};
-    const parsedTags = tags ? JSON.parse(tags) : [];
-    const parsedVariants = {
-      colors: colors ? JSON.parse(colors) : [],
-      sizes: sizes ? JSON.parse(sizes) : [],
-      storages: storages ? JSON.parse(storages) : [],
-    };
-    const parsedShippingDetails = {
-      weight: shippingWeight ? parseFloat(shippingWeight) : null,
-      dimensions: {
-        length: shippingLength ? parseFloat(shippingLength) : null,
-        width: shippingWidth ? parseFloat(shippingWidth) : null,
-      },
-      shippingType: shippingType || 'Free',
-    };
-    const parsedOtherInfo = {
-      warranty: warranty || null,
-      returnPolicy: returnPolicy || 'Non-Returnable',
-      tags: parsedTags,
-    };
-
-    const finalSubcategory = childCategory || subcategory;
-
-    const product = await Product.create({
-      name: productTitle,
-      sku: newSku,
-      brand,
-      category,
-      subcategory: finalSubcategory,
-      originalPrice: parsedMrp,
-      price: parsedSellingPrice,
-      costPrice: costPrice ? parseFloat(costPrice) : undefined,
-      stock: parseInt(stockQuantity),
-      unit: parentCategory.type === 'product' ? unit : undefined,
-      minOrderQty: minOrderQty ? parseInt(minOrderQty) : 1,
-      shortDescription,
-      fullDescription,
-      images,
-      videoLink,
-      uploadedVideo: uploadedVideo,
-      specifications: parsedSpecifications,
-      variants: parsedVariants,
-      shippingDetails: parsedShippingDetails,
-      otherInformation: parsedOtherInfo,
-      seller: req.user._id,
-      serviceDurationMinutes: parentCategory.type === 'service' ? parseInt(serviceDurationMinutes) : undefined,
-    });
-
-    res.status(201).json(product);
-  } catch (err) {
-    console.error('Create product error:', err.message);
-    if (err.name === 'ValidationError') {
-      return res.status(400).json({ message: 'Validation failed', error: err.message });
-    }
-    res.status(500).json({ message: 'Error creating product', error: err.message });
-  }
 });
-
 app.post('/api/seller/products/bulk', protect, authorizeRole('seller', 'admin'), checkSellerApproved, upload.array('images', 100), async (req, res) => {
   try {
     const { products } = req.body;
