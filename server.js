@@ -364,40 +364,46 @@ const splashSchema = new mongoose.Schema({
 const Splash = mongoose.model('Splash', splashSchema);
 
 const orderSchema = new mongoose.Schema({
-  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
-  seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
-  orderItems: [{
-    product: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' },
-    name: String,
-    qty: Number,
-    originalPrice: Number,
-    price: Number,
-    category: String
-  }],
-  shippingAddress: { type: String, required: true },
-  deliveryStatus: { type: String, enum: ['Pending', 'Processing', 'Shipped', 'Delivered', 'Cancelled', 'Payment Pending'], default: 'Pending', index: true }, 
-  paymentMethod: { type: String, enum: ['cod', 'razorpay', 'razorpay_cod'], required: true, index: true },
-  paymentId: String,
-  paymentStatus: { type: String, enum: ['pending', 'completed', 'failed', 'refunded'], default: 'pending', index: true },
-  pincode: String,
-  totalAmount: Number, // Items Total (Subtotal)
-  taxRate: { type: Number, default: GST_RATE },
-  taxAmount: { type: Number, default: 0 },
-  couponApplied: String,
-  discountAmount: { type: Number, default: 0 },
-  shippingFee: { type: Number, default: 0 }, 
-  refunds: [{
-    amount: Number,
-    reason: String,
-    status: { type: String, enum: ['requested', 'approved', 'processing', 'completed', 'rejected'], default: 'requested' },
-    razorpayRefundId: String,
-    processedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-    createdAt: Date,
-    updatedAt: Date
-  }],
-  totalRefunded: { type: Number, default: 0 },
-  history: [{ status: String, timestamp: { type: Date, default: Date.now } }],
-  razorpayPaymentLinkId: { type: String, default: null }
+  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
+  seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
+  orderItems: [{
+    product: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' },
+    name: String,
+    qty: Number,
+    originalPrice: Number,
+    price: Number,
+    category: String
+  }],
+  shippingAddress: { type: String, required: true },
+  // 💡 FIX APPLIED HERE: Added 'Return Requested'
+  deliveryStatus: { 
+    type: String, 
+    enum: ['Pending', 'Processing', 'Shipped', 'Delivered', 'Cancelled', 'Payment Pending', 'Return Requested'], 
+    default: 'Pending', 
+    index: true 
+  }, 
+  paymentMethod: { type: String, enum: ['cod', 'razorpay', 'razorpay_cod'], required: true, index: true },
+  paymentId: String,
+  paymentStatus: { type: String, enum: ['pending', 'completed', 'failed', 'refunded'], default: 'pending', index: true },
+  pincode: String,
+  totalAmount: Number, // Items Total (Subtotal)
+  taxRate: { type: Number, default: GST_RATE },
+  taxAmount: { type: Number, default: 0 },
+  couponApplied: String,
+  discountAmount: { type: Number, default: 0 },
+  shippingFee: { type: Number, default: 0 }, 
+  refunds: [{
+    amount: Number,
+    reason: String,
+    status: { type: String, enum: ['requested', 'approved', 'processing', 'completed', 'rejected'], default: 'requested' },
+    razorpayRefundId: String,
+    processedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    createdAt: Date,
+    updatedAt: Date
+  }],
+  totalRefunded: { type: Number, default: 0 },
+  history: [{ status: String, timestamp: { type: Date, default: Date.now } }],
+  razorpayPaymentLinkId: { type: String, default: null }
 }, { timestamps: true });
 const Order = mongoose.model('Order', orderSchema);
 
@@ -4614,6 +4620,89 @@ app.post('/api/orders/buy-now', protect, async (req, res) => {
     }
 });
 
+// [NEW] API Endpoint for a customer to initiate a return request
+app.post('/api/orders/:id/return-request', protect, async (req, res) => {
+    try {
+        const { reason } = req.body;
+        if (!reason || reason.trim().length < 10) {
+            return res.status(400).json({ 
+                message: 'A valid reason for the return/refund is required (min 10 characters).' 
+            });
+        }
+
+        const order = await Order.findOne({ 
+            _id: req.params.id, 
+            user: req.user._id 
+        }).populate('seller', 'name email phone');
+        
+        if (!order) {
+            return res.status(404).json({ 
+                message: 'Order not found or you do not have permission.' 
+            });
+        }
+
+        const isDelivered = order.deliveryStatus === 'Delivered';
+        const isRefunded = order.paymentStatus === 'refunded';
+        
+        if (!isDelivered || isRefunded || order.deliveryStatus === 'Cancelled') {
+            return res.status(400).json({ 
+                message: `Cannot request a return. Current status: ${order.deliveryStatus}.` 
+            });
+        }
+        
+        // 💡 ENFORCE 2-DAY (48-HOUR) RETURN WINDOW
+        const twoDaysInMs = 2 * 24 * 60 * 60 * 1000;
+        const timeSinceDelivery = Date.now() - order.updatedAt.getTime(); 
+
+        if (timeSinceDelivery > twoDaysInMs) {
+            return res.status(400).json({ 
+                message: 'Return window expired. Returns must be requested within 48 hours of delivery.' 
+            });
+        }
+
+        const hoursLeft = Math.floor((twoDaysInMs - timeSinceDelivery) / (1000 * 60 * 60));
+        const minutesLeft = Math.floor(((twoDaysInMs - timeSinceDelivery) % (1000 * 60 * 60)) / (1000 * 60));
+
+        // 2. Check if a refund/return is already requested
+        const alreadyRequested = order.refunds.some(r => r.status === 'requested' || r.status === 'processing');
+        if (alreadyRequested) {
+            return res.status(400).json({ 
+                message: 'A return or refund is already pending for this order.' 
+            });
+        }
+
+        // 3. Create a new refund/return request entry
+        order.refunds.push({
+            amount: 0, // Admin will set the actual amount to refund later
+            reason: reason,
+            status: 'requested',
+            processedBy: req.user._id,
+            createdAt: new Date(),
+            updatedAt: new Date()
+        });
+        
+        // Update the order status to reflect the request
+        order.deliveryStatus = 'Return Requested'; 
+        order.history.push({ status: 'Return Requested', note: `Reason: ${reason}` });
+
+        await order.save();
+        
+        // 4. Notify Admin
+        await notifyAdmin(`🔔 New Return Request for Order #${order._id.toString().slice(-6)}\n\nUser: ${req.user.name}\nReason: ${reason}`);
+
+        res.json({ 
+            message: `Return request successfully submitted. Returns are allowed within 48 hours of delivery. You have ${hoursLeft} hours and ${minutesLeft} minutes left in your return window. The admin will review your request shortly.`, 
+            order 
+        });
+
+    } catch (err) {
+        console.error('Return request error:', err.message);
+        res.status(500).json({ 
+            message: 'Error submitting return request', 
+            error: err.message 
+        });
+    }
+});
 
 // ... (The rest of your existing order routes and other routes go here) ...
 
