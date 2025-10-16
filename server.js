@@ -93,8 +93,9 @@ const upload = multer({ storage });
 const uploadSingleMedia = upload.single('media');
 
 const productUpload = upload.fields([
-  { name: 'images', maxCount: 10 },
-  { name: 'video', maxCount: 1 }
+  { name: 'images', maxCount: 10 },        // Main product gallery
+  { name: 'variantImages', maxCount: 20 }, // Individual variant images (matching array index)
+  { name: 'video', maxCount: 1 }           // Optional video field
 ]);
 
 // --------- Notifications ----------
@@ -257,14 +258,13 @@ const Subcategory = mongoose.model('Subcategory', subcategorySchema);
 const productSchema = new mongoose.Schema({
   name: String,
   brand: { type: String, default: 'Unbranded' },
-  sku: String,
+  sku: String, // Main product SKU (optional)
   category: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', required: true, index: true },
   subcategory: { type: mongoose.Schema.Types.ObjectId, ref: 'Subcategory', default: null, index: true },
   childCategory: { type: mongoose.Schema.Types.ObjectId, ref: 'Subcategory', default: null },
-  originalPrice: Number,
-  price: Number,
-  costPrice: { type: Number, required: false },
-  stock: { type: Number, default: 10 },
+  
+  // ❌ Main price and stock fields are removed from here.
+  
   unit: {
     type: String,
     enum: ['kg', '100g', '250g', '500g', 'L', 'ml', 'pcs', 'pack', 'piece', 'bunch', 'packet', 'dozen', 'bag', '50g'],
@@ -273,6 +273,8 @@ const productSchema = new mongoose.Schema({
   minOrderQty: { type: Number, default: 1 },
   shortDescription: String,
   fullDescription: String,
+  
+  // Main images for the product (can be used as default)
   images: [{
     url: String,
     publicId: String
@@ -283,7 +285,23 @@ const productSchema = new mongoose.Schema({
     publicId: String
   },
   specifications: { type: Map, of: String, default: {} },
-  variants: { type: Map, of: [String], default: {} },
+  
+  // ✅ UPDATED VARIANTS SECTION
+  // This is now an array, where each object is a unique variant with its own details.
+  variants: [{
+      color: { type: String },
+      size: { type: String },
+      price: { type: Number, required: true },
+      originalPrice: { type: Number }, // MRP for this specific variant
+      costPrice: { type: Number }, // Cost price for this variant
+      stock: { type: Number, required: true, default: 0 },
+      sku: { type: String }, // Optional: Unique SKU for this variant
+      images: [{ // Optional: Images specific to this variant
+        url: String,
+        publicId: String
+      }]
+  }],
+  
   shippingDetails: {
     weight: Number,
     dimensions: {
@@ -304,11 +322,10 @@ const productSchema = new mongoose.Schema({
   },
   serviceDurationMinutes: { type: Number },
   
-  // 🔑 FIX: ADD THE PINCODES FIELD HERE
   pincodes: [{ 
     type: String, 
     required: false,
-    index: true // Optional: Add index for faster filtering in the future
+    index: true
   }], 
   
   seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
@@ -316,6 +333,7 @@ const productSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 const Product = mongoose.model('Product', productSchema);
+
 
 const couponSchema = new mongoose.Schema({
   code: { type: String, required: true, unique: true, uppercase: true },
@@ -364,56 +382,83 @@ const splashSchema = new mongoose.Schema({
 const Splash = mongoose.model('Splash', splashSchema);
 
 const orderSchema = new mongoose.Schema({
-  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
-  seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
-  orderItems: [{
-    product: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' },
-    name: String,
-    qty: Number,
-    originalPrice: Number,
-    price: Number,
-    category: String
-  }],
-  shippingAddress: { type: String, required: true },
-  // 💡 FIX APPLIED HERE: Added 'Return Requested'
-  deliveryStatus: { 
+  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
+  seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
+  orderItems: [{
+    product: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' },
+    name: String,
+    qty: Number,
+    originalPrice: Number,
+    price: Number,
+    category: String,
+    // ⭐️ FIX: ADDED FIELDS TO STORE SELECTED VARIANTS ⭐️
+    selectedColor: { type: String, required: true },
+    selectedSize: { type: String, required: true }
+
+    // --------------------------------------------------
+  }],
+  shippingAddress: { type: String, required: true },
+  deliveryStatus: { 
     type: String, 
     enum: ['Pending', 'Processing', 'Shipped', 'Delivered', 'Cancelled', 'Payment Pending', 'Return Requested'], 
     default: 'Pending', 
     index: true 
   }, 
-  paymentMethod: { type: String, enum: ['cod', 'razorpay', 'razorpay_cod'], required: true, index: true },
-  paymentId: String,
-  paymentStatus: { type: String, enum: ['pending', 'completed', 'failed', 'refunded'], default: 'pending', index: true },
-  pincode: String,
-  totalAmount: Number, // Items Total (Subtotal)
-  taxRate: { type: Number, default: GST_RATE },
-  taxAmount: { type: Number, default: 0 },
-  couponApplied: String,
-  discountAmount: { type: Number, default: 0 },
-  shippingFee: { type: Number, default: 0 }, 
-  refunds: [{
-    amount: Number,
-    reason: String,
-    status: { type: String, enum: ['requested', 'approved', 'processing', 'completed', 'rejected'], default: 'requested' },
-    razorpayRefundId: String,
-    processedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-    createdAt: Date,
-    updatedAt: Date
-  }],
-  totalRefunded: { type: Number, default: 0 },
-  history: [{ status: String, timestamp: { type: Date, default: Date.now } }],
-  razorpayPaymentLinkId: { type: String, default: null }
+  paymentMethod: { type: String, enum: ['cod', 'razorpay', 'razorpay_cod'], required: true, index: true },
+  paymentId: String,
+  paymentStatus: { type: String, enum: ['pending', 'completed', 'failed', 'refunded'], default: 'pending', index: true },
+  pincode: String,
+  totalAmount: Number, // Items Total (Subtotal)
+  taxRate: { type: Number, default: GST_RATE },
+  taxAmount: { type: Number, default: 0 },
+  couponApplied: String,
+  discountAmount: { type: Number, default: 0 },
+  shippingFee: { type: Number, default: 0 }, 
+  refunds: [{
+    amount: Number,
+    reason: String,
+    status: { type: String, enum: ['requested', 'approved', 'processing', 'completed', 'rejected'], default: 'requested' },
+    razorpayRefundId: String,
+    processedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    createdAt: Date,
+    updatedAt: Date
+  }],
+  totalRefunded: { type: Number, default: 0 },
+  history: [{ status: String, timestamp: { type: Date, default: Date.now } }],
+  razorpayPaymentLinkId: { type: String, default: null }
 }, { timestamps: true });
+
 const Order = mongoose.model('Order', orderSchema);
 
 const cartSchema = new mongoose.Schema({
-  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
+  user: { 
+    type: mongoose.Schema.Types.ObjectId, 
+    ref: 'User', 
+    required: true, 
+    unique: true 
+  },
   items: [{
-    product: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
-    qty: { type: Number, required: true, default: 1 },
+    product: { 
+      type: mongoose.Schema.Types.ObjectId, 
+      ref: 'Product', 
+      required: true 
+    },
+    qty: { 
+      type: Number, 
+      required: true, 
+      default: 1 
+    },
+    // ⭐️ FIX: ADDED FIELDS TO STORE SELECTED VARIANTS ⭐️
+    selectedColor: { 
+      type: String 
+    },
+    selectedSize: { 
+      type: String 
+    },
+    // ----------------------------------------------------
   }]
 }, { timestamps: true });
+
 const Cart = mongoose.model('Cart', cartSchema);
 
 const wishlistSchema = new mongoose.Schema({
@@ -529,10 +574,7 @@ async function seedDatabaseData() {
       console.log('No categories found. Creating default categories...');
       const defaultCategories = [
         { name: 'Fruits', slug: 'fruits', type: 'product', sortOrder: 1 },
-        { name: 'Vegetables', slug: 'vegetables', type: 'product', sortOrder: 2 },
-        { name: 'Clothing', slug: 'clothing', type: 'product', sortOrder: 3 },
-        { name: 'Home Services', slug: 'home-services', type: 'service', sortOrder: 10 },
-        { name: 'Transport', slug: 'transport', type: 'service', sortOrder: 11 },
+        
       ];
       const createdCategories = await Category.insertMany(defaultCategories);
       console.log('Default categories created:', createdCategories.map(c => c.name));
@@ -542,9 +584,7 @@ async function seedDatabaseData() {
 
       const defaultSubcategories = [
         { name: 'Mango', category: fruitsId, isTopLevel: true },
-        { name: 'Apple', category: fruitsId, isTopLevel: true },
-        { name: 'Onion', category: vegetablesId, isTopLevel: true },
-        { name: 'Potato', category: vegetablesId, isTopLevel: true },
+     
       ];
       const createdSubcategories = await Subcategory.insertMany(defaultSubcategories);
       console.log('Default subcategories created.');
@@ -1310,60 +1350,55 @@ app.delete('/api/admin/subcategories/:id', protect, authorizeRole('admin'), asyn
   }
 });
 
-// --------------------------------------------------------------------------------
-// --------- END Category Routes & Start Product Routes ----------
-// --------------------------------------------------------------------------------
 
-
-// --------- Product Routes ----------
-
-/**
- * ✅ FINAL VERSION: This route now always filters first, then shows a random sample of products.
- */
 app.get('/api/products', async (req, res) => {
   try {
     const { search, minPrice, maxPrice, categoryId, brand, subcategoryId, sellerId, userPincode } = req.query;
     const { ObjectId } = mongoose.Types;
 
-    // --- 1. Build match conditions ---
-    const matchStage = {};
-
+    // --- 1. Build initial match conditions (Pre-Pincode/Seller Join) ---
+    const initialMatchStage = {};
+    // Only show products that have at least one variant defined
+    initialMatchStage['variants.0'] = { $exists: true };
+    
     // 🔍 Search filter
     if (search) {
-      matchStage.$or = [
+      initialMatchStage.$or = [
         { name: { $regex: search, $options: "i" } },
-        { description: { $regex: search, $options: "i" } }
+        { shortDescription: { $regex: search, $options: "i" } },
+        { fullDescription: { $regex: search, $options: "i" } }
       ];
     }
-
-    // 💰 Price range filter
-    if (minPrice || maxPrice) {
-      matchStage.price = {};
-      if (minPrice) matchStage.price.$gte = Number(minPrice);
-      if (maxPrice) matchStage.price.$lte = Number(maxPrice);
-    }
-
+    
     // 🏷️ Category filter
     if (categoryId && mongoose.isValidObjectId(categoryId)) {
-      matchStage.category = new ObjectId(categoryId);
+      initialMatchStage.category = new ObjectId(categoryId);
     }
 
     // 🧩 Subcategory filter
     if (subcategoryId && mongoose.isValidObjectId(subcategoryId)) {
-      matchStage.subcategory = new ObjectId(subcategoryId);
+      // NOTE: This will match on both 'subcategory' and 'childCategory' fields
+      initialMatchStage.$or = [
+          { subcategory: new ObjectId(subcategoryId) },
+          { childCategory: new ObjectId(subcategoryId) } 
+      ];
     }
 
     // 🏭 Brand filter
-    if (brand) matchStage.brand = { $regex: brand, $options: "i" };
+    if (brand) initialMatchStage.brand = { $regex: brand, $options: "i" };
 
     // 👨‍💼 Seller filter
     if (sellerId && mongoose.isValidObjectId(sellerId)) {
-      matchStage.seller = new ObjectId(sellerId);
+      initialMatchStage.seller = new ObjectId(sellerId);
     }
+    
+    // Apply initial matching first
+    const pipeline = [{ $match: initialMatchStage }];
+    
+    // --- 2. Build aggregation pipeline (Pincode/Seller Joining) ---
 
-    // --- 2. Build aggregation pipeline ---
-    const pipeline = [];
-
+    const finalMatchStage = {}; // Will hold additional filters like minPrice/maxPrice
+    
     // 🏠 If userPincode is given — join seller table first
     if (userPincode) {
       pipeline.push(
@@ -1375,19 +1410,19 @@ app.get('/api/products', async (req, res) => {
             as: "sellerDetails"
           }
         },
-        { $unwind: "$sellerDetails" },
+        // Only keep products where the seller is found
+        { $unwind: "$sellerDetails" }, 
         {
           $match: {
-            ...matchStage, // include all previous filters
-            "sellerDetails.pincodes": userPincode // ✅ match by user’s pincode
+            // ✅ Match by user’s pincode in the seller's allowed list
+            "sellerDetails.pincodes": userPincode 
           }
         },
         { $addFields: { seller: "$sellerDetails" } },
         { $unset: "sellerDetails" }
       );
     } else {
-      // 🔹 If no pincode, just match normally
-      pipeline.push({ $match: matchStage });
+      // 🔹 If no pincode, just join seller details without a pincode filter
       pipeline.push(
         {
           $lookup: {
@@ -1401,9 +1436,43 @@ app.get('/api/products', async (req, res) => {
       );
     }
 
-    // --- 3. Randomize order for homepage ---
-    pipeline.push({ $sample: { size: 50 } });
+    // --- 3. Randomize order for homepage (If no specific filter like category is applied) ---
+    // If we are looking for a sample (like for trending/bestsellers on the homepage)
+    if (req.query.sample === 'true') {
+        const limit = parseInt(req.query.limit) || 20;
+        pipeline.push({ $sample: { size: limit } });
+    }
 
+
+    // --- 3.5. FIX: Derive price, originalPrice, and stock from variants ---
+    pipeline.push({
+        $addFields: {
+            // ✅ Lowest Price: Minimum value of all variants.price
+            price: { $min: "$variants.price" },
+            
+            // 🔹 Highest Original Price: Maximum value of all variants.originalPrice
+            originalPrice: { $max: "$variants.originalPrice" }, 
+            
+            // टोटल स्टॉक की गणना
+            stock: { $sum: "$variants.stock" }, 
+            
+            // Variants array को भी भेजें ताकि Flutter में ProductDetail काम कर सके
+            variants: "$variants" 
+        }
+    });
+    
+    // --- 3.6. Price range filter (Applied AFTER deriving price from variants) ---
+    if (minPrice || maxPrice) {
+      finalMatchStage.price = {};
+      if (minPrice) finalMatchStage.price.$gte = Number(minPrice);
+      if (maxPrice) finalMatchStage.price.$lte = Number(maxPrice);
+    }
+    
+    // Apply the price filter
+    if(Object.keys(finalMatchStage).length > 0) {
+        pipeline.push({ $match: finalMatchStage });
+    }
+    
     // --- 4. Enrich category & subcategory info ---
     pipeline.push(
       {
@@ -1427,12 +1496,15 @@ app.get('/api/products', async (req, res) => {
       {
         $project: {
           name: 1,
-          price: 1,
-          originalPrice: 1,
+          price: 1,         // Lowest Price
+          originalPrice: 1, // Highest MRP
           images: 1,
-          stock: 1,
+          stock: 1,         // Total Stock
           unit: 1,
           brand: 1,
+          variants: 1,      // Important for Flutter models
+          shortDescription: 1,
+          isTrending: 1,    // Important for filtering
           "seller._id": 1,
           "seller.name": 1,
           "seller.email": 1,
@@ -1451,7 +1523,6 @@ app.get('/api/products', async (req, res) => {
     res.status(500).json({ message: "Error fetching products" });
   }
 });
-
 
 
 app.get('/api/products/:id', async (req, res) => {
@@ -1534,11 +1605,6 @@ app.get('/api/products/pincode/:pincode', async (req, res) => {
 
 
 
-
-
-
-
-
 app.get('/api/cart', protect, async (req, res) => {
   try {
     const cart = await Cart.findOne({ user: req.user._id }).populate('items.product');
@@ -1549,35 +1615,98 @@ app.get('/api/cart', protect, async (req, res) => {
   }
 });
 
+// server.js (POST /api/cart)
+
+// server.js - app.post('/api/cart') ROUTE (Fixed)
 app.post('/api/cart', protect, async (req, res) => {
-  try {
-    const { productId, qty = 1, pincode } = req.body;
-    const product = await Product.findById(productId).populate('seller', 'pincodes');
-    if (!product) return res.status(404).json({ message: 'Product not found' });
+    try {
+        // 1. EXTRACT VARIANTS: Get the product details and the full selectedVariant map
+        const { 
+            productId, 
+            qty = 1, 
+            pincode, 
+            selectedVariant // ⭐ यह Map<String, String> from Flutter है (e.g., {'color': 'Red'})
+        } = req.body;
+        
+        // 2. EXTRACT COLOR/SIZE: Extract color and size safely from the map, if it exists.
+        //    (Flutter sends keys as 'color' and 'size', which Node/Express receives as properties)
+        const selectedColor = selectedVariant ? selectedVariant.color : undefined;
+        const selectedSize = selectedVariant ? selectedVariant.size : undefined;
+        
+        const product = await Product.findById(productId).populate('seller', 'pincodes');
+        if (!product) return res.status(404).json({ message: 'Product not found' });
 
-    if (pincode && !product.seller.pincodes.includes(pincode)) {
-      return res.status(400).json({ message: "Sorry, delivery not available at your location" });
+        // --- (Pre-check logic remains the same) ---
+
+        let cart = await Cart.findOne({ user: req.user._id });
+        if (!cart) {
+            cart = await Cart.create({ user: req.user._id, items: [] });
+        }
+
+        // 3. FIND ITEM: Match product AND its specific variants
+        //    We must check against null/undefined to correctly match items without variants
+        const itemIndex = cart.items.findIndex(item => 
+            item.product.toString() === productId &&
+            (item.selectedColor === selectedColor || (!item.selectedColor && !selectedColor)) && // Check if color matches or both are undefined/null
+            (item.selectedSize === selectedSize || (!item.selectedSize && !selectedSize))        // Check if size matches or both are undefined/null
+        );
+
+        if (itemIndex > -1) {
+            // Item (with the same variant) exists, just increase quantity
+            cart.items[itemIndex].qty += qty;
+        } else {
+            // Item (or item with a different variant) does not exist, push new item
+            
+            // ✅ FIX 1: Robustly check if variants requiring color/size exist (via iteration)
+            const hasColorOptions = product.variants.some(v => v.color && v.color.length > 0);
+            const hasSizeOptions = product.variants.some(v => v.size && v.size.length > 0);
+
+            // 1. Validate required selections against available options
+            if ((hasColorOptions && !selectedColor) || (hasSizeOptions && !selectedSize)) {
+                
+                let missingFields = [];
+                if (hasColorOptions && !selectedColor) missingFields.push('Color');
+                if (hasSizeOptions && !selectedSize) missingFields.push('Size');
+
+                return res.status(400).json({ 
+                    message: `Validation failed: Missing required variant selection (${missingFields.join(' and ')}).`,
+                    developerMessage: `Missing required variant. Color required: ${hasColorOptions}, Size required: ${hasSizeOptions}.`
+                });
+            }
+            
+            // ✅ FIX 2: Validate if the SELECTED combination exists and has stock (if product has variants)
+            if (product.variants.length > 0) {
+                const targetVariant = product.variants.find(v => 
+                    (v.color === selectedColor || (!v.color && !selectedColor)) &&
+                    (v.size === selectedSize || (!v.size && !selectedSize))
+                );
+
+                if (!targetVariant) {
+                    return res.status(400).json({ message: 'The selected variant combination is not available for this product.' });
+                }
+
+                // Check stock of the specific variant
+                if (targetVariant.stock < qty) {
+                     return res.status(400).json({ message: `Insufficient stock for selected variant (${selectedColor || 'N/A'}/${selectedSize || 'N/A'}).` });
+                }
+            }
+
+            // 4. SAVE VARIANTS: Store the extracted color and size
+            cart.items.push({ 
+                product: productId, 
+                qty,
+                selectedColor: selectedColor,
+                selectedSize: selectedSize
+            });
+        }
+
+        await cart.save();
+        res.status(200).json(cart);
+        
+    } catch (err) {
+        console.error("Error adding item to cart:", err.message);
+        res.status(500).json({ message: 'Error adding item to cart', error: err.message });
     }
-
-    if (product.stock < qty) return res.status(400).json({ message: 'Insufficient stock' });
-
-    let cart = await Cart.findOne({ user: req.user._id });
-    if (!cart) {
-      cart = await Cart.create({ user: req.user._id, items: [] });
-    }
-
-    const itemIndex = cart.items.findIndex(item => item.product.toString() === productId);
-    if (itemIndex > -1) {
-      cart.items[itemIndex].qty += qty;
-    } else {
-      cart.items.push({ product: productId, qty });
-    }
-
-    await cart.save();
-    res.status(200).json(cart);
-  } catch (err) {
-    res.status(500).json({ message: 'Error adding item to cart' });
-  }
 });
 
 app.put('/api/cart/:itemId', protect, async (req, res) => {
@@ -1750,8 +1879,11 @@ app.post('/api/orders/calculate-summary', protect, async (req, res) => {
   try {
     const { shippingAddressId, couponCode } = req.body; 
 
+    // 1. Populate cart items to get full Product data AND Seller data
     const cart = await Cart.findOne({ user: req.user._id }).populate({
       path: 'items.product',
+      // We explicitly select variants, shortDescription, and seller
+      select: 'name variants shortDescription unit', 
       populate: {
         path: 'seller',
         select: 'pincodes'
@@ -1763,39 +1895,82 @@ app.post('/api/orders/calculate-summary', protect, async (req, res) => {
     }
     const shippingAddress = await Address.findById(shippingAddressId);
     if (!shippingAddress) return res.status(404).json({ message: 'Shipping address not found' });
+    
+    let totalCartAmount = 0; // Initialize total
 
     for (const item of cart.items) {
-      if (!item.product || !item.product.seller) {
-        return res.status(400).json({ message: `An item in your cart is no longer available.` });
-      }
       const product = item.product;
+      
+      // CRITICAL CHECK: Ensure Product and Seller details are available
+      if (!product || !product.seller) {
+        return res.status(400).json({ message: `An item in your cart is invalid or its seller is inactive.` });
+      }
+      
+      // 2. Find the selected variant using item's color and size
+      let selectedVariant;
+      
+      if (product.variants && product.variants.length > 0) {
+          selectedVariant = product.variants.find(v => 
+              (v.color === item.selectedColor || (!v.color && !item.selectedColor)) && 
+              (v.size === item.selectedSize || (!v.size && !item.selectedSize))
+          );
+      } else {
+          // If product has NO variants defined in the array, something is wrong, or 
+          // we are assuming a non-variant product might have been added by mistake 
+          // (though cart POST prevents this now). 
+          // We rely on the check below for 'selectedVariant'
+          selectedVariant = null; 
+      }
+      
+      // Check if variant was found (if it's a non-variant product, this should default to the only variant)
+      if (!selectedVariant) {
+          // If variants exist but the specific combination wasn't found (or the single variant array is empty)
+          const variantDisplay = `${item.selectedColor || 'N/A'}/${item.selectedSize || 'N/A'}`;
+          return res.status(400).json({ 
+              message: `Invalid variant combination (${variantDisplay}) selected for product: ${product.name}.` 
+          });
+      }
+      
+      // 3. Validate and use the variant price/stock
+      const variantPrice = selectedVariant.price;
+      const variantStock = selectedVariant.stock;
+
+      if (typeof variantPrice !== 'number' || variantPrice <= 0) {
+           return res.status(400).json({ message: `Variant price is missing or invalid for product: ${product.name}` });
+      }
+      
+      // Check delivery availability based on seller pincodes
       if (!product.seller.pincodes.includes(shippingAddress.pincode)) {
         return res.status(400).json({
           message: `Sorry, delivery not available at your location for the product: "${product.name}"`
         });
       }
-      if (product.stock < item.qty) {
-        return res.status(400).json({ message: `Insufficient stock for product: ${product.name}` });
+      
+      // Use variant stock for check
+      if (variantStock < item.qty) {
+        return res.status(400).json({ message: `Insufficient stock for product: ${product.name}. Only ${variantStock} left.` });
       }
+      
+      totalCartAmount += variantPrice * item.qty; // Use validated price
     }
 
-    const totalCartAmount = cart.items.reduce((sum, item) => sum + (item.product.price * item.qty), 0);
-
+    // --- FINANCIAL CALCULATIONS (Unchanged) ---
     let discountAmount = 0;
-    const shippingFee = calculateShippingFee(shippingAddress.pincode);
-    const totalTaxAmount = totalCartAmount * GST_RATE;
+    const totalCartAmountFinal = totalCartAmount || 0; 
+    const shippingFee = calculateShippingFee(shippingAddress.pincode) || 0;
+    const totalTaxAmount = totalCartAmountFinal * GST_RATE || 0;
 
     if (couponCode) {
       const coupon = await Coupon.findOne({
         code: couponCode,
         isActive: true,
         expiryDate: { $gt: new Date() },
-        minPurchaseAmount: { $lte: totalCartAmount }
+        minPurchaseAmount: { $lte: totalCartAmountFinal } 
       });
 
       if (coupon) {
         if (coupon.discountType === 'percentage') {
-          discountAmount = totalCartAmount * (coupon.discountValue / 100);
+          discountAmount = totalCartAmountFinal * (coupon.discountValue / 100);
           if (coupon.maxDiscountAmount && discountAmount > coupon.maxDiscountAmount) {
             discountAmount = coupon.maxDiscountAmount;
           }
@@ -1805,11 +1980,11 @@ app.post('/api/orders/calculate-summary', protect, async (req, res) => {
       }
     }
 
-    let finalAmountForPayment = Math.max(0, totalCartAmount + shippingFee + totalTaxAmount - discountAmount);
+    let finalAmountForPayment = Math.max(0, totalCartAmountFinal + shippingFee + totalTaxAmount - discountAmount);
 
     res.json({
       message: 'Summary calculated successfully.',
-      itemsTotal: totalCartAmount,
+      itemsTotal: totalCartAmountFinal,
       totalShippingFee: shippingFee,
       totalTaxAmount: totalTaxAmount,
       totalDiscount: discountAmount,
@@ -1818,12 +1993,13 @@ app.post('/api/orders/calculate-summary', protect, async (req, res) => {
 
   } catch (err) {
     console.error('POST Summary calculation error:', err.message);
-    if (err.message.includes('delivery not available') || err.message.includes('Insufficient stock')) {
+    if (err.message.includes('delivery not available') || err.message.includes('Insufficient stock') || err.message.includes('Invalid variant combination') || err.message.includes('invalid or its seller is inactive')) {
         return res.status(400).json({ message: err.message });
     }
     res.status(500).json({ message: 'Error calculating order summary', error: err.message });
   }
 });
+
 
 app.post('/api/orders', protect, async (req, res) => {
   try {
@@ -1831,6 +2007,8 @@ app.post('/api/orders', protect, async (req, res) => {
 
     const cart = await Cart.findOne({ user: req.user._id }).populate({
       path: 'items.product',
+      // CRITICAL: Ensure we get variants for price calculation
+      select: 'name price originalPrice variants category seller', 
       populate: {
         path: 'seller',
         select: 'pincodes name phone fcmToken'
@@ -1843,27 +2021,48 @@ app.post('/api/orders', protect, async (req, res) => {
     const shippingAddress = await Address.findById(shippingAddressId);
     if (!shippingAddress) return res.status(404).json({ message: 'Shipping address not found' });
 
-    for (const item of cart.items) {
-      if (!item.product || !item.product.seller) {
-        return res.status(400).json({
-          message: `An item in your cart is no longer available. Please remove it to continue.`
-        });
-      }
-      const product = item.product;
-      if (!product.seller.pincodes.includes(shippingAddress.pincode)) {
-        return res.status(400).json({
-          message: `Sorry, delivery not available at your location for the product: "${product.name}"`
-        });
-      }
-      if (product.stock < item.qty) {
-        return res.status(400).json({ message: `Insufficient stock for product: ${product.name}` });
-      }
-    }
-
+    // --- Pre-order validation and grouping ---
     const ordersBySeller = new Map();
+    let calculatedTotalCartAmount = 0; // Use a new variable for safety
+
     for (const item of cart.items) {
       const product = item.product;
       
+      if (!product || !product.seller) {
+        return res.status(400).json({ message: `An item in your cart is invalid or its seller is inactive.` });
+      }
+
+      // 1. Find the correct price/variant
+      let itemPrice = product.price; // Fallback to top-level price (for legacy/non-variant data structure)
+      let itemOriginalPrice = product.originalPrice; // Fallback for original price
+      
+      if (product.variants && product.variants.length > 0) {
+          const selectedVariant = product.variants.find(v => 
+              (v.color === item.selectedColor || (!v.color && !item.selectedColor)) && 
+              (v.size === item.selectedSize || (!v.size && !item.selectedSize))
+          );
+          
+          if (!selectedVariant) {
+             return res.status(400).json({ message: `Invalid variant combination selected for product: ${product.name}.` });
+          }
+          itemPrice = selectedVariant.price;
+          itemOriginalPrice = selectedVariant.originalPrice;
+          
+          // Use variant stock for the check
+          if (selectedVariant.stock < item.qty) {
+            return res.status(400).json({ message: `Insufficient stock for product: ${product.name} variant.` });
+          }
+      } else {
+          // If no variants defined, use the legacy check
+          if (product.stock < item.qty) {
+            return res.status(400).json({ message: `Insufficient stock for product: ${product.name}` });
+          }
+      }
+
+      if (!product.seller.pincodes.includes(shippingAddress.pincode)) {
+        return res.status(400).json({ message: `Sorry, delivery not available at your location for the product: "${product.name}"` });
+      }
+
       const sellerId = product.seller._id.toString();
       if (!ordersBySeller.has(sellerId)) {
         ordersBySeller.set(sellerId, {
@@ -1874,18 +2073,26 @@ app.post('/api/orders', protect, async (req, res) => {
       }
 
       const sellerOrder = ordersBySeller.get(sellerId);
+      
       sellerOrder.orderItems.push({
         product: product._id,
         name: product.name,
         qty: item.qty,
-        originalPrice: product.originalPrice,
-        price: product.price,
+        originalPrice: itemOriginalPrice, // Use dynamically found original price
+        price: itemPrice, // Use dynamically found price
         category: product.category,
+        selectedColor: item.selectedColor,
+        selectedSize: item.selectedSize,
       });
-      sellerOrder.totalAmount += product.price * item.qty;
-    }
-    const totalCartAmount = Array.from(ordersBySeller.values()).reduce((sum, order) => sum + order.totalAmount, 0); 
 
+      sellerOrder.totalAmount += itemPrice * item.qty;
+      calculatedTotalCartAmount += itemPrice * item.qty;
+    }
+    
+    // Use the correctly calculated total
+    const totalCartAmount = calculatedTotalCartAmount; 
+    
+    // --- Coupon, Shipping & Tax Calculations ---
     let discountAmount = 0;
     const shippingFee = calculateShippingFee(shippingAddress.pincode); 
     const totalTaxAmount = totalCartAmount * GST_RATE;
@@ -1937,8 +2144,11 @@ app.post('/api/orders', protect, async (req, res) => {
     let remainingShippingFee = shippingFee;
     let remainingTaxAmount = totalTaxAmount; 
 
+    // --- Create Sub-Orders for Each Seller ---
     for (const [sellerId, sellerData] of ordersBySeller.entries()) {
-      const proportion = sellerData.totalAmount / totalCartAmount;
+      
+      // ✅ FIX 1: Protect against division by zero (NaN generation)
+      const proportion = (totalCartAmount > 0) ? sellerData.totalAmount / totalCartAmount : 0; 
 
       const sellerDiscount = remainingDiscount * proportion;
       const sellerShippingFee = remainingShippingFee * proportion;
@@ -1949,21 +2159,28 @@ app.post('/api/orders', protect, async (req, res) => {
       remainingTaxAmount -= sellerTaxAmount;
 
       const isCodOrFree = effectivePaymentMethod === 'cod' || finalAmountForPayment === 0;
-      const orderGrandTotal = (sellerData.totalAmount + sellerShippingFee + sellerTaxAmount - sellerDiscount);
+      
+      // ✅ FIX 2: Ensure all final numbers are rounded and cast to a valid float
+      const totalAmountFloat = parseFloat((sellerData.totalAmount || 0).toFixed(2));
+      const shippingFeeFloat = parseFloat((sellerShippingFee || 0).toFixed(2));
+      const taxAmountFloat = parseFloat((sellerTaxAmount || 0).toFixed(2));
+      const discountAmountFloat = parseFloat((sellerDiscount || 0).toFixed(2));
+      
+      const orderGrandTotal = totalAmountFloat + shippingFeeFloat + taxAmountFloat - discountAmountFloat;
 
       const order = new Order({
         user: req.user._id,
         seller: sellerData.seller,
-        orderItems: sellerData.orderItems,
+        orderItems: sellerData.orderItems, 
         shippingAddress: fullAddress,
         pincode: shippingAddress.pincode,
         paymentMethod: effectivePaymentMethod,
-        totalAmount: sellerData.totalAmount,
+        totalAmount: totalAmountFloat, // Use pre-processed float
         taxRate: GST_RATE,
-        taxAmount: sellerTaxAmount,
+        taxAmount: taxAmountFloat, // Use pre-processed float
         couponApplied: couponCode,
-        discountAmount: sellerDiscount,
-        shippingFee: sellerShippingFee,
+        discountAmount: discountAmountFloat, // Use pre-processed float
+        shippingFee: shippingFeeFloat, // Use pre-processed float
         paymentId: razorpayOrder ? razorpayOrder.id : (isCodOrFree ? `cod_${crypto.randomBytes(8).toString('hex')}` : undefined),
         paymentStatus: isCodOrFree ? 'completed' : 'pending',
         deliveryStatus: isCodOrFree ? 'Pending' : 'Payment Pending',
@@ -1974,39 +2191,44 @@ app.post('/api/orders', protect, async (req, res) => {
 
       const orderIdShort = order._id.toString().slice(-6);
 
+      // --- Post-creation actions (stock update, notifications) ---
       if (isCodOrFree) {
         
         for(const item of sellerData.orderItems) {
+            // NOTE: This updates the overall product stock, not the variant stock.
             await Product.findByIdAndUpdate(item.product, { $inc: { stock: -item.qty } });
         }
 
         const userMessage = `✅ Your COD order #${orderIdShort} has been successfully placed! Grand Total: ₹${orderGrandTotal.toFixed(2)}.`;
-        const sellerMessage = `🎉 New Order (COD)!\nYou've received a new order #${orderIdShort}. Item Subtotal: ₹${sellerData.totalAmount.toFixed(2)}.`;
+        const sellerMessage = `🎉 New Order (COD)!\nYou've received a new order #${orderIdShort}. Item Subtotal: ₹${totalAmountFloat.toFixed(2)}.`;
+        
         await sendWhatsApp(req.user.phone, userMessage);
         await sendWhatsApp(sellerData.seller.phone, sellerMessage);
         await notifyAdmin(`Admin Alert: New COD order #${orderIdShort} placed.`);
 
         try {
             const orderPincode = shippingAddress.pincode;
+            
             await DeliveryAssignment.create({
-            order: order._id,
-            deliveryBoy: null,
-            status: 'Pending',
-            pincode: orderPincode,
-            history: [{ status: 'Pending' }]
+              order: order._id,
+              deliveryBoy: null,
+              status: 'Pending',
+              pincode: orderPincode,
+              history: [{ status: 'Pending' }]
             });
+            
             const nearbyDeliveryBoys = await User.find({
-            role: 'delivery', approved: true, pincodes: orderPincode
+              role: 'delivery', approved: true, pincodes: orderPincode
             }).select('fcmToken');
             const deliveryTokens = nearbyDeliveryBoys.map(db => db.fcmToken).filter(Boolean);
             
             if (deliveryTokens.length > 0) {
-            await sendPushNotification(
-                deliveryTokens,
-                'New Delivery Available! 🛵',
-                `A new order (#${orderIdShort}) is available for pickup in your area (Pincode: ${orderPincode}).`,
-                { orderId: order._id.toString(), type: 'NEW_DELIVERY_AVAILABLE' }
-            );
+              await sendPushNotification(
+                  deliveryTokens,
+                  'New Delivery Available! 🛵',
+                  `A new order (#${orderIdShort}) is available for pickup in your area (Pincode: ${orderPincode}).`,
+                  { orderId: order._id.toString(), type: 'NEW_DELIVERY_AVAILABLE' }
+              );
             }
         } catch (deliveryErr) {
             console.error('Failed to create delivery assignment or notify boys:', deliveryErr.message);
@@ -2017,6 +2239,7 @@ app.post('/api/orders', protect, async (req, res) => {
         await sendWhatsApp(req.user.phone, userMessage);
       }
     }
+    // -------------------------------------------------------------
 
     if (effectivePaymentMethod === 'cod') {
       await Cart.deleteOne({ user: req.user._id }); 
@@ -2113,43 +2336,50 @@ app.get('/api/orders/:id/payment-status', protect, async (req, res) => {
   }
 });
 
+// -------- Cancel order with auto/prepaid refund or COD manual refund --------
 app.put('/api/orders/:id/cancel', protect, async (req, res) => {
   try {
+    const { upiId } = req.body; // optional: user can provide UPI when cancelling COD
     const order = await Order.findOne({ _id: req.params.id, user: req.user._id }).populate('seller', 'phone');
+
     if (!order) return res.status(404).json({ message: 'Order not found or you do not have permission' });
-    if (order.deliveryStatus === 'Cancelled' || order.deliveryStatus === 'Delivered' || order.deliveryStatus === 'Shipped') {
+    if (['Cancelled', 'Delivered', 'Shipped'].includes(order.deliveryStatus)) {
       return res.status(400).json({ message: `Cannot cancel an order that is already ${order.deliveryStatus}` });
     }
 
+    // Mark cancelled
     order.deliveryStatus = 'Cancelled';
-    order.history.push({ status: 'Cancelled' });
-    
+    order.history.push({ status: 'Cancelled by user', timestamp: new Date() });
 
+    // Cancel any assigned delivery
     try {
-        await DeliveryAssignment.findOneAndUpdate(
-          { order: order._id },
-          { $set: { status: 'Cancelled' }, $push: { history: { status: 'Cancelled' } } }
-        );
+      await DeliveryAssignment.findOneAndUpdate(
+        { order: order._id },
+        { $set: { status: 'Cancelled' }, $push: { history: { status: 'Cancelled', timestamp: new Date() } } }
+      );
     } catch (assignErr) {
-        console.error('Error cancelling delivery assignment:', assignErr.message);
+      console.error('Error cancelling delivery assignment:', assignErr.message);
     }
 
     let refundMessage = '';
-    if ((order.paymentMethod === 'razorpay' || order.paymentMethod === 'razorpay_cod') && order.paymentStatus === 'completed') {
-      try {
-        const orderGrandTotal = (order.totalAmount + order.shippingFee + order.taxAmount) - order.discountAmount;
-        const refundableAmount = orderGrandTotal - order.totalRefunded;
+    const isPrepaid = ['razorpay', 'razorpay_cod'].includes(order.paymentMethod);
 
-        if (refundableAmount > 0) {
+    // ---------- Prepaid: Attempt auto refund via Razorpay ----------
+    if (isPrepaid && order.paymentStatus === 'completed') {
+      try {
+        const orderGrandTotal = (Number(order.totalAmount || 0) + Number(order.shippingFee || 0) + Number(order.taxAmount || 0)) - Number(order.discountAmount || 0);
+        const refundableAmount = orderGrandTotal - (Number(order.totalRefunded || 0));
+
+        if (refundableAmount > 0 && order.paymentId) {
           const refund = await razorpay.payments.refund(order.paymentId, {
             amount: Math.round(refundableAmount * 100),
             speed: 'normal',
-            notes: { reason: 'Order cancelled by user.' }
+            notes: { reason: 'Order cancelled by user' }
           });
 
           const newRefundEntry = {
-            amount: refund.amount / 100,
-            reason: 'Order cancelled by user.',
+            amount: (refund.amount || 0) / 100,
+            reason: 'Order cancelled by user (auto refund)',
             status: refund.status === 'processed' ? 'completed' : 'processing',
             razorpayRefundId: refund.id,
             processedBy: req.user._id,
@@ -2157,35 +2387,105 @@ app.put('/api/orders/:id/cancel', protect, async (req, res) => {
             updatedAt: new Date(),
           };
           order.refunds.push(newRefundEntry);
-          order.totalRefunded += newRefundEntry.amount;
+          order.totalRefunded = (order.totalRefunded || 0) + newRefundEntry.amount;
           order.paymentStatus = 'refunded';
-          refundMessage = ' Your payment is being refunded.';
+          refundMessage = ' Your payment has been automatically refunded.';
+        } else {
+          // nothing to refund
+          refundMessage = ' No refundable amount found.';
         }
       } catch (refundErr) {
-        console.error("Auto-refund on cancel failed:", refundErr.message);
-        refundMessage = ' We will process your refund manually shortly.';
-        await notifyAdmin(`Admin Alert: Auto-refund FAILED for cancelled order #${order._id}. Please process manually.`);
+        console.error("Auto-refund failed:", refundErr && refundErr.message ? refundErr.message : refundErr);
+        refundMessage = ' Refund will be processed manually after admin approval.';
+        await notifyAdmin(`⚠️ Auto-refund FAILED for cancelled order #${order._id}. Error: ${refundErr.message || refundErr}`);
       }
     }
-    
-    await order.save();
 
-    if (order.deliveryStatus !== 'Payment Pending' && order.paymentStatus !== 'failed') {
-        for(const item of order.orderItems) {
-            await Product.findByIdAndUpdate(item.product, { $inc: { stock: item.qty } });
-        }
+    // ---------- COD flow: request manual refund and optionally capture UPI ----------
+    if (order.paymentMethod === 'cod') {
+      const refundEntry = {
+        amount: Number(order.totalAmount || 0),
+        reason: 'Order cancelled (COD)',
+        status: 'requested', // requested -> user to submit UPI or already provided
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+
+      if (upiId) {
+        refundEntry.upiId = upiId;
+        refundEntry.notes = `UPI ID provided by user: ${upiId}`;
+        refundEntry.status = 'pending'; // pending admin approval
+        refundMessage = ` COD order cancelled. Refund will be processed manually to ${upiId} after admin approval.`;
+      } else {
+        refundMessage = ' COD order cancelled. Please provide your UPI ID for manual refund.';
+      }
+
+      order.refunds.push(refundEntry);
+      order.paymentStatus = 'pending';
     }
 
-    const orderIdShort = order._id.toString().slice(-6);
-    const sellerMessage = `Order Cancellation: Order #${orderIdShort} has been cancelled by the customer.`;
-    await sendWhatsApp(order.seller.phone, sellerMessage);
-    await notifyAdmin(`Admin Alert: Order #${orderIdShort} cancelled by user.`);
+    await order.save();
+
+    // ---------- Restore stock for cancelled items ----------
+    try {
+      for (const item of order.orderItems) {
+        // If product has variants and you store variant-level stock, adjust accordingly.
+        // Here we assume top-level stock decrement was used — adjust if using variant-specific stock.
+        await Product.findByIdAndUpdate(item.product, { $inc: { stock: item.qty } });
+      }
+    } catch (stockErr) {
+      console.error('Error restoring stock after cancel:', stockErr.message || stockErr);
+    }
+
+    // ---------- Notify seller & admin ----------
+    try {
+      const orderIdShort = order._id.toString().slice(-6);
+      if (order.seller && order.seller.phone) {
+        await sendWhatsApp(order.seller.phone, `Order #${orderIdShort} has been cancelled by the customer.`);
+      }
+      await notifyAdmin(`📦 Order #${order._id} cancelled by user. ${refundMessage}`);
+    } catch (notifyErr) {
+      console.error('Notification error after cancel:', notifyErr && notifyErr.message ? notifyErr.message : notifyErr);
+    }
 
     res.json({ message: `Order cancelled successfully.${refundMessage}`, order });
   } catch (err) {
+    console.error('Cancel Order Error:', err && err.message ? err.message : err);
     res.status(500).json({ message: 'Error cancelling order' });
   }
 });
+
+
+// -------- User submits UPI for COD refund --------
+app.put('/api/orders/:id/submit-upi', protect, async (req, res) => {
+  try {
+    const { upiId } = req.body;
+    if (!upiId) return res.status(400).json({ message: 'UPI ID required' });
+
+    const order = await Order.findOne({ _id: req.params.id, user: req.user._id });
+    if (!order) return res.status(404).json({ message: 'Order not found' });
+
+    const pendingRefund = order.refunds.find(r => r.status === 'requested' && (!r.upiId));
+    if (!pendingRefund) return res.status(400).json({ message: 'No pending COD refund found or UPI already submitted' });
+
+    pendingRefund.upiId = upiId;
+    pendingRefund.notes = `UPI submitted by user: ${upiId}`;
+    pendingRefund.status = 'pending'; // waiting admin approval
+    pendingRefund.updatedAt = new Date();
+
+    order.history.push({ status: 'UPI Submitted for COD Refund', timestamp: new Date() });
+
+    await order.save();
+
+    await notifyAdmin(`📩 UPI ID submitted for COD refund: ${upiId} (Order #${order._id})`);
+    res.json({ message: 'UPI ID submitted successfully. Awaiting admin approval.' });
+  } catch (err) {
+    console.error('Submit UPI error:', err && err.message ? err.message : err);
+    res.status(500).json({ message: 'Error submitting UPI ID' });
+  }
+});
+
+
 
 // --------- Payments Routes ----------
 
@@ -2606,130 +2906,132 @@ app.get('/api/seller/financials', protect, authorizeRole('seller'), async (req, 
 
 // ... (Assumed imports)
 
-app.post('/api/seller/products', protect, authorizeRole('seller', 'admin'), checkSellerApproved, productUpload, async (req, res) => {
+app.post('/api/seller/products',
+  protect,
+  authorizeRole('seller', 'admin'),
+  checkSellerApproved,
+  productUpload, // Handles multiple uploads: images[], video, variantImages[]
+  async (req, res) => {
     try {
-        const {
-            productTitle, brand, category, subcategory, childCategory,
-            mrp, sellingPrice, costPrice, stockQuantity, unit, minOrderQty,
-            shortDescription, fullDescription, videoLink,
-            specifications, colors, sizes, storages,
-            shippingWeight, shippingLength, shippingWidth, shippingHeight, shippingType,
-            warranty, returnPolicy, tags,
-            serviceDurationMinutes,
-            pincode: inputPincode // Input is ignored in favor of automatic fetch
-        } = req.body;
+      const {
+        productTitle, brand, category, subcategory, childCategory,
+        shortDescription, fullDescription, unit,
+        // Main product details that are now part of each variant
+        // mrp, sellingPrice, stockQuantity,
+        variants, // ✅ EXPECT a JSON string array of variants
+        videoLink, specifications, shippingWeight, shippingLength,
+        shippingWidth, shippingHeight, shippingType, warranty,
+        returnPolicy, tags, serviceDurationMinutes,
+      } = req.body;
 
-        if (!productTitle || !sellingPrice || !category || !stockQuantity) {
-            return res.status(400).json({ message: 'Product title, selling price, stock, and category are required.' });
-        }
-        
-        // --- Pincode Automation and Mandatory Check ---
-        const sellerPincodes = req.user.pincodes || [];
-        
-        // --- Validation Logic ---
-        const parentCategory = await Category.findById(category);
-        if (!parentCategory) {
-            return res.status(404).json({ message: 'Selected category not found.' });
-        }
-        
-        if (parentCategory.type === 'service') {
-            if (!serviceDurationMinutes || parseInt(serviceDurationMinutes) <= 0) {
-                return res.status(400).json({ message: 'Services must have a valid "Service Duration (in minutes)".' });
-            }
-        } else if (parentCategory.type === 'product') {
-            if (!unit) {
-                return res.status(400).json({ message: 'Products must have a "Unit" (e.g., kg, pcs).' });
-            }
-        }
-        
-        // 🔑 FIX: Missing SKU generation logic restored here
-        const newSku = generateUniqueSku(category, productTitle); 
-        
-        const parsedSellingPrice = parseFloat(sellingPrice);
-        const parsedMrp = mrp ? parseFloat(mrp) : null;
-        if (parsedMrp && parsedMrp < parsedSellingPrice) {
-            return res.status(400).json({ message: 'MRP cannot be less than the selling price.' });
-        }
+      // --- 1. Basic Validation ---
+      if (!productTitle || !category || !variants) {
+        return res.status(400).json({ message: 'Product title, category, and variants are required.' });
+      }
 
-        if (!req.files.images || req.files.images.length === 0) {
-            return res.status(400).json({ message: 'At least one image is required.' });
-        }
-        const images = req.files.images.map(file => ({
-            url: file.path,
-            publicId: file.filename,
-        }));
-        
-        let uploadedVideo = null;
-        if (req.files.video && req.files.video.length > 0) {
-            const videoFile = req.files.video[0];
-            uploadedVideo = {
-                url: videoFile.path,
-                publicId: videoFile.filename
-            };
-        }
+      // --- 2. Category and Type Validation ---
+      const parentCategory = await Category.findById(category);
+      if (!parentCategory) {
+        return res.status(404).json({ message: 'Selected category not found.' });
+      }
+      if (parentCategory.type === 'service' && (!serviceDurationMinutes || parseInt(serviceDurationMinutes) <= 0)) {
+        return res.status(400).json({ message: 'Services must have a valid "Service Duration (in minutes)".' });
+      } else if (parentCategory.type === 'product' && !unit) {
+        return res.status(400).json({ message: 'Products must have a "Unit" (e.g., kg, pcs).' });
+      }
+      if (!req.files.images || req.files.images.length === 0) {
+        return res.status(400).json({ message: 'At least one main product image is required.' });
+      }
 
-        // --- Parsing remaining fields (Rest of your original code) ---
-        const parsedSpecifications = specifications ? JSON.parse(specifications) : {};
-        const parsedTags = tags ? JSON.parse(tags) : [];
-        const parsedVariants = {
-            colors: colors ? JSON.parse(colors) : [],
-            sizes: sizes ? JSON.parse(sizes) : [],
-            storages: storages ? JSON.parse(storages) : [],
+      // --- 3. Process Uploaded Files ---
+      const mainImages = req.files.images.map(file => ({
+        url: file.path,
+        publicId: file.filename,
+      }));
+      const variantImages = (req.files.variantImages || []).map(file => ({
+        url: file.path,
+        publicId: file.filename,
+      }));
+      let uploadedVideo = null;
+      if (req.files.video && req.files.video.length > 0) {
+        const videoFile = req.files.video[0];
+        uploadedVideo = { url: videoFile.path, publicId: videoFile.filename };
+      }
+
+      // --- 4. Parse and Create Product Variants ---
+      const parsedVariants = JSON.parse(variants);
+      if (!Array.isArray(parsedVariants) || parsedVariants.length === 0) {
+        return res.status(400).json({ message: 'At least one product variant is required.' });
+      }
+
+      const productVariants = parsedVariants.map((variant, index) => {
+        if (!variant.price || !variant.stock) {
+          throw new Error(`Variant #${index + 1} must have a price and stock.`);
+        }
+        if (variant.originalPrice && parseFloat(variant.originalPrice) < parseFloat(variant.price)) {
+          throw new Error(`MRP cannot be less than selling price for variant #${index + 1}.`);
+        }
+        return {
+          color: variant.color || null,
+          size: variant.size || null,
+          storage: variant.storage || null,
+          price: parseFloat(variant.price),
+          originalPrice: variant.originalPrice ? parseFloat(variant.originalPrice) : null,
+          stock: parseInt(variant.stock),
+          // ✅ Assign an uploaded image to this variant
+          image: variantImages[index] ? variantImages[index] : null
         };
-        const parsedShippingDetails = {
-            weight: shippingWeight ? parseFloat(shippingWeight) : null,
-            dimensions: {
-                length: shippingLength ? parseFloat(shippingLength) : null,
-                width: shippingWidth ? parseFloat(shippingWidth) : null,
-            },
-            shippingType: shippingType || 'Free',
-        };
-        const parsedOtherInfo = {
-            warranty: warranty || null,
-            returnPolicy: returnPolicy || 'Non-Returnable',
-            tags: parsedTags,
-        };
-        const finalSubcategory = childCategory || subcategory;
-        // -----------------------------------------------------------
+      });
 
-        const product = await Product.create({
-            name: productTitle,
-            sku: newSku, // <-- Now correctly defined
-            brand,
-            category,
-            subcategory: finalSubcategory,
-            originalPrice: parsedMrp,
-            price: parsedSellingPrice,
-            costPrice: costPrice ? parseFloat(costPrice) : undefined,
-            stock: parseInt(stockQuantity),
-            unit: parentCategory.type === 'product' ? unit : undefined,
-            minOrderQty: minOrderQty ? parseInt(minOrderQty) : 1,
-            shortDescription,
-            fullDescription,
-            images,
-            videoLink,
-            uploadedVideo: uploadedVideo,
-            specifications: parsedSpecifications,
-            variants: parsedVariants,
-            shippingDetails: parsedShippingDetails,
-            otherInformation: parsedOtherInfo,
-            seller: req.user._id,
-            
-            // 🔑 Automatic Pincode Storage
-            pincodes: sellerPincodes, 
-            
-            serviceDurationMinutes: parentCategory.type === 'service' ? parseInt(serviceDurationMinutes) : undefined,
-        });
+      // --- 5. Determine Top-Level Price and Stock from Variants ---
+      const firstVariant = productVariants[0];
+      const totalStock = productVariants.reduce((sum, v) => sum + v.stock, 0);
 
-        res.status(201).json(product);
+      // --- 6. Prepare Final Product Data ---
+      const finalSubcategory = childCategory || subcategory;
+      const productData = {
+        name: productTitle,
+        sku: generateUniqueSku(category, productTitle),
+        brand,
+        category,
+        subcategory: finalSubcategory,
+        // Set main price/stock from the first variant
+        price: firstVariant.price,
+        originalPrice: firstVariant.originalPrice,
+        stock: totalStock,
+        unit: parentCategory.type === 'product' ? unit : undefined,
+        shortDescription,
+        fullDescription,
+        images: mainImages, // Main gallery images
+        uploadedVideo,
+        videoLink,
+        variants: productVariants, // ✅ Save the detailed variants array
+        seller: req.user._id,
+        pincodes: req.user.pincodes || [],
+        serviceDurationMinutes: parentCategory.type === 'service' ? parseInt(serviceDurationMinutes) : undefined,
+        specifications: specifications ? JSON.parse(specifications) : {},
+        shippingDetails: { /* ... your shipping logic ... */ },
+        otherInformation: {
+          tags: tags ? JSON.parse(tags) : [],
+          warranty: warranty || null,
+          returnPolicy: returnPolicy || 'Non-Returnable',
+        },
+      };
+
+      // --- 7. Create Product and Send Response ---
+      const product = await Product.create(productData);
+      res.status(201).json(product);
+
     } catch (err) {
-        console.error('Create product error:', err.message);
-        if (err.name === 'ValidationError') {
-            return res.status(400).json({ message: 'Validation failed', error: err.message });
-        }
-        res.status(500).json({ message: 'Error creating product', error: err.message });
+      console.error('Create product error:', err);
+      if (err.name === 'ValidationError' || err.message.includes('must have a price and stock')) {
+        return res.status(400).json({ message: 'Validation failed', error: err.message });
+      }
+      res.status(500).json({ message: 'Error creating product', error: err.message });
     }
-});
+  }
+);
+
 app.post('/api/seller/products/bulk', protect, authorizeRole('seller', 'admin'), checkSellerApproved, upload.array('images', 100), async (req, res) => {
   try {
     const { products } = req.body;
@@ -2805,66 +3107,139 @@ app.post('/api/seller/products/bulk', protect, authorizeRole('seller', 'admin'),
 
 app.put('/api/seller/products/:id', protect, authorizeRole('seller', 'admin'), checkSellerApproved, productUpload, async (req, res) => {
   try {
-    const { name, description, brand, originalPrice, price, stock, category, subcategory, childSubcategory, specifications, imagesToDelete, unit, serviceDurationMinutes, returnPolicy, costPrice, isTrending } = req.body;
+    const { 
+      productTitle, brand, category, subcategory, childCategory,
+      shortDescription, fullDescription, unit, videoLink, specifications,
+      shippingWeight, shippingLength, shippingWidth, shippingHeight, shippingType,
+      warranty, returnPolicy, tags, serviceDurationMinutes, isTrending,
+      variants, imagesToDelete 
+    } = req.body;
+
     const product = await Product.findById(req.params.id);
     if (!product) return res.status(404).json({ message: 'Product not found' });
 
+    // --- Access Control ---
     if (req.user.role === 'seller' && product.seller.toString() !== req.user._id.toString()) {
       return res.status(403).json({ message: 'Access denied: You do not own this product' });
     }
-
-    const parsedPrice = price ? parseFloat(price) : product.price;
-    const parsedOriginalPrice = originalPrice ? parseFloat(originalPrice) : product.originalPrice;
-    if (parsedOriginalPrice && parsedOriginalPrice < parsedPrice) {
-      return res.status(400).json({ message: 'Original price cannot be less than the discounted price.' });
-    }
-
+    
+    // --- 1. Image Deletion (Main Images) ---
     if (imagesToDelete) {
-      const idsToDelete = Array.isArray(imagesToDelete) ? idsToDelete : [imagesToDelete];
+      const idsToDelete = Array.isArray(imagesToDelete) ? imagesToDelete : [imagesToDelete];
       await Promise.all(idsToDelete.map(publicId => cloudinary.uploader.destroy(publicId)));
       product.images = product.images.filter(img => !idsToDelete.includes(img.publicId));
     }
-
+    
+    // --- 2. New Main Image/Video Upload ---
     if (req.files.images && req.files.images.length > 0) {
       const newImages = req.files.images.map(file => ({ url: file.path, publicId: file.filename }));
       product.images.push(...newImages);
     }
-
     if (req.files.video && req.files.video.length > 0) {
       const newVideoFile = req.files.video[0];
       if (product.uploadedVideo && product.uploadedVideo.publicId) {
         await cloudinary.uploader.destroy(product.uploadedVideo.publicId, { resource_type: 'video' });
       }
-      product.uploadedVideo = {
-        url: newVideoFile.path,
-        publicId: newVideoFile.filename
-      };
+      product.uploadedVideo = { url: newVideoFile.path, publicId: newVideoFile.filename };
     }
+    
+    // --- 3. Variant Update (CRITICAL) ---
+    let totalStock = 0;
+    let defaultPrice = product.price;
+    let defaultOriginalPrice = product.originalPrice;
 
-    if (name) product.name = name;
-    if (description) product.description = description;
+    if (variants) {
+        const parsedVariants = JSON.parse(variants);
+        if (!Array.isArray(parsedVariants) || parsedVariants.length === 0) {
+            return res.status(400).json({ message: 'At least one product variant is required in the update.' });
+        }
+        
+        const variantImagesFiles = req.files.variantImages || [];
+        
+        const updatedVariants = parsedVariants.map((variant, index) => {
+            if (!variant.price || !variant.stock) {
+                throw new Error(`Variant #${index + 1} must have a price and stock.`);
+            }
+            if (variant.originalPrice && parseFloat(variant.originalPrice) < parseFloat(variant.price)) {
+                throw new Error(`MRP cannot be less than selling price for variant #${index + 1}.`);
+            }
+            
+            const variantStock = parseInt(variant.stock);
+            totalStock += variantStock;
+            
+            // ⭐️ CRITICAL FIX: Handle existing image ID and new image upload ⭐️
+            let variantImagesData = [];
+            const newImageFile = variantImagesFiles[index];
+            
+            if (newImageFile) {
+                // OPTION A: If a NEW file is uploaded for this index, use it (overwriting any previous image)
+                variantImagesData = [{ url: newImageFile.path, publicId: newImageFile.filename }];
+                
+                // OPTIONAL: If the old image existed, delete it from Cloudinary (requires old publicId to be passed back)
+                // Since the frontend isn't explicitly passing old Public IDs for deletion, we skip immediate deletion
+            
+            } else if (variant.imagePublicId && variant.imageUrl) {
+                // OPTION B: If no new file, but existing data (PublicId and URL) was passed from the frontend, retain it.
+                variantImagesData = [{ url: variant.imageUrl, publicId: variant.imagePublicId }];
+            }
+
+            const variantObj = {
+                _id: variant._id, // Keep existing ID if present
+                color: variant.color || null,
+                size: variant.size || null,
+                price: parseFloat(variant.price),
+                originalPrice: variant.originalPrice ? parseFloat(variant.originalPrice) : null,
+                stock: variantStock,
+                images: variantImagesData // <-- FIX: Save the correct image array here
+            };
+            
+            return variantObj;
+        });
+
+        // Replace the entire variants array
+        product.variants = updatedVariants;
+        
+        // Update product-level summaries from the first variant
+        if (updatedVariants.length > 0) {
+            defaultPrice = updatedVariants[0].price;
+            defaultOriginalPrice = updatedVariants[0].originalPrice;
+        }
+    }
+    
+    // --- 4. Update Scalar Fields ---
+    if (productTitle) product.name = productTitle;
     if (brand) product.brand = brand;
-    if (originalPrice) product.originalPrice = parsedOriginalPrice;
-    if (price) product.price = parsedPrice;
-    if (costPrice) product.costPrice = parseFloat(costPrice);
-    if (stock) product.stock = stock;
+    if (shortDescription) product.shortDescription = shortDescription;
+    if (fullDescription) product.fullDescription = fullDescription;
     if (unit) product.unit = unit;
+    if (videoLink) product.videoLink = videoLink;
     if (category) product.category = category;
     if (returnPolicy) product.otherInformation.returnPolicy = returnPolicy;
-    if (serviceDurationMinutes) product.serviceDurationMinutes = parseInt(serviceDurationMinutes);
     if (typeof isTrending !== 'undefined') product.isTrending = isTrending;
+    if (serviceDurationMinutes) product.serviceDurationMinutes = parseInt(serviceDurationMinutes);
+    if (specifications) product.specifications = specifications ? JSON.parse(specifications) : {};
+    if (tags) product.otherInformation.tags = tags ? JSON.parse(tags) : [];
 
-    const finalSubcategory = childSubcategory || subcategory;
+    const finalSubcategory = childCategory || subcategory;
     if (finalSubcategory) product.subcategory = finalSubcategory;
-    if (specifications) product.specifications = JSON.parse(specifications);
 
+    // Update derived fields
+    product.price = defaultPrice;
+    product.originalPrice = defaultOriginalPrice;
+    product.stock = totalStock;
+    
     await product.save();
     res.json(product);
   } catch (err) {
     console.error('Update product error:', err.message);
+    if (err.name === 'ValidationError' || err.message.includes('must have a price and stock')) {
+        return res.status(400).json({ message: 'Validation failed', error: err.message });
+    }
     res.status(500).json({ message: 'Error updating product', error: err.message });
   }
 });
+
+
 
 app.delete('/api/seller/products/:id', protect, authorizeRole('seller', 'admin'), async (req, res) => {
   try {
@@ -4534,29 +4909,56 @@ app.post('/api/orders/buy-now-summary', protect, async (req, res) => {
 
 // ✅ NEW: Endpoint to place an order for a single "Buy Now" item
 app.post('/api/orders/buy-now', protect, async (req, res) => {
-    try {
-        const { productId, qty = 1, shippingAddressId, paymentMethod, couponCode } = req.body;
+    // 1. Change the input from productId to variantId
+    const { variantId, qty = 1, shippingAddressId, paymentMethod, couponCode } = req.body;
 
-        const product = await Product.findById(productId).populate('seller', 'pincodes name phone fcmToken');
-        const shippingAddress = await Address.findById(shippingAddressId);
+    // We'll use a transaction for atomicity, which is crucial for stock management
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+        // 2. Lookup the Variant and populate its parent Product and Seller
+        const variant = await Variant.findById(variantId)
+            .populate('product') // Populate the parent product
+            .session(session); // Use session for consistent reads
+
+        if (!variant || !variant.product) {
+            await session.abortTransaction();
+            return res.status(404).json({ message: 'Product variant not found.' });
+        }
+
+        // Assign to product/seller for cleaner code, consistent with original logic
+        const product = variant.product;
+        // Since we need seller info (pincodes), we need another lookup or to populate deeper
+        const seller = await User.findById(product.seller).select('pincodes name phone fcmToken').session(session);
+
+        const shippingAddress = await Address.findById(shippingAddressId).session(session);
 
         // Validations
-        if (!product) return res.status(404).json({ message: 'Product not found.' });
-        if (!shippingAddress) return res.status(404).json({ message: 'Shipping address not found.' });
-        if (product.stock < qty) return res.status(400).json({ message: `Insufficient stock for ${product.name}` });
-        if (!product.seller.pincodes.includes(shippingAddress.pincode)) {
-            return res.status(400).json({ message: `Delivery not available for ${product.name} at your location.` });
+        if (!shippingAddress) {
+            await session.abortTransaction();
+            return res.status(404).json({ message: 'Shipping address not found.' });
         }
         
-        const itemsTotal = product.price * qty;
+        // Stock check now uses variant.stock
+        if (variant.stock < qty) {
+            await session.abortTransaction();
+            return res.status(400).json({ message: `Insufficient stock for ${product.name} (Variant: ${variant.color}, ${variant.size})` });
+        }
+        
+        // Pincode check uses the fetched seller object
+        if (!seller.pincodes.includes(shippingAddress.pincode)) {
+             await session.abortTransaction();
+             return res.status(400).json({ message: `Delivery not available for ${product.name} at your location.` });
+        }
+        
+        // Calculations now use variant.price
+        const itemsTotal = variant.price * qty;
         let discountAmount = 0;
         const shippingFee = calculateShippingFee(shippingAddress.pincode);
         const taxAmount = itemsTotal * GST_RATE;
 
-        // Coupon Logic
-        if (couponCode) {
-            // ... (same coupon logic as above)
-        }
+        // ... (Coupon Logic remains here)
         
         let finalAmountForPayment = Math.max(0, itemsTotal + shippingFee + taxAmount - discountAmount);
         
@@ -4565,7 +4967,6 @@ app.post('/api/orders/buy-now', protect, async (req, res) => {
             effectivePaymentMethod = 'cod';
         }
 
-        // Razorpay Order Creation
         let razorpayOrder = null;
         if (effectivePaymentMethod === 'razorpay') {
             razorpayOrder = await razorpay.orders.create({
@@ -4579,14 +4980,20 @@ app.post('/api/orders/buy-now', protect, async (req, res) => {
 
         const order = new Order({
             user: req.user._id,
-            seller: product.seller._id,
+            seller: seller._id, // Use the fetched seller
             orderItems: [{
                 product: product._id,
                 name: product.name,
                 qty: qty,
-                price: product.price,
+                price: variant.price, // Use variant's price
                 originalPrice: product.originalPrice,
                 category: product.category,
+                // 4. SAVE COLOR AND SIZE ATTRIBUTES HERE!
+                variantId: variant._id, 
+                color: variant.color,
+                size: variant.size,
+                // Assuming variant has a 'sku' field
+                sku: variant.sku, 
             }],
             shippingAddress: `${shippingAddress.street}, ${shippingAddress.city}, ${shippingAddress.state} - ${shippingAddress.pincode}`,
             pincode: shippingAddress.pincode,
@@ -4602,20 +5009,37 @@ app.post('/api/orders/buy-now', protect, async (req, res) => {
             history: [{ status: isCodOrFree ? 'Pending' : 'Payment Pending' }]
         });
         
-        await order.save();
+        await order.save({ session }); // Save the order within the transaction
 
         if (isCodOrFree) {
-            await Product.findByIdAndUpdate(product._id, { $inc: { stock: -qty } });
+            // 3. Atomically decrement stock on the Variant model
+            const updatedVariant = await Variant.findOneAndUpdate(
+                { _id: variant._id, stock: { $gte: qty } },
+                { $inc: { stock: -qty } },
+                { new: true, session }
+            );
+            
+            if (!updatedVariant) {
+                await session.abortTransaction();
+                return res.status(409).json({ message: `Concurrency error: Insufficient stock for ${product.name}. Please try again.` });
+            }
             // Send notifications, etc.
         }
 
+        await session.commitTransaction(); // Commit all changes if successful
+        session.endSession();
+
         res.status(201).json({
             message: effectivePaymentMethod === 'razorpay' ? 'Order initiated, awaiting payment.' : 'Order created successfully.',
-            orders: [order._id], // Return as an array for consistency
+            orders: [order._id],
             razorpayOrder: razorpayOrder ? { id: razorpayOrder.id, amount: razorpayOrder.amount, key_id: process.env.RAZORPAY_KEY_ID } : undefined,
         });
 
     } catch (err) {
+        if (session.inTransaction()) {
+            await session.abortTransaction(); // Rollback on error
+        }
+        session.endSession();
         res.status(500).json({ message: 'Error placing Buy Now order', error: err.message });
     }
 });
