@@ -391,9 +391,9 @@ const orderSchema = new mongoose.Schema({
     originalPrice: Number,
     price: Number,
     category: String,
-    // ⭐️ FIX: ADDED FIELDS TO STORE SELECTED VARIANTS ⭐️
-    selectedColor: { type: String, required: true },
-    selectedSize: { type: String, required: true }
+    // ⭐️ FIX: REMOVING required: true ⭐️
+    selectedColor: { type: String, required: false }, // Allow null/undefined for non-variant items
+    selectedSize: { type: String, required: false }   // Allow null/undefined for non-variant items
 
     // --------------------------------------------------
   }],
