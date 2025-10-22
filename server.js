@@ -201,26 +201,46 @@ function calculateShippingFee(customerPincode) {
 
 // --------- Models ----------
 const userSchema = new mongoose.Schema({
-  name: String,
-  email: { type: String, unique: true, sparse: true, index: true },
-  password: { type: String, required: true },
-  phone: { type: String, unique: true, sparse: true, index: true },
-  role: { type: String, enum: ['user', 'seller', 'admin', 'delivery'], default: 'user', index: true },
-  pincodes: { type: [String], default: [] },
-  approved: { type: Boolean, default: true, index: true },
-  passwordResetOTP: String, // Used for both password reset and temporary OTP registration flow
-  passwordResetOTPExpire: Date,
-  pickupAddress: {
-    street: String,
-    village: String,
-    landmark: String,
-    city: String,
-    state: String,
-    pincode: String,
-    isSet: { type: Boolean, default: false }
-  },
-  fcmToken: { type: String, default: null }
+    name: String,
+    email: { type: String, unique: true, sparse: true, index: true },
+    password: { type: String, required: true },
+    phone: { type: String, unique: true, sparse: true, index: true },
+    role: { type: String, enum: ['user', 'seller', 'admin', 'delivery'], default: 'user', index: true },
+    pincodes: { type: [String], default: [] },
+    approved: { type: Boolean, default: true, index: true },
+    passwordResetOTP: String,
+    passwordResetOTPExpire: Date,
+    pickupAddress: {
+        street: String,
+        village: String,
+        landmark: String,
+        city: String,
+        state: String,
+        pincode: String,
+        isSet: { type: Boolean, default: false }
+    },
+    
+    // ======== ✨ NEW PAYOUT DETAILS FIELD ✨ ========
+    payoutDetails: {
+        // Razorpay Contact ID (Used to group Fund Accounts for RazorpayX)
+        razorpayContactId: { type: String, default: null }, 
+        
+        // The core ID for automated payouts using RazorpayX APIs
+        razorpayFundAccountId: { type: String, default: null, index: true }, 
+        
+        // To classify the type of account stored
+        accountType: { type: String, enum: ['bank', 'vpa', null], default: null },
+
+        // Store plain bank details (useful for display or manual transfer reference)
+        bankAccountNumber: { type: String, default: null },
+        ifsc: { type: String, default: null },
+        vpa: { type: String, default: null } 
+    },
+    // ===============================================
+
+    fcmToken: { type: String, default: null }
 }, { timestamps: true });
+
 const User = mongoose.model('User', userSchema);
 
 const appSettingsSchema = new mongoose.Schema({
@@ -1618,63 +1638,56 @@ app.get('/api/cart', protect, async (req, res) => {
 // server.js (POST /api/cart)
 
 // server.js - app.post('/api/cart') ROUTE (Fixed)
+// server.js - app.post('/api/cart') ROUTE (DEBUGGING VERSION)
+
 app.post('/api/cart', protect, async (req, res) => {
     try {
-        // 1. EXTRACT VARIANTS: Get the product details and the full selectedVariant map
         const { 
             productId, 
             qty = 1, 
-            pincode, 
-            selectedVariant // ⭐ यह Map<String, String> from Flutter है (e.g., {'color': 'Red'})
+            selectedVariant 
         } = req.body;
         
-        // 2. EXTRACT COLOR/SIZE: Extract color and size safely from the map, if it exists.
-        //    (Flutter sends keys as 'color' and 'size', which Node/Express receives as properties)
+        // ✅ --- DEBUGGING LOGS START --- ✅
+        console.log("--- ADD TO CART REQUEST RECEIVED ---");
+        console.log("Request Body:", JSON.stringify(req.body, null, 2));
+        console.log("User ID:", req.user._id);
+        // ✅ --- DEBUGGING LOGS END --- ✅
+
         const selectedColor = selectedVariant ? selectedVariant.color : undefined;
         const selectedSize = selectedVariant ? selectedVariant.size : undefined;
         
-        const product = await Product.findById(productId).populate('seller', 'pincodes');
-        if (!product) return res.status(404).json({ message: 'Product not found' });
-
-        // --- (Pre-check logic remains the same) ---
+        const product = await Product.findById(productId);
+        if (!product) {
+            console.log(`❌ FAILED: Product with ID ${productId} not found.`);
+            return res.status(404).json({ message: 'Product not found' });
+        }
 
         let cart = await Cart.findOne({ user: req.user._id });
         if (!cart) {
             cart = await Cart.create({ user: req.user._id, items: [] });
         }
 
-        // 3. FIND ITEM: Match product AND its specific variants
-        //    We must check against null/undefined to correctly match items without variants
         const itemIndex = cart.items.findIndex(item => 
             item.product.toString() === productId &&
-            (item.selectedColor === selectedColor || (!item.selectedColor && !selectedColor)) && // Check if color matches or both are undefined/null
-            (item.selectedSize === selectedSize || (!item.selectedSize && !selectedSize))        // Check if size matches or both are undefined/null
+            (item.selectedColor === selectedColor || (!item.selectedColor && !selectedColor)) &&
+            (item.selectedSize === selectedSize || (!item.selectedSize && !selectedSize))
         );
 
         if (itemIndex > -1) {
-            // Item (with the same variant) exists, just increase quantity
             cart.items[itemIndex].qty += qty;
         } else {
-            // Item (or item with a different variant) does not exist, push new item
-            
-            // ✅ FIX 1: Robustly check if variants requiring color/size exist (via iteration)
             const hasColorOptions = product.variants.some(v => v.color && v.color.length > 0);
             const hasSizeOptions = product.variants.some(v => v.size && v.size.length > 0);
 
-            // 1. Validate required selections against available options
             if ((hasColorOptions && !selectedColor) || (hasSizeOptions && !selectedSize)) {
-                
-                let missingFields = [];
-                if (hasColorOptions && !selectedColor) missingFields.push('Color');
-                if (hasSizeOptions && !selectedSize) missingFields.push('Size');
-
-                return res.status(400).json({ 
-                    message: `Validation failed: Missing required variant selection (${missingFields.join(' and ')}).`,
-                    developerMessage: `Missing required variant. Color required: ${hasColorOptions}, Size required: ${hasSizeOptions}.`
-                });
+                let missing = [];
+                if (hasColorOptions && !selectedColor) missing.push('Color');
+                if (hasSizeOptions && !selectedSize) missing.push('Size');
+                console.log(`❌ FAILED: Missing required variants: ${missing.join(' & ')}`);
+                return res.status(400).json({ message: `Please select ${missing.join(' and ')}.` });
             }
             
-            // ✅ FIX 2: Validate if the SELECTED combination exists and has stock (if product has variants)
             if (product.variants.length > 0) {
                 const targetVariant = product.variants.find(v => 
                     (v.color === selectedColor || (!v.color && !selectedColor)) &&
@@ -1682,16 +1695,18 @@ app.post('/api/cart', protect, async (req, res) => {
                 );
 
                 if (!targetVariant) {
-                    return res.status(400).json({ message: 'The selected variant combination is not available for this product.' });
+                    console.log(`❌ FAILED: Variant combination not found.`);
+                    console.log(`   - Received: color='${selectedColor}', size='${selectedSize}'`);
+                    console.log(`   - Available Variants in DB:`, product.variants.map(v => ({color: v.color, size: v.size})));
+                    return res.status(400).json({ message: 'The selected variant combination is not available.' });
                 }
 
-                // Check stock of the specific variant
                 if (targetVariant.stock < qty) {
-                     return res.status(400).json({ message: `Insufficient stock for selected variant (${selectedColor || 'N/A'}/${selectedSize || 'N/A'}).` });
+                    console.log(`❌ FAILED: Insufficient stock for variant. Stock: ${targetVariant.stock}, Qty: ${qty}`);
+                    return res.status(400).json({ message: `Insufficient stock for selected variant.` });
                 }
             }
 
-            // 4. SAVE VARIANTS: Store the extracted color and size
             cart.items.push({ 
                 product: productId, 
                 qty,
@@ -1701,10 +1716,11 @@ app.post('/api/cart', protect, async (req, res) => {
         }
 
         await cart.save();
+        console.log("✅ SUCCESS: Cart updated successfully.");
         res.status(200).json(cart);
         
     } catch (err) {
-        console.error("Error adding item to cart:", err.message);
+        console.error("❌ CRITICAL ERROR in /api/cart:", err.message);
         res.status(500).json({ message: 'Error adding item to cart', error: err.message });
     }
 });
@@ -2866,33 +2882,109 @@ app.get('/api/seller/financials', protect, authorizeRole('seller'), async (req, 
     const appSettings = await AppSettings.findOne({ singleton: true });
     const PLATFORM_COMMISSION_RATE = appSettings ? appSettings.platformCommissionRate : 0.05;
 
+    // ✅ TOTAL REVENUE (Delivered orders only)
     const totalRevenueResult = await Order.aggregate([
-      { $match: { seller: sellerId, deliveryStatus: 'Delivered', paymentStatus: 'completed' } },
-      { $group: { _id: null, totalSales: { $sum: "$totalAmount" } } }
+      { 
+        $match: { 
+          seller: new mongoose.Types.ObjectId(sellerId), 
+          deliveryStatus: 'Delivered', 
+          paymentStatus: 'completed' 
+        } 
+      },
+      { 
+        $group: { 
+          _id: null, 
+          totalSales: { $sum: "$totalAmount" } 
+        } 
+      }
     ]);
     const totalRevenue = totalRevenueResult[0]?.totalSales || 0;
 
     const platformCommission = totalRevenue * PLATFORM_COMMISSION_RATE;
     const netEarnings = totalRevenue - platformCommission;
 
+    // ✅ PROCESSED PAYOUTS
     const totalPayoutsResult = await Payout.aggregate([
-      { $match: { seller: sellerId, status: 'processed' } },
-      { $group: { _id: null, totalProcessed: { $sum: "$amount" } } }
+      { 
+        $match: { 
+          seller: new mongoose.Types.ObjectId(sellerId), 
+          status: 'processed' 
+        } 
+      },
+      { 
+        $group: { 
+          _id: null, 
+          totalProcessed: { $sum: "$amount" } 
+        } 
+      }
     ]);
     const totalPayouts = totalPayoutsResult[0]?.totalProcessed || 0;
 
-    const currentBalance = netEarnings - totalPayouts;
+    // ✅ PENDING PAYOUTS (NEW)
+    const pendingPayoutsResult = await Payout.aggregate([
+      { 
+        $match: { 
+          seller: new mongoose.Types.ObjectId(sellerId), 
+          status: 'pending' 
+        } 
+      },
+      { 
+        $group: { 
+          _id: null, 
+          totalPending: { $sum: "$amount" } 
+        } 
+      }
+    ]);
+    const pendingPayouts = pendingPayoutsResult[0]?.totalPending || 0;
 
+    // ✅ CALCULATE BALANCES
+    const currentBalance = netEarnings - totalPayouts;
+    const availableBalance = Math.max(0, currentBalance - pendingPayouts);
+
+    // ✅ PAYOUT HISTORY
     const payouts = await Payout.find({ seller: sellerId }).sort({ createdAt: -1 });
 
+    // ✅ ADDITIONAL STATS (NEW)
+    const totalOrdersResult = await Order.aggregate([
+      { 
+        $match: { 
+          seller: new mongoose.Types.ObjectId(sellerId),
+          deliveryStatus: 'Delivered'
+        } 
+      },
+      { 
+        $group: { 
+          _id: null, 
+          totalOrders: { $sum: 1 } 
+        } 
+      }
+    ]);
+    const totalOrders = totalOrdersResult[0]?.totalOrders || 0;
+
     res.json({
+      // Basic Financials
       totalRevenue: totalRevenue,
       netEarnings: netEarnings,
       platformCommission: platformCommission,
       totalPayouts: totalPayouts,
+      
+      // Balances (NEW FIELDS)
       currentBalance: currentBalance,
+      pendingPayouts: pendingPayouts,
+      availableBalance: availableBalance,
+      
+      // Additional Stats (NEW)
+      totalOrders: totalOrders,
+      commissionRate: PLATFORM_COMMISSION_RATE,
+      
+      // Payout History
       payouts: payouts,
-      commissionRate: PLATFORM_COMMISSION_RATE
+      
+      // Payout Limits (NEW)
+      payoutLimits: {
+        minimumPayout: 100,
+        maximumPayout: availableBalance
+      }
     });
 
   } catch (err) {
@@ -2900,7 +2992,6 @@ app.get('/api/seller/financials', protect, authorizeRole('seller'), async (req, 
     res.status(500).json({ message: 'Error fetching financial data', error: err.message });
   }
 });
-
 
 // ... (Assumed imports: Product, Category, User models, generateUniqueSku function, protect middleware, etc.)
 
@@ -5128,6 +5219,260 @@ app.post('/api/orders/:id/return-request', protect, async (req, res) => {
     }
 });
 
+// Seller payout request
+// POST /api/seller/payouts/request (Modified)
+
+// POST /api/seller/payouts/request (Modified for Manual Payouts)
+
+app.post('/api/seller/payouts/request', protect, authorizeRole('seller'), async (req, res) => {
+    try {
+        const sellerId = req.user._id;
+        const { amount } = req.body; // अब upiId को body से लेने की ज़रूरत नहीं है
+
+        const amountFloat = parseFloat(amount);
+        if (isNaN(amountFloat) || amountFloat <= 0 || amountFloat < 100) {
+             return res.status(400).json({ message: 'Invalid or insufficient payout amount (Min ₹100).' });
+        }
+
+        // 1. Get current balance using the helper
+        const financials = await calculateSellerFinancials(sellerId);
+
+        if (amountFloat > financials.availableBalance) { 
+            return res.status(400).json({ message: 'Insufficient available balance.' });
+        }
+
+        // 2. CRITICAL CHECK: Ensure bank details are present for manual transfer
+        const payoutDetails = req.user.payoutDetails;
+        if (!payoutDetails || (!payoutDetails.bankAccountNumber && !payoutDetails.vpa)) {
+            return res.status(400).json({ message: 'Bank details not set. Please add your payout account details first.' });
+        }
+
+        // 3. Create Payout record in your DB (status: pending)
+        const payout = await Payout.create({
+            seller: sellerId,
+            amount: amountFloat,
+            status: 'pending',
+            notes: `MANUAL TRANSFER: ${payoutDetails.bankAccountNumber ? `A/C: ${payoutDetails.bankAccountNumber}` : `VPA: ${payoutDetails.vpa}`}`
+        });
+
+        // 4. Notify admin for manual processing
+        await notifyAdmin(
+            `🚨 MANUAL PAYOUT REQUIRED 🚨\n` +
+            `Seller: ${req.user.name}\n` +
+            `Amount: ₹${amountFloat.toFixed(2)}\n` +
+            `Details: A/C: ${payoutDetails.bankAccountNumber || 'N/A'}, IFSC: ${payoutDetails.ifsc || 'N/A'}, VPA: ${payoutDetails.vpa || 'N/A'}\n` +
+            `Payout ID: ${payout._id}`
+        );
+
+        res.status(201).json({
+            message: 'Payout request submitted successfully. Awaiting manual transfer by admin.',
+            payout
+        });
+
+    } catch (err) {
+        console.error('Manual Payout request error:', err.message);
+        res.status(500).json({ message: 'Error requesting payout', error: err.message });
+    }
+});
+// Get seller payout history
+app.get('/api/seller/payouts', protect, authorizeRole('seller'), async (req, res) => {
+  try {
+    const payouts = await Payout.find({ seller: req.user._id })
+      .sort({ createdAt: -1 });
+    
+    res.json(payouts);
+  } catch (err) {
+    res.status(500).json({ message: 'Error fetching payout history', error: err.message });
+  }
+});
+
+// Get all pending payouts (Admin)
+app.get('/api/admin/payouts/pending', protect, authorizeRole('admin'), async (req, res) => {
+  try {
+    const payouts = await Payout.find({ status: 'pending' })
+      .populate('seller', 'name email phone')
+      .sort({ createdAt: 1 });
+    
+    res.json(payouts);
+  } catch (err) {
+    res.status(500).json({ message: 'Error fetching pending payouts', error: err.message });
+  }
+});
+
+// Process payout (Admin)
+// Process payout (Admin) - Confirms Admin has manually transferred funds
+app.put('/api/admin/payouts/:id/process', protect, authorizeRole('admin'), async (req, res) => {
+    try {
+        const { transactionId, notes } = req.body;
+        // transactionId यहाँ वह UTR (Unique Transaction Reference) होना चाहिए जो Admin ने बैंक से ट्रांसफर करते समय प्राप्त किया था।
+        
+        const payout = await Payout.findById(req.params.id).populate('seller');
+        if (!payout) {
+            return res.status(404).json({ message: 'Payout not found' });
+        }
+
+        if (payout.status !== 'pending') {
+            return res.status(400).json({ message: 'Payout already processed' });
+        }
+        
+        if (!transactionId) {
+             return res.status(400).json({ message: 'Transaction ID (UTR) is required to mark as processed.' });
+        }
+
+        // Update payout status
+        payout.status = 'processed';
+        payout.transactionId = transactionId;
+        payout.processedAt = new Date();
+        payout.notes = `${payout.notes || ''} | Processed by admin. New Note: ${notes || 'N/A'}`;
+        
+        await payout.save();
+
+        // Notify seller that transfer is complete
+        const sellerMessage = `✅ Your manual payout of ₹${payout.amount} has been processed! Please check your bank account/UPI. UTR: ${transactionId}`;
+        await sendWhatsApp(payout.seller.phone, sellerMessage);
+
+        if (payout.seller.fcmToken) {
+            await sendPushNotification(
+                payout.seller.fcmToken,
+                '💰 Payout Processed!',
+                `Your manual payout of ₹${payout.amount} is complete.`,
+                { type: 'PAYOUT_PROCESSED', payoutId: payout._id.toString() }
+            );
+        }
+
+        res.json({
+            message: 'Payout processed successfully (Manually Confirmed)',
+            payout
+        });
+
+    } catch (err) {
+        console.error('Process payout error:', err.message);
+        res.status(500).json({ message: 'Error processing payout', error: err.message });
+    }
+});
+// HELPER FUNCTION: Calculates Seller's Net Earnings and Balances (REQUIRED for /api/seller/payouts/request to work)
+async function calculateSellerFinancials(sellerId) {
+    const { ObjectId } = mongoose.Types;
+
+    // Fetch commission rate
+    const appSettings = await AppSettings.findOne({ singleton: true });
+    const PLATFORM_COMMISSION_RATE = appSettings ? appSettings.platformCommissionRate : 0.05;
+
+    // 1. TOTAL REVENUE (Delivered orders only)
+    const totalRevenueResult = await Order.aggregate([
+        {
+            $match: {
+                seller: new ObjectId(sellerId),
+                deliveryStatus: 'Delivered',
+                paymentStatus: 'completed'
+            }
+        },
+        {
+            $group: {
+                _id: null,
+                totalSales: { $sum: "$totalAmount" } // Item Subtotal
+            }
+        }
+    ]);
+    const totalRevenue = totalRevenueResult[0]?.totalSales || 0;
+
+    const platformCommission = totalRevenue * PLATFORM_COMMISSION_RATE;
+    const netEarnings = totalRevenue - platformCommission; // Earnings before paying out
+
+    // 2. PROCESSED PAYOUTS (Already paid to seller)
+    const totalPayoutsResult = await Payout.aggregate([
+        {
+            $match: {
+                seller: new ObjectId(sellerId),
+                status: 'processed'
+            }
+        },
+        {
+            $group: {
+                _id: null,
+                totalProcessed: { $sum: "$amount" }
+            }
+        }
+    ]);
+    const totalPayouts = totalPayoutsResult[0]?.totalProcessed || 0;
+
+    // 3. PENDING PAYOUTS (Requested by seller but not yet processed)
+    const pendingPayoutsResult = await Payout.aggregate([
+        {
+            $match: {
+                seller: new ObjectId(sellerId),
+                status: 'pending'
+            }
+        },
+        {
+            $group: {
+                _id: null,
+                totalPending: { $sum: "$amount" }
+            }
+        }
+    ]);
+    const pendingPayouts = pendingPayoutsResult[0]?.totalPending || 0;
+
+    // 4. CALCULATE BALANCES
+    const currentBalance = netEarnings - totalPayouts; // Total net earnings minus total paid out
+    const availableBalance = Math.max(0, currentBalance - pendingPayouts); // Amount available for a new request
+
+    return {
+        totalRevenue: totalRevenue,
+        netEarnings: netEarnings,
+        platformCommission: platformCommission,
+        totalPayouts: totalPayouts,
+        pendingPayouts: pendingPayouts,
+        currentBalance: currentBalance,
+        availableBalance: availableBalance,
+        commissionRate: PLATFORM_COMMISSION_RATE
+    };
+}
+
+// POST /api/seller/bank-details
+// Seller अपने बैंक खाते या UPI VPA को जोड़ने के लिए इस रूट का उपयोग करेगा।
+
+// POST /api/seller/bank-details (Modified for Manual Payouts)
+
+app.post('/api/seller/bank-details', protect, authorizeRole('seller'), async (req, res) => {
+    try {
+        const { bankAccountNumber, ifsc, vpa, accountHolderName } = req.body;
+        const seller = req.user;
+
+        if ((!bankAccountNumber || !ifsc) && !vpa) {
+            return res.status(400).json({ message: 'Bank Account/IFSC OR UPI VPA is required.' });
+        }
+
+        // 1. Store the details directly in the user profile
+        seller.payoutDetails = {
+            accountType: bankAccountNumber ? 'bank' : 'vpa',
+            bankAccountNumber: bankAccountNumber || null,
+            ifsc: ifsc || null,
+            vpa: vpa || null,
+            // (Optional) Store accountHolderName in User.name or a separate field if needed
+        };
+        await seller.save();
+
+        // 2. Notify admin that new manual bank details are available
+        await notifyAdmin(
+            `💰 NEW Manual Payout Details Added/Updated!\n` +
+            `Seller: ${seller.name} (${seller.phone})\n` +
+            `A/C: ${bankAccountNumber} IFSC: ${ifsc} VPA: ${vpa}`
+        );
+
+        res.status(200).json({ 
+            message: `Payout details saved successfully for manual transfer.`, 
+            payoutDetails: seller.payoutDetails
+        });
+
+    } catch (err) {
+        console.error('Manual Bank Details Setup Error:', err.message);
+        res.status(500).json({ 
+            message: 'Error saving bank details.', 
+            error: err.message 
+        });
+    }
+});
 // ... (The rest of your existing order routes and other routes go here) ...
 
 
