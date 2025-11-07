@@ -276,80 +276,83 @@ const subcategorySchema = new mongoose.Schema({
 const Subcategory = mongoose.model('Subcategory', subcategorySchema);
 
 const productSchema = new mongoose.Schema({
-  name: String,
-  brand: { type: String, default: 'Unbranded' },
-  sku: String, // Main product SKU (optional)
-  category: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', required: true, index: true },
-  subcategory: { type: mongoose.Schema.Types.ObjectId, ref: 'Subcategory', default: null, index: true },
-  childCategory: { type: mongoose.Schema.Types.ObjectId, ref: 'Subcategory', default: null },
+  name: String,
+  brand: { type: String, default: 'Unbranded' },
+  sku: String, // Main product SKU (optional)
+  category: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', required: true, index: true },
+  subcategory: { type: mongoose.Schema.Types.ObjectId, ref: 'Subcategory', default: null, index: true },
+  childCategory: { type: mongoose.Schema.Types.ObjectId, ref: 'Subcategory', default: null },
+  
+  // ❌ Main price and stock fields are removed from here.
+  
+  unit: {
+    type: String,
+    enum: ['kg', '100g', '250g', '500g', 'L', 'ml', 'pcs', 'pack', 'piece', 'bunch', 'packet', 'dozen', 'bag', '50g'],
+    required: false,
+  },
+  minOrderQty: { type: Number, default: 1 },
+  shortDescription: String,
+  fullDescription: String,
+  
+  // Main images for the product (can be used as default)
+  images: [{
+    url: String,
+    publicId: String
+  }],
+  videoLink: String,
+  uploadedVideo: {
+    url: String,
+    publicId: String
+  },
+  specifications: { type: Map, of: String, default: {} },
+  
+  // ✅ UPDATED VARIANTS SECTION
+  // This is now an array, where each object is a unique variant with its own details.
+  variants: [{
+      color: { type: String },
+      size: { type: String },
+      price: { type: Number, required: true },
+      originalPrice: { type: Number }, // MRP for this specific variant
+      costPrice: { type: Number }, // Cost price for this variant
+      stock: { type: Number, required: true, default: 0 },
+      sku: { type: String }, // Optional: Unique SKU for this variant
+      images: [{ // Optional: Images specific to this variant
+        url: String,
+        publicId: String
+      }]
+  }],
+  
+  shippingDetails: {
+    weight: Number,
+    dimensions: {
+      length: Number,
+      width: Number,
+      height: Number,
+    },
+    shippingType: { type: String, enum: ['Free', 'Paid', 'COD Available'], default: 'Free' },
+  },
+  otherInformation: {
+    warranty: String,
+    returnPolicy: {
+      type: String,
+      enum: ['Non-Returnable', 'Returnable', 'Replacement'],
+      default: 'Non-Returnable'
+    },
+    tags: [String],
+  },
+  serviceDurationMinutes: { type: Number },
+  
+  pincodes: [{ 
+    type: String, 
+    required: false,
+    index: true
+  }], 
+  
+  // ✨ NEW FIELD: Set to true if product is available globally, ignoring pincode filters.
+  isGlobal: { type: Boolean, default: false, index: true }, 
   
-  // ❌ Main price and stock fields are removed from here.
-  
-  unit: {
-    type: String,
-    enum: ['kg', '100g', '250g', '500g', 'L', 'ml', 'pcs', 'pack', 'piece', 'bunch', 'packet', 'dozen', 'bag', '50g'],
-    required: false,
-  },
-  minOrderQty: { type: Number, default: 1 },
-  shortDescription: String,
-  fullDescription: String,
-  
-  // Main images for the product (can be used as default)
-  images: [{
-    url: String,
-    publicId: String
-  }],
-  videoLink: String,
-  uploadedVideo: {
-    url: String,
-    publicId: String
-  },
-  specifications: { type: Map, of: String, default: {} },
-  
-  // ✅ UPDATED VARIANTS SECTION
-  // This is now an array, where each object is a unique variant with its own details.
-  variants: [{
-      color: { type: String },
-      size: { type: String },
-      price: { type: Number, required: true },
-      originalPrice: { type: Number }, // MRP for this specific variant
-      costPrice: { type: Number }, // Cost price for this variant
-      stock: { type: Number, required: true, default: 0 },
-      sku: { type: String }, // Optional: Unique SKU for this variant
-      images: [{ // Optional: Images specific to this variant
-        url: String,
-        publicId: String
-      }]
-  }],
-  
-  shippingDetails: {
-    weight: Number,
-    dimensions: {
-      length: Number,
-      width: Number,
-      height: Number,
-    },
-    shippingType: { type: String, enum: ['Free', 'Paid', 'COD Available'], default: 'Free' },
-  },
-  otherInformation: {
-    warranty: String,
-    returnPolicy: {
-      type: String,
-      enum: ['Non-Returnable', 'Returnable', 'Replacement'],
-      default: 'Non-Returnable'
-    },
-    tags: [String],
-  },
-  serviceDurationMinutes: { type: Number },
-  
-  pincodes: [{ 
-    type: String, 
-    required: false,
-    index: true
-  }], 
-  
-  seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
-  isTrending: { type: Boolean, default: false, index: true }
+  seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
+  isTrending: { type: Boolean, default: false, index: true }
 }, { timestamps: true });
 
 const Product = mongoose.model('Product', productSchema);
@@ -1560,6 +1563,7 @@ app.get('/api/products/:id', async (req, res) => {
 
 
 // [NEW] API Endpoint to get products available in a specific pincode
+// [NEW] API Endpoint to get products available in a specific pincode
 app.get('/api/products/pincode/:pincode', async (req, res) => {
     try {
         const userPincode = req.params.pincode;
@@ -1569,9 +1573,15 @@ app.get('/api/products/pincode/:pincode', async (req, res) => {
 
         // --- Aggregation Pipeline for Pincode Filtering ---
         const products = await Product.aggregate([
-            // Stage 1: Filter products by Pincode directly on the product document (new field)
+            // Stage 1: Filter products by Pincode OR isGlobal
             { $match: { 
-                pincodes: userPincode,
+                $or: [
+                    // A) The product is available globally
+                    { isGlobal: true },
+                    // B) OR The user's pincode is in the product's allowed list
+                    { pincodes: userPincode }
+                ],
+                // AND must be in stock
                 stock: { $gt: 0 } // Only show in-stock products
             }},
             // Stage 2: Join with Seller (User) details to get seller's name/info
@@ -1607,6 +1617,7 @@ app.get('/api/products/pincode/:pincode', async (req, res) => {
                 "category.name": 1,
                 createdAt: 1,
                 pincodes: 1, // Show which pincodes this product covers
+                isGlobal: 1, // Include the flag in the output
             }},
             // Stage 5: Sort by newest first
             { $sort: { createdAt: -1 } }
@@ -1622,7 +1633,6 @@ app.get('/api/products/pincode/:pincode', async (req, res) => {
         res.status(500).json({ message: 'Error fetching products by pincode', error: err.message });
     }
 });
-
 
 
 app.get('/api/cart', protect, async (req, res) => {
@@ -3013,6 +3023,11 @@ app.post('/api/seller/products',
         videoLink, specifications, shippingWeight, shippingLength,
         shippingWidth, shippingHeight, shippingType, warranty,
         returnPolicy, tags, serviceDurationMinutes,
+        
+        // ✨ [NEW]: Pincode and Global availability fields
+        pincodeList, // Expected: JSON string of a string array, e.g., '["800001", "800002"]'
+        isGlobal,    // Expected: string 'true' or 'false'
+        
       } = req.body;
 
       // --- 1. Basic Validation ---
@@ -3068,9 +3083,10 @@ app.post('/api/seller/products',
           storage: variant.storage || null,
           price: parseFloat(variant.price),
           originalPrice: variant.originalPrice ? parseFloat(variant.originalPrice) : null,
+          costPrice: variant.costPrice ? parseFloat(variant.costPrice) : null, // Assuming costPrice can be passed per variant
           stock: parseInt(variant.stock),
           // ✅ Assign an uploaded image to this variant
-          image: variantImages[index] ? variantImages[index] : null
+          images: variantImages[index] ? [variantImages[index]] : []
         };
       });
 
@@ -3078,7 +3094,26 @@ app.post('/api/seller/products',
       const firstVariant = productVariants[0];
       const totalStock = productVariants.reduce((sum, v) => sum + v.stock, 0);
 
-      // --- 6. Prepare Final Product Data ---
+      // --- 6. Process Pincodes and Global Flag (NEW LOGIC) ---
+      let finalPincodes = req.user.pincodes || [];
+      if (pincodeList) {
+          try {
+              // Parse the JSON string from the request body
+              const parsedPincodes = JSON.parse(pincodeList);
+              if (Array.isArray(parsedPincodes)) {
+                  // If a valid array is provided, use it
+                  finalPincodes = parsedPincodes.filter(p => typeof p === 'string' && p.length > 0);
+              }
+          } catch (e) {
+              console.warn('PincodeList parsing failed, using seller default pincodes.', e);
+              // Fallback to seller's default pincodes if parsing fails
+              finalPincodes = req.user.pincodes || []; 
+          }
+      }
+      
+      const isProductGlobal = isGlobal === 'true'; // Convert string 'true'/'false' to boolean
+
+      // --- 7. Prepare Final Product Data ---
       const finalSubcategory = childCategory || subcategory;
       const productData = {
         name: productTitle,
@@ -3098,10 +3133,22 @@ app.post('/api/seller/products',
         videoLink,
         variants: productVariants, // ✅ Save the detailed variants array
         seller: req.user._id,
-        pincodes: req.user.pincodes || [],
+        
+        // ✨ [NEW]: Save pincode list and isGlobal flag
+        pincodes: finalPincodes, 
+        isGlobal: isProductGlobal, 
+        
         serviceDurationMinutes: parentCategory.type === 'service' ? parseInt(serviceDurationMinutes) : undefined,
         specifications: specifications ? JSON.parse(specifications) : {},
-        shippingDetails: { /* ... your shipping logic ... */ },
+        shippingDetails: { 
+            weight: shippingWeight ? parseFloat(shippingWeight) : undefined,
+            dimensions: {
+                length: shippingLength ? parseFloat(shippingLength) : undefined,
+                width: shippingWidth ? parseFloat(shippingWidth) : undefined,
+                height: shippingHeight ? parseFloat(shippingHeight) : undefined,
+            },
+            shippingType: shippingType || 'Free',
+        },
         otherInformation: {
           tags: tags ? JSON.parse(tags) : [],
           warranty: warranty || null,
@@ -3109,13 +3156,13 @@ app.post('/api/seller/products',
         },
       };
 
-      // --- 7. Create Product and Send Response ---
+      // --- 8. Create Product and Send Response ---
       const product = await Product.create(productData);
       res.status(201).json(product);
 
     } catch (err) {
       console.error('Create product error:', err);
-      if (err.name === 'ValidationError' || err.message.includes('must have a price and stock')) {
+      if (err.name === 'ValidationError' || err.message.includes('must have a price and stock') || err.message.includes('MRP cannot be less than selling price')) {
         return res.status(400).json({ message: 'Validation failed', error: err.message });
       }
       res.status(500).json({ message: 'Error creating product', error: err.message });
@@ -3203,7 +3250,12 @@ app.put('/api/seller/products/:id', protect, authorizeRole('seller', 'admin'), c
       shortDescription, fullDescription, unit, videoLink, specifications,
       shippingWeight, shippingLength, shippingWidth, shippingHeight, shippingType,
       warranty, returnPolicy, tags, serviceDurationMinutes, isTrending,
-      variants, imagesToDelete 
+      variants, imagesToDelete,
+      
+      // ✨ [NEW]: Add fields for updating pincode and global setting
+      pincodeList, // Expected: JSON string of a string array, e.g., '["800001", "800002"]'
+      isGlobal,    // Expected: string 'true' or 'false'
+
     } = req.body;
 
     const product = await Product.findById(req.params.id);
@@ -3266,9 +3318,6 @@ app.put('/api/seller/products/:id', protect, authorizeRole('seller', 'admin'), c
                 // OPTION A: If a NEW file is uploaded for this index, use it (overwriting any previous image)
                 variantImagesData = [{ url: newImageFile.path, publicId: newImageFile.filename }];
                 
-                // OPTIONAL: If the old image existed, delete it from Cloudinary (requires old publicId to be passed back)
-                // Since the frontend isn't explicitly passing old Public IDs for deletion, we skip immediate deletion
-            
             } else if (variant.imagePublicId && variant.imageUrl) {
                 // OPTION B: If no new file, but existing data (PublicId and URL) was passed from the frontend, retain it.
                 variantImagesData = [{ url: variant.imageUrl, publicId: variant.imagePublicId }];
@@ -3280,8 +3329,9 @@ app.put('/api/seller/products/:id', protect, authorizeRole('seller', 'admin'), c
                 size: variant.size || null,
                 price: parseFloat(variant.price),
                 originalPrice: variant.originalPrice ? parseFloat(variant.originalPrice) : null,
+                costPrice: variant.costPrice ? parseFloat(variant.costPrice) : null,
                 stock: variantStock,
-                images: variantImagesData // <-- FIX: Save the correct image array here
+                images: variantImagesData 
             };
             
             return variantObj;
@@ -3297,7 +3347,23 @@ app.put('/api/seller/products/:id', protect, authorizeRole('seller', 'admin'), c
         }
     }
     
-    // --- 4. Update Scalar Fields ---
+    // --- 4. Update Pincodes and Global Flag (NEW LOGIC) ---
+    if (typeof isGlobal !== 'undefined') {
+        product.isGlobal = isGlobal === 'true'; // Convert string 'true'/'false' to boolean
+    }
+
+    if (pincodeList) {
+        try {
+            const parsedPincodes = JSON.parse(pincodeList);
+            if (Array.isArray(parsedPincodes)) {
+                product.pincodes = parsedPincodes.filter(p => typeof p === 'string' && p.length > 0);
+            }
+        } catch (e) {
+            console.warn('PincodeList parsing failed during PUT. Skipping pincode update.', e);
+        }
+    }
+
+    // --- 5. Update Scalar Fields ---
     if (productTitle) product.name = productTitle;
     if (brand) product.brand = brand;
     if (shortDescription) product.shortDescription = shortDescription;
@@ -3318,6 +3384,14 @@ app.put('/api/seller/products/:id', protect, authorizeRole('seller', 'admin'), c
     product.price = defaultPrice;
     product.originalPrice = defaultOriginalPrice;
     product.stock = totalStock;
+
+    // Update shipping details
+    if (shippingWeight) product.shippingDetails.weight = parseFloat(shippingWeight);
+    if (shippingLength) product.shippingDetails.dimensions.length = parseFloat(shippingLength);
+    if (shippingWidth) product.shippingDetails.dimensions.width = parseFloat(shippingWidth);
+    if (shippingHeight) product.shippingDetails.dimensions.height = parseFloat(shippingHeight);
+    if (shippingType) product.shippingDetails.shippingType = shippingType;
+
     
     await product.save();
     res.json(product);
@@ -5482,3 +5556,4 @@ const PORT = process.env.PORT || 5001;
 app.listen(PORT, IP, () => {
   console.log(`🚀 Server running on http://${IP}:${PORT}`);
 });
+
