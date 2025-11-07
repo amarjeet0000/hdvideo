@@ -1025,7 +1025,13 @@ app.put('/api/auth/profile', protect, async (req, res) => {
     const user = await User.findById(req.user._id);
     if (name) user.name = name;
     if (phone) user.phone = phone;
-    if (pincodes && pincodes.length) user.pincodes = pincodes; // Works for sellers and delivery boys
+    
+    // ✅ MODIFIED LOGIC: Check if 'pincodes' property is present in the request body.
+    // If present, overwrite user.pincodes with the new array (even if it's empty [] for Global Coverage).
+    if (pincodes !== undefined) { 
+        // Ensure it's an array before assigning, or default to empty array if null is sent.
+        user.pincodes = Array.isArray(pincodes) ? pincodes : []; 
+    } 
 
     if (user.role === 'seller' && pickupAddress) {
       user.pickupAddress = {
@@ -1042,6 +1048,7 @@ app.put('/api/auth/profile', protect, async (req, res) => {
     await user.save();
     res.json(user);
   } catch (err) {
+    console.error('Error updating profile:', err.message);
     res.status(500).json({ message: 'Error updating profile' });
   }
 });
