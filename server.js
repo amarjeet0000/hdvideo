@@ -1803,28 +1803,40 @@ app.get('/api/wishlist', protect, async (req, res) => {
 });
 
 app.post('/api/products/:id/like', protect, async (req, res) => {
-  try {
-    const productId = req.params.id;
-    const userId = req.user._id;
+    try {
+        const productId = req.params.id;
+        const userId = req.user._id;
 
-    const product = await Product.findById(productId);
-    if (!product) {
-      return res.status(404).json({ message: 'Product not found' });
+        const product = await Product.findById(productId);
+        if (!product) {
+            return res.status(404).json({ message: 'Product not found' });
+        }
+
+        const existingLike = await Like.findOne({ product: productId, user: userId });
+        if (existingLike) {
+            // यदि पहले से लाइक किया हुआ है, तो 409 दें लेकिन इसे Wishlist से हटाने की कोशिश न करें
+            // (यह केवल सुनिश्चित करता है कि Wishlist में एंट्री है, यदि Flutter ने DELETE कॉल नहीं किया है)
+            return res.status(409).json({ message: 'Product already liked by this user' });
+        }
+
+        // 1. Like रिकॉर्ड बनाएं (ट्रैकिंग के लिए)
+        const newLike = new Like({ product: productId, user: userId });
+        await newLike.save();
+
+        // 2. 🚨 क्रिटिकल फिक्स: Product ID को यूजर के Wishlist डॉक्यूमेंट में जोड़ें
+        //    $addToSet डुप्लिकेट्स को रोकता है, और upsert: true यह सुनिश्चित करता है कि 
+        //    यदि Wishlist डॉक्यूमेंट मौजूद नहीं है तो यह बन जाए।
+        await Wishlist.findOneAndUpdate(
+            { user: userId },
+            { $addToSet: { products: productId } },
+            { upsert: true, new: true } 
+        );
+
+        res.status(201).json({ message: 'Product liked successfully and added to wishlist' });
+    } catch (err) {
+        console.error('Like product error:', err.message);
+        res.status(500).json({ message: 'Error liking product' });
     }
-
-    const existingLike = await Like.findOne({ product: productId, user: userId });
-    if (existingLike) {
-      return res.status(409).json({ message: 'Product already liked by this user' });
-    }
-
-    const newLike = new Like({ product: productId, user: userId });
-    await newLike.save();
-
-    res.status(201).json({ message: 'Product liked successfully' });
-  } catch (err) {
-    console.error('Like product error:', err.message);
-    res.status(500).json({ message: 'Error liking product' });
-  }
 });
 
 app.delete('/api/products/:id/like', protect, async (req, res) => {
