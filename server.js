@@ -1779,11 +1779,26 @@ app.delete('/api/cart/:itemId', protect, async (req, res) => {
 
 app.get('/api/wishlist', protect, async (req, res) => {
   try {
-    const wishlist = await Wishlist.findOne({ user: req.user._id }).populate('products');
-    if (!wishlist) return res.status(404).json({ message: 'Wishlist not found' });
+    // CRITICAL FIX: Explicitly specify all required fields for population.
+    const wishlist = await Wishlist.findOne({ user: req.user._id })
+      .populate({
+        path: 'products',
+        // Ensure you select all fields needed for Product.fromJson in Flutter:
+        // name, price, originalPrice, unit, images, variants, stock, seller
+        select: 'name price originalPrice unit images variants stock seller'
+      });
+      
+    if (!wishlist) {
+      // Return an object with an empty products array if no document is found
+      return res.json({ products: [] }); 
+    }
+
+    // Return the wishlist object (which contains the populated 'products' array).
     res.json(wishlist);
+    
   } catch (err) {
-    res.status(500).json({ message: 'Error fetching wishlist' });
+    console.error('Error fetching wishlist:', err.message);
+    res.status(500).json({ message: 'Error fetching wishlist', error: err.message });
   }
 });
 
