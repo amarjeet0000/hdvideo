@@ -294,7 +294,6 @@ const productSchema = new mongoose.Schema({
   shortDescription: String,
   fullDescription: String,
   
-  // Main images for the product (can be used as default)
   images: [{
     url: String,
     publicId: String
@@ -306,8 +305,7 @@ const productSchema = new mongoose.Schema({
   },
   specifications: { type: Map, of: String, default: {} },
   
-  // ✅ UPDATED VARIANTS SECTION
-  // This is now an array, where each object is a unique variant with its own details.
+  // ✅ UPDATED VARIANTS SECTION: Array of unique variant subdocuments
   variants: [{
       color: { type: String },
       size: { type: String },
@@ -348,9 +346,17 @@ const productSchema = new mongoose.Schema({
     index: true
   }], 
   
-  // ✨ NEW FIELD: Set to true if product is available globally, ignoring pincode filters.
-  isGlobal: { type: Boolean, default: false, index: true }, 
-  
+  // ✨ Availability flag
+  isGlobal: { type: Boolean, default: false, index: true }, 
+  
+  // ✨ Approval status (Pending, Approved, Rejected)
+  approvalStatus: {
+    type: String,
+    enum: ['Pending', 'Approved', 'Rejected'],
+    default: 'Pending', // New products start as Pending
+    index: true
+  },
+  
   seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
   isTrending: { type: Boolean, default: false, index: true }
 }, { timestamps: true });
@@ -1382,176 +1388,171 @@ app.delete('/api/admin/subcategories/:id', protect, authorizeRole('admin'), asyn
 
 
 app.get('/api/products', async (req, res) => {
-  try {
-    const { search, minPrice, maxPrice, categoryId, brand, subcategoryId, sellerId, userPincode } = req.query;
-    const { ObjectId } = mongoose.Types;
+    try {
+        const { search, minPrice, maxPrice, categoryId, brand, subcategoryId, sellerId, userPincode, sort } = req.query;
+        const { ObjectId } = mongoose.Types;
 
-    // --- 1. Build initial match conditions (Pre-Pincode/Seller Join) ---
-    const initialMatchStage = {};
-    // Only show products that have at least one variant defined
-    initialMatchStage['variants.0'] = { $exists: true };
-    
-    // 🔍 Search filter
-    if (search) {
-      initialMatchStage.$or = [
-        { name: { $regex: search, $options: "i" } },
-        { shortDescription: { $regex: search, $options: "i" } },
-        { fullDescription: { $regex: search, $options: "i" } }
-      ];
-    }
-    
-    // 🏷️ Category filter
-    if (categoryId && mongoose.isValidObjectId(categoryId)) {
-      initialMatchStage.category = new ObjectId(categoryId);
-    }
-
-    // 🧩 Subcategory filter
-    if (subcategoryId && mongoose.isValidObjectId(subcategoryId)) {
-      // NOTE: This will match on both 'subcategory' and 'childCategory' fields
-      initialMatchStage.$or = [
-          { subcategory: new ObjectId(subcategoryId) },
-          { childCategory: new ObjectId(subcategoryId) } 
-      ];
-    }
-
-    // 🏭 Brand filter
-    if (brand) initialMatchStage.brand = { $regex: brand, $options: "i" };
-
-    // 👨‍💼 Seller filter
-    if (sellerId && mongoose.isValidObjectId(sellerId)) {
-      initialMatchStage.seller = new ObjectId(sellerId);
-    }
-    
-    // Apply initial matching first
-    const pipeline = [{ $match: initialMatchStage }];
-    
-    // --- 2. Build aggregation pipeline (Pincode/Seller Joining) ---
-
-    const finalMatchStage = {}; // Will hold additional filters like minPrice/maxPrice
-    
-    // 🏠 If userPincode is given — join seller table first
-    if (userPincode) {
-      pipeline.push(
-        {
-          $lookup: {
-            from: "users",
-            localField: "seller",
-            foreignField: "_id",
-            as: "sellerDetails"
-          }
-        },
-        // Only keep products where the seller is found
-        { $unwind: "$sellerDetails" }, 
-        {
-          $match: {
-            // ✅ Match by user’s pincode in the seller's allowed list
-            "sellerDetails.pincodes": userPincode 
-          }
-        },
-        { $addFields: { seller: "$sellerDetails" } },
-        { $unset: "sellerDetails" }
-      );
-    } else {
-      // 🔹 If no pincode, just join seller details without a pincode filter
-      pipeline.push(
-        {
-          $lookup: {
-            from: "users",
-            localField: "seller",
-            foreignField: "_id",
-            as: "seller"
-          }
-        },
-        { $unwind: { path: "$seller", preserveNullAndEmptyArrays: true } }
-      );
-    }
-
-    // --- 3. Randomize order for homepage (If no specific filter like category is applied) ---
-    // If we are looking for a sample (like for trending/bestsellers on the homepage)
-    if (req.query.sample === 'true') {
-        const limit = parseInt(req.query.limit) || 20;
-        pipeline.push({ $sample: { size: limit } });
-    }
-
-
-    // --- 3.5. FIX: Derive price, originalPrice, and stock from variants ---
-    pipeline.push({
-        $addFields: {
-            // ✅ Lowest Price: Minimum value of all variants.price
-            price: { $min: "$variants.price" },
-            
-            // 🔹 Highest Original Price: Maximum value of all variants.originalPrice
-            originalPrice: { $max: "$variants.originalPrice" }, 
-            
-            // टोटल स्टॉक की गणना
-            stock: { $sum: "$variants.stock" }, 
-            
-            // Variants array को भी भेजें ताकि Flutter में ProductDetail काम कर सके
-            variants: "$variants" 
+        // --- 1. Build initial match conditions (Pre-Pincode/Seller Join) ---
+        const initialMatchStage = {};
+        
+        // 🚨 CRITICAL FIX: Only show Approved products to the public
+        initialMatchStage.approvalStatus = 'Approved';
+        
+        // Only show products that have at least one variant defined
+        initialMatchStage['variants.0'] = { $exists: true };
+        
+        // 🔍 Search filter
+        if (search) {
+            const searchRegex = { $regex: search, $options: "i" };
+            initialMatchStage.$or = [
+                { name: searchRegex },
+                { shortDescription: searchRegex },
+                { fullDescription: searchRegex },
+                { brand: searchRegex } // Including brand in general search
+            ];
         }
-    });
-    
-    // --- 3.6. Price range filter (Applied AFTER deriving price from variants) ---
-    if (minPrice || maxPrice) {
-      finalMatchStage.price = {};
-      if (minPrice) finalMatchStage.price.$gte = Number(minPrice);
-      if (maxPrice) finalMatchStage.price.$lte = Number(maxPrice);
-    }
-    
-    // Apply the price filter
-    if(Object.keys(finalMatchStage).length > 0) {
-        pipeline.push({ $match: finalMatchStage });
-    }
-    
-    // --- 4. Enrich category & subcategory info ---
-    pipeline.push(
-      {
-        $lookup: {
-          from: "categories",
-          localField: "category",
-          foreignField: "_id",
-          as: "category"
-        }
-      },
-      { $unwind: { path: "$category", preserveNullAndEmptyArrays: true } },
-      {
-        $lookup: {
-          from: "subcategories",
-          localField: "subcategory",
-          foreignField: "_id",
-          as: "subcategory"
-        }
-      },
-      { $unwind: { path: "$subcategory", preserveNullAndEmptyArrays: true } },
-      {
-        $project: {
-          name: 1,
-          price: 1,         // Lowest Price
-          originalPrice: 1, // Highest MRP
-          images: 1,
-          stock: 1,         // Total Stock
-          unit: 1,
-          brand: 1,
-          variants: 1,      // Important for Flutter models
-          shortDescription: 1,
-          isTrending: 1,    // Important for filtering
-          "seller._id": 1,
-          "seller.name": 1,
-          "seller.email": 1,
-          "category.name": 1,
-          "subcategory.name": 1,
-          createdAt: 1
-        }
-      }
-    );
 
-    // --- 5. Execute query ---
-    const products = await Product.aggregate(pipeline);
-    res.json(products);
-  } catch (err) {
-    console.error("❌ Get Products Error:", err);
-    res.status(500).json({ message: "Error fetching products" });
-  }
+        // 🏷️ Category/Brand/Seller filters (Rest remain the same)
+        if (categoryId && mongoose.isValidObjectId(categoryId)) {
+            initialMatchStage.category = new ObjectId(categoryId);
+        }
+        if (subcategoryId && mongoose.isValidObjectId(subcategoryId)) {
+            initialMatchStage.$or = [
+                 { subcategory: new ObjectId(subcategoryId) },
+                 { childCategory: new ObjectId(subcategoryId) } 
+            ];
+        }
+        if (brand) initialMatchStage.brand = { $regex: brand, $options: "i" };
+        if (sellerId && mongoose.isValidObjectId(sellerId)) {
+            initialMatchStage.seller = new ObjectId(sellerId);
+        }
+        
+        // Apply initial matching first
+        const pipeline = [{ $match: initialMatchStage }];
+        
+        // --- 2. Build aggregation pipeline (Pincode Filtering and Seller Joining) ---
+
+        // Always join seller details and filter by pincode if provided
+        pipeline.push(
+            {
+                $lookup: {
+                    from: "users",
+                    localField: "seller",
+                    foreignField: "_id",
+                    as: "sellerDetails"
+                }
+            },
+            // Unwind sellerDetails and filter by approval status and active/approved status
+            { $unwind: "$sellerDetails" }, 
+            { $match: { "sellerDetails.approved": true } }
+        );
+
+        // 🏠 Pincode/Global Availability Check (UPDATED LOGIC)
+        if (userPincode) {
+            pipeline.push({
+                $match: {
+                    $or: [
+                        { isGlobal: true }, // Global availability
+                        { pincodes: userPincode } // Pincode matching
+                    ]
+                }
+            });
+        }
+        
+        // Set the seller field back to the populated details
+        pipeline.push({ $addFields: { seller: "$sellerDetails" } });
+        pipeline.push({ $unset: "sellerDetails" });
+
+
+        // --- 3. FIX: Randomize order or apply specific sorting ---
+        if (sort === 'random' || req.query.random === 'true') {
+             // For random sorting (used on homepage)
+             const limit = parseInt(req.query.limit) || 100; // Use a reasonable default limit
+             pipeline.push({ $sample: { size: limit } });
+        } else if (req.query.sample === 'true') {
+            // If sample is requested without 'random' sort, use $sample (e.g., for trending)
+            const limit = parseInt(req.query.limit) || 20; 
+            pipeline.push({ $sample: { size: limit } });
+        } else {
+            // Default sort: Newest first
+            pipeline.push({ $sort: { createdAt: -1 } });
+        }
+
+
+        // --- 3.5. Derive price, originalPrice, and stock from variants ---
+        // (This stage remains correctly placed BEFORE final filtering/projection)
+        pipeline.push({
+            $addFields: {
+                price: { $min: "$variants.price" },
+                originalPrice: { $max: "$variants.originalPrice" }, 
+                stock: { $sum: "$variants.stock" }, 
+                variants: "$variants" 
+            }
+        });
+        
+        // --- 3.6. Price range filter (Applied AFTER deriving price from variants) ---
+        const finalMatchStage = {};
+        if (minPrice || maxPrice) {
+            finalMatchStage.price = {};
+            if (minPrice) finalMatchStage.price.$gte = Number(minPrice);
+            if (maxPrice) finalMatchStage.price.$lte = Number(maxPrice);
+        }
+        
+        // Apply the price filter
+        if(Object.keys(finalMatchStage).length > 0) {
+            pipeline.push({ $match: finalMatchStage });
+        }
+        
+        // --- 4. Enrich category & subcategory info ---
+        // (Rest of the lookup and projection remains the same)
+        pipeline.push(
+            {
+                $lookup: {
+                    from: "categories",
+                    localField: "category",
+                    foreignField: "_id",
+                    as: "category"
+                }
+            },
+            { $unwind: { path: "$category", preserveNullAndEmptyArrays: true } },
+            {
+                $lookup: {
+                    from: "subcategories",
+                    localField: "subcategory",
+                    foreignField: "_id",
+                    as: "subcategory"
+                }
+            },
+            { $unwind: { path: "$subcategory", preserveNullAndEmptyArrays: true } },
+            {
+                $project: {
+                    name: 1,
+                    price: 1, 
+                    originalPrice: 1, 
+                    images: 1,
+                    stock: 1, 
+                    unit: 1,
+                    brand: 1,
+                    variants: 1, 
+                    shortDescription: 1,
+                    isTrending: 1, 
+                    "seller._id": 1,
+                    "seller.name": 1,
+                    "seller.email": 1,
+                    "category.name": 1,
+                    "subcategory.name": 1,
+                    createdAt: 1
+                }
+            }
+        );
+
+        // --- 5. Execute query ---
+        const products = await Product.aggregate(pipeline);
+        res.json(products);
+    } catch (err) {
+        console.error("❌ Get Products Error:", err);
+        res.status(500).json({ message: "Error fetching products" });
+    }
 });
 
 
@@ -3042,166 +3043,173 @@ app.get('/api/seller/financials', protect, authorizeRole('seller'), async (req, 
 // ... (Assumed imports)
 
 app.post('/api/seller/products',
-  protect,
-  authorizeRole('seller', 'admin'),
-  checkSellerApproved,
-  productUpload, // Handles multiple uploads: images[], video, variantImages[]
-  async (req, res) => {
-    try {
-      const {
-        productTitle, brand, category, subcategory, childCategory,
-        shortDescription, fullDescription, unit,
-        // Main product details that are now part of each variant
-        // mrp, sellingPrice, stockQuantity,
-        variants, // ✅ EXPECT a JSON string array of variants
-        videoLink, specifications, shippingWeight, shippingLength,
-        shippingWidth, shippingHeight, shippingType, warranty,
-        returnPolicy, tags, serviceDurationMinutes,
+  protect,
+  authorizeRole('seller', 'admin'),
+  checkSellerApproved,
+  productUpload, // Handles multiple uploads: images[], video, variantImages[]
+  async (req, res) => {
+    try {
+      const {
+        productTitle, brand, category, subcategory, childCategory,
+        shortDescription, fullDescription, unit,
+        variants, // ✅ EXPECT a JSON string array of variants
+        videoLink, specifications, shippingWeight, shippingLength,
+        shippingWidth, shippingHeight, shippingType, warranty,
+        returnPolicy, tags, serviceDurationMinutes,
+        pincodeList, 
+        isGlobal, 
+        
+      } = req.body;
+
+      // --- 1. Basic Validation ---
+      if (!productTitle || !category || !variants) {
+        return res.status(400).json({ message: 'Product title, category, and variants are required.' });
+      }
+
+      // --- 2. Category and Type Validation ---
+      const parentCategory = await Category.findById(category);
+      if (!parentCategory) {
+        return res.status(404).json({ message: 'Selected category not found.' });
+      }
+      if (parentCategory.type === 'service' && (!serviceDurationMinutes || parseInt(serviceDurationMinutes) <= 0)) {
+        return res.status(400).json({ message: 'Services must have a valid "Service Duration (in minutes)".' });
+      } else if (parentCategory.type === 'product' && !unit) {
+        return res.status(400).json({ message: 'Products must have a "Unit" (e.g., kg, pcs).' });
+      }
+      if (!req.files.images || req.files.images.length === 0) {
+        return res.status(400).json({ message: 'At least one main product image is required.' });
+      }
+
+      // --- 3. Process Uploaded Files ---
+      const mainImages = req.files.images.map(file => ({
+        url: file.path,
+        publicId: file.filename,
+      }));
+      const variantImages = (req.files.variantImages || []).map(file => ({
+        url: file.path,
+        publicId: file.filename,
+      }));
+      let uploadedVideo = null;
+      if (req.files.video && req.files.video.length > 0) {
+        const videoFile = req.files.video[0];
+        uploadedVideo = { url: videoFile.path, publicId: videoFile.filename };
+      }
+
+      // --- 4. Parse and Create Product Variants ---
+      const parsedVariants = JSON.parse(variants);
+      if (!Array.isArray(parsedVariants) || parsedVariants.length === 0) {
+        return res.status(400).json({ message: 'At least one product variant is required.' });
+      }
+
+      const productVariants = parsedVariants.map((variant, index) => {
+        if (!variant.price || !variant.stock) {
+          throw new Error(`Variant #${index + 1} must have a price and stock.`);
+        }
+        if (variant.originalPrice && parseFloat(variant.originalPrice) < parseFloat(variant.price)) {
+          throw new Error(`MRP cannot be less than selling price for variant #${index + 1}.`);
+        }
+        return {
+          color: variant.color || null,
+          size: variant.size || null,
+          storage: variant.storage || null,
+          price: parseFloat(variant.price),
+          originalPrice: variant.originalPrice ? parseFloat(variant.originalPrice) : null,
+          costPrice: variant.costPrice ? parseFloat(variant.costPrice) : null, // Assuming costPrice can be passed per variant
+          stock: parseInt(variant.stock),
+          // ✅ Assign an uploaded image to this variant
+          images: variantImages[index] ? [variantImages[index]] : []
+        };
+      });
+
+      // --- 5. Determine Top-Level Price and Stock from Variants ---
+      const firstVariant = productVariants[0];
+      const totalStock = productVariants.reduce((sum, v) => sum + v.stock, 0);
+
+      // --- 6. Process Pincodes and Global Flag (NEW LOGIC) ---
+      let finalPincodes = req.user.pincodes || [];
+      if (pincodeList) {
+          try {
+              // Parse the JSON string from the request body
+              const parsedPincodes = JSON.parse(pincodeList);
+              if (Array.isArray(parsedPincodes)) {
+                  // If a valid array is provided, use it
+                  finalPincodes = parsedPincodes.filter(p => typeof p === 'string' && p.length > 0);
+              }
+          } catch (e) {
+              console.warn('PincodeList parsing failed, using seller default pincodes.', e);
+              // Fallback to seller's default pincodes if parsing fails
+              finalPincodes = req.user.pincodes || []; 
+          }
+      }
+      
+      const isProductGlobal = isGlobal === 'true'; // Convert string 'true'/'false' to boolean
+
+      // --- 7. Prepare Final Product Data ---
+      const finalSubcategory = childCategory || subcategory;
+      const productData = {
+        name: productTitle,
+        sku: generateUniqueSku(category, productTitle),
+        brand,
+        category,
+        subcategory: finalSubcategory,
+        // Set main price/stock from the first variant
+        price: firstVariant.price,
+        originalPrice: firstVariant.originalPrice,
+        stock: totalStock,
+        unit: parentCategory.type === 'product' ? unit : undefined,
+        shortDescription,
+        fullDescription,
+        images: mainImages, // Main gallery images
+        uploadedVideo,
+        videoLink,
+        variants: productVariants, // ✅ Save the detailed variants array
+        seller: req.user._id,
         
-        // ✨ [NEW]: Pincode and Global availability fields
-        pincodeList, // Expected: JSON string of a string array, e.g., '["800001", "800002"]'
-        isGlobal,    // Expected: string 'true' or 'false'
-        
-      } = req.body;
+        // 🚨 IMPORTANT FIX: Set approval status based on the user's role
+        approvalStatus: req.user.role === 'admin' ? 'Approved' : 'Pending', 
+        
+        // ✨ [NEW]: Save pincode list and isGlobal flag
+        pincodes: finalPincodes, 
+        isGlobal: isProductGlobal, 
+        
+        serviceDurationMinutes: parentCategory.type === 'service' ? parseInt(serviceDurationMinutes) : undefined,
+        specifications: specifications ? JSON.parse(specifications) : {},
+        shippingDetails: { 
+            weight: shippingWeight ? parseFloat(shippingWeight) : undefined,
+            dimensions: {
+                length: shippingLength ? parseFloat(shippingLength) : undefined,
+                width: shippingWidth ? parseFloat(shippingWidth) : undefined,
+                height: shippingHeight ? parseFloat(shippingHeight) : undefined,
+            },
+            shippingType: shippingType || 'Free',
+        },
+        otherInformation: {
+          tags: tags ? JSON.parse(tags) : [],
+          warranty: warranty || null,
+          returnPolicy: returnPolicy || 'Non-Returnable',
+        },
+      };
 
-      // --- 1. Basic Validation ---
-      if (!productTitle || !category || !variants) {
-        return res.status(400).json({ message: 'Product title, category, and variants are required.' });
-      }
-
-      // --- 2. Category and Type Validation ---
-      const parentCategory = await Category.findById(category);
-      if (!parentCategory) {
-        return res.status(404).json({ message: 'Selected category not found.' });
-      }
-      if (parentCategory.type === 'service' && (!serviceDurationMinutes || parseInt(serviceDurationMinutes) <= 0)) {
-        return res.status(400).json({ message: 'Services must have a valid "Service Duration (in minutes)".' });
-      } else if (parentCategory.type === 'product' && !unit) {
-        return res.status(400).json({ message: 'Products must have a "Unit" (e.g., kg, pcs).' });
-      }
-      if (!req.files.images || req.files.images.length === 0) {
-        return res.status(400).json({ message: 'At least one main product image is required.' });
-      }
-
-      // --- 3. Process Uploaded Files ---
-      const mainImages = req.files.images.map(file => ({
-        url: file.path,
-        publicId: file.filename,
-      }));
-      const variantImages = (req.files.variantImages || []).map(file => ({
-        url: file.path,
-        publicId: file.filename,
-      }));
-      let uploadedVideo = null;
-      if (req.files.video && req.files.video.length > 0) {
-        const videoFile = req.files.video[0];
-        uploadedVideo = { url: videoFile.path, publicId: videoFile.filename };
-      }
-
-      // --- 4. Parse and Create Product Variants ---
-      const parsedVariants = JSON.parse(variants);
-      if (!Array.isArray(parsedVariants) || parsedVariants.length === 0) {
-        return res.status(400).json({ message: 'At least one product variant is required.' });
-      }
-
-      const productVariants = parsedVariants.map((variant, index) => {
-        if (!variant.price || !variant.stock) {
-          throw new Error(`Variant #${index + 1} must have a price and stock.`);
-        }
-        if (variant.originalPrice && parseFloat(variant.originalPrice) < parseFloat(variant.price)) {
-          throw new Error(`MRP cannot be less than selling price for variant #${index + 1}.`);
-        }
-        return {
-          color: variant.color || null,
-          size: variant.size || null,
-          storage: variant.storage || null,
-          price: parseFloat(variant.price),
-          originalPrice: variant.originalPrice ? parseFloat(variant.originalPrice) : null,
-          costPrice: variant.costPrice ? parseFloat(variant.costPrice) : null, // Assuming costPrice can be passed per variant
-          stock: parseInt(variant.stock),
-          // ✅ Assign an uploaded image to this variant
-          images: variantImages[index] ? [variantImages[index]] : []
-        };
-      });
-
-      // --- 5. Determine Top-Level Price and Stock from Variants ---
-      const firstVariant = productVariants[0];
-      const totalStock = productVariants.reduce((sum, v) => sum + v.stock, 0);
-
-      // --- 6. Process Pincodes and Global Flag (NEW LOGIC) ---
-      let finalPincodes = req.user.pincodes || [];
-      if (pincodeList) {
-          try {
-              // Parse the JSON string from the request body
-              const parsedPincodes = JSON.parse(pincodeList);
-              if (Array.isArray(parsedPincodes)) {
-                  // If a valid array is provided, use it
-                  finalPincodes = parsedPincodes.filter(p => typeof p === 'string' && p.length > 0);
-              }
-          } catch (e) {
-              console.warn('PincodeList parsing failed, using seller default pincodes.', e);
-              // Fallback to seller's default pincodes if parsing fails
-              finalPincodes = req.user.pincodes || []; 
-          }
-      }
+      // --- 8. Create Product and Send Response ---
+      const product = await Product.create(productData);
       
-      const isProductGlobal = isGlobal === 'true'; // Convert string 'true'/'false' to boolean
-
-      // --- 7. Prepare Final Product Data ---
-      const finalSubcategory = childCategory || subcategory;
-      const productData = {
-        name: productTitle,
-        sku: generateUniqueSku(category, productTitle),
-        brand,
-        category,
-        subcategory: finalSubcategory,
-        // Set main price/stock from the first variant
-        price: firstVariant.price,
-        originalPrice: firstVariant.originalPrice,
-        stock: totalStock,
-        unit: parentCategory.type === 'product' ? unit : undefined,
-        shortDescription,
-        fullDescription,
-        images: mainImages, // Main gallery images
-        uploadedVideo,
-        videoLink,
-        variants: productVariants, // ✅ Save the detailed variants array
-        seller: req.user._id,
-        
-        // ✨ [NEW]: Save pincode list and isGlobal flag
-        pincodes: finalPincodes, 
-        isGlobal: isProductGlobal, 
-        
-        serviceDurationMinutes: parentCategory.type === 'service' ? parseInt(serviceDurationMinutes) : undefined,
-        specifications: specifications ? JSON.parse(specifications) : {},
-        shippingDetails: { 
-            weight: shippingWeight ? parseFloat(shippingWeight) : undefined,
-            dimensions: {
-                length: shippingLength ? parseFloat(shippingLength) : undefined,
-                width: shippingWidth ? parseFloat(shippingWidth) : undefined,
-                height: shippingHeight ? parseFloat(shippingHeight) : undefined,
-            },
-            shippingType: shippingType || 'Free',
-        },
-        otherInformation: {
-          tags: tags ? JSON.parse(tags) : [],
-          warranty: warranty || null,
-          returnPolicy: returnPolicy || 'Non-Returnable',
-        },
-      };
-
-      // --- 8. Create Product and Send Response ---
-      const product = await Product.create(productData);
-      res.status(201).json(product);
-
-    } catch (err) {
-      console.error('Create product error:', err);
-      if (err.name === 'ValidationError' || err.message.includes('must have a price and stock') || err.message.includes('MRP cannot be less than selling price')) {
-        return res.status(400).json({ message: 'Validation failed', error: err.message });
+      // 9. Notify Admin if product is pending approval
+      if (product.approvalStatus === 'Pending') {
+          // Assuming notifyAdmin function exists
+          // NOTE: You must define 'notifyAdmin' outside this function.
+          // await notifyAdmin(`📋 New Product Pending Approval!\nSeller: ${req.user.name}\nProduct: ${product.name}`);
       }
-      res.status(500).json({ message: 'Error creating product', error: err.message });
-    }
-  }
+
+      res.status(201).json(product);
+
+    } catch (err) {
+      console.error('Create product error:', err);
+      if (err.name === 'ValidationError' || err.message.includes('must have a price and stock') || err.message.includes('MRP cannot be less than selling price')) {
+        return res.status(400).json({ message: 'Validation failed', error: err.message });
+      }
+      res.status(500).json({ message: 'Error creating product', error: err.message });
+    }
+  }
 );
 
 app.post('/api/seller/products/bulk', protect, authorizeRole('seller', 'admin'), checkSellerApproved, upload.array('images', 100), async (req, res) => {
@@ -3983,6 +3991,46 @@ app.put('/api/admin/products/:id', protect, authorizeRole('admin'), productUploa
     console.error('Admin update product error:', err.message);
     res.status(500).json({ message: 'Error updating product', error: err.message });
   }
+});
+
+// --------- Admin Product Approval Route (NEW) ----------
+app.put('/api/admin/products/:id/approval', protect, authorizeRole('admin'), async (req, res) => {
+    try {
+        const { status } = req.body; // Expected: 'Approved' or 'Rejected'
+        const productId = req.params.id;
+
+        if (!['Approved', 'Rejected'].includes(status)) {
+            return res.status(400).json({ message: 'Invalid approval status. Must be Approved or Rejected.' });
+        }
+
+        const product = await Product.findById(productId).populate('seller', 'name fcmToken phone');
+        if (!product) {
+            return res.status(404).json({ message: 'Product not found.' });
+        }
+        
+        product.approvalStatus = status;
+        await product.save();
+
+        // Notify the seller
+        const message = status === 'Approved'
+            ? `🎉 Good News! Your product "${product.name}" has been approved and is now live.`
+            : `❌ Action Required: Your product "${product.name}" was rejected. Please edit and resubmit.`;
+            
+        await sendWhatsApp(product.seller.phone, message);
+        if (product.seller.fcmToken) {
+            await sendPushNotification(
+                product.seller.fcmToken,
+                status === 'Approved' ? 'Product Approved! 🎉' : 'Product Rejected',
+                message,
+                { productId: productId, type: 'PRODUCT_APPROVAL', status: status }
+            );
+        }
+
+        res.json({ message: `Product approval status set to ${status}.`, product });
+    } catch (err) {
+        console.error('Admin approval error:', err.message);
+        res.status(500).json({ message: 'Error updating product approval status', error: err.message });
+    }
 });
 
 
@@ -5590,4 +5638,3 @@ const PORT = process.env.PORT || 5001;
 app.listen(PORT, IP, () => {
   console.log(`🚀 Server running on http://${IP}:${PORT}`);
 });
-
