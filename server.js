@@ -3555,15 +3555,15 @@ app.get('/api/delivery/available-orders', protect, authorizeRole('delivery'), as
 
     const availableJobs = await DeliveryAssignment.find({
       deliveryBoy: null,
-      status: 'Pending',
+      status: { $in: ['Pending', 'ReturnPending'] }, // 👈 FIX: Added 'ReturnPending'
       pincode: { $in: myPincodes }
     })
     .populate({
       path: 'order',
-      select: 'orderItems shippingAddress totalAmount paymentMethod seller user shippingFee discountAmount taxAmount',
+      select: 'orderItems shippingAddress totalAmount paymentMethod seller user shippingFee discountAmount taxAmount createdAt', // Added createdAt for sorting
       populate: [
         { path: 'seller', select: 'name pickupAddress' },
-        { path: 'user', select: 'name' }
+        { path: 'user', select: 'name phone' }
       ]
     })
     .sort({ createdAt: 1 });
@@ -3579,11 +3579,11 @@ app.get('/api/delivery/my-orders', protect, authorizeRole('delivery'), async (re
   try {
     const myJobs = await DeliveryAssignment.find({
       deliveryBoy: req.user._id,
-      status: { $in: ['Accepted', 'PickedUp'] }
+      status: { $in: ['Accepted', 'PickedUp', 'ReturnAccepted', 'ReturnPickedUp'] } // 👈 FIX: Added Return statuses
     })
     .populate({
       path: 'order',
-      select: 'orderItems shippingAddress totalAmount paymentMethod seller user shippingFee discountAmount taxAmount',
+      select: 'orderItems shippingAddress totalAmount paymentMethod seller user shippingFee discountAmount taxAmount createdAt', // Added createdAt
       populate: [
         { path: 'seller', select: 'name pickupAddress' },
         { path: 'user', select: 'name phone' }
@@ -3598,66 +3598,93 @@ app.get('/api/delivery/my-orders', protect, authorizeRole('delivery'), async (re
 });
 
 app.put('/api/delivery/assignments/:id/accept', protect, authorizeRole('delivery'), async (req, res) => {
-  try {
-    const assignmentId = req.params.id;
+  try {
+    const assignmentId = req.params.id;
 
-    const assignment = await DeliveryAssignment.findOneAndUpdate(
-      {
+    // --- 1. Determine the assignment type and the next status ---
+    const updateQuery = {
         _id: assignmentId,
-        status: 'Pending',
-        deliveryBoy: null
-      },
-      {
-        $set: {
-          deliveryBoy: req.user._id,
-          status: 'Accepted'
-        },
-        $push: { history: { status: 'Accepted' } }
-      },
-      { new: true }
-    ).populate({
-        path: 'order',
-        select: 'seller user',
-        populate: [
-          { path: 'seller', select: 'name phone fcmToken' },
-          { path: 'user', select: 'name phone fcmToken' }
-        ]
-    });
-
-    if (!assignment) {
-      return res.status(409).json({ message: 'This order has just been accepted by someone else.' });
-    }
-
-    const orderIdShort = assignment.order._id.toString().slice(-6);
-
-    const seller = assignment.order.seller;
-    if (seller) {
-      await sendWhatsApp(seller.phone, `Order Update: Delivery boy ${req.user.name} is on the way to pick up order #${orderIdShort}.`);
-      await sendPushNotification(
-        seller.fcmToken,
-        'Delivery Boy Assigned',
-        `${req.user.name} is picking up order #${orderIdShort}.`,
-        { orderId: assignment.order._id.toString(), type: 'DELIVERY_ASSIGNED' }
-      );
+        deliveryBoy: null,
+        // FIX: Allow acceptance of both Delivery ('Pending') and Return Pickup ('ReturnPending')
+        status: { $in: ['Pending', 'ReturnPending'] } 
+    };
+    
+    // Find the assignment first to check its current status
+    const assignmentToUpdate = await DeliveryAssignment.findOne(updateQuery);
+    if (!assignmentToUpdate) {
+        return res.status(409).json({ message: 'This assignment has already been accepted by someone else or is not pending.' });
     }
     
-    const customer = assignment.order.user;
-    if (customer) {
-        await sendWhatsApp(customer.phone, `Your order #${orderIdShort} is being prepared! Delivery partner ${req.user.name} will pick it up soon.`);
-        await sendPushNotification(
-          customer.fcmToken,
-          'Order Update!',
-          `Delivery partner ${req.user.name} has accepted your order #${orderIdShort}.`,
-          { orderId: assignment.order._id.toString(), type: 'ORDER_STATUS' }
-        );
-    }
+    // Determine the new status based on the current status
+    const isReturnFlow = assignmentToUpdate.status === 'ReturnPending';
+    const newStatus = isReturnFlow ? 'ReturnAccepted' : 'Accepted';
+    
+    // --- 2. Atomically update the assignment with the new status ---
+    const assignment = await DeliveryAssignment.findOneAndUpdate(
+      updateQuery, // Use the query that checks for null/Pending status
+      {
+        $set: {
+          deliveryBoy: req.user._id,
+          status: newStatus // 👈 FIXED: Setting dynamic status
+        },
+        $push: { history: { status: newStatus } }
+      },
+      { new: true }
+    ).populate({
+        path: 'order',
+        select: 'seller user',
+        populate: [
+          { path: 'seller', select: 'name phone fcmToken' },
+          { path: 'user', select: 'name phone fcmToken' }
+        ]
+    });
 
-    res.json({ message: 'Order accepted successfully!', assignment });
+    if (!assignment) {
+      return res.status(409).json({ message: 'This assignment has just been accepted by someone else or is not pending.' });
+    }
 
-  } catch (err) {
-    console.error('Error accepting order:', err.message);
-    res.status(500).json({ message: 'Error accepting order', error: err.message });
-  }
+    const orderIdShort = assignment.order._id.toString().slice(-6);
+    
+    // --- 3. Notification Logic (Dynamic Messages) ---
+
+    const messageType = isReturnFlow ? 'Return Pickup Accepted' : 'Order Accepted';
+    const sellerMessage = isReturnFlow 
+        ? `Return Update: Delivery boy ${req.user.name} accepted return pickup for #${orderIdShort}.`
+        : `Order Update: Delivery boy ${req.user.name} is on the way to pick up order #${orderIdShort}.`;
+        
+    const customerMessage = isReturnFlow
+        ? `Your return pickup for #${orderIdShort} has been accepted by ${req.user.name}.`
+        : `Your order #${orderIdShort} is being prepared! Delivery partner ${req.user.name} has accepted it.`;
+
+
+    const seller = assignment.order.seller;
+    if (seller) {
+      await sendWhatsApp(seller.phone, sellerMessage);
+      await sendPushNotification(
+        seller.fcmToken,
+        messageType,
+        sellerMessage,
+        { orderId: assignment.order._id.toString(), type: 'DELIVERY_ASSIGNED' }
+      );
+    }
+    
+    const customer = assignment.order.user;
+    if (customer) {
+        await sendWhatsApp(customer.phone, customerMessage);
+        await sendPushNotification(
+          customer.fcmToken,
+          messageType,
+          customerMessage,
+          { orderId: assignment.order._id.toString(), type: 'ORDER_STATUS' }
+        );
+    }
+
+    res.json({ message: `Assignment accepted successfully! Status: ${newStatus}`, assignment });
+
+  } catch (err) {
+    console.error('Error accepting assignment:', err.message);
+    res.status(500).json({ message: 'Error accepting assignment', error: err.message });
+  }
 });
 
 app.put('/api/delivery/assignments/:id/status', protect, authorizeRole('delivery'), async (req, res) => {
@@ -3665,8 +3692,10 @@ app.put('/api/delivery/assignments/:id/status', protect, authorizeRole('delivery
     const { status } = req.body;
     const assignmentId = req.params.id;
 
-    if (!['PickedUp', 'Delivered', 'Cancelled'].includes(status)) {
-        return res.status(400).json({ message: 'Invalid status. Must be PickedUp, Delivered, or Cancelled.' });
+    const validStatuses = ['PickedUp', 'Delivered', 'Cancelled', 'ReturnAccepted', 'ReturnPickedUp', 'ReturnDelivered', 'ReturnCancelled'];
+
+    if (!validStatuses.includes(status)) {
+        return res.status(400).json({ message: 'Invalid status provided.' });
     }
 
     const assignment = await DeliveryAssignment.findOne({
@@ -3679,38 +3708,54 @@ app.put('/api/delivery/assignments/:id/status', protect, authorizeRole('delivery
     }
 
     let newOrderStatus = '';
-    let newAssignmentStatus = '';
+    let newAssignmentStatus = status;
     let notificationTitle = '';
     let notificationBody = '';
+    let isReturnFlow = assignment.status.toLowerCase().includes('return');
+    let allowTransition = false;
+
+
+    // --- 1. Check Valid Transitions ---
 
     if (status === 'PickedUp' && assignment.status === 'Accepted') {
-      newAssignmentStatus = 'PickedUp';
       newOrderStatus = 'Shipped';
       notificationTitle = 'Order Picked Up!';
       notificationBody = `Your order (#${assignment.order.toString().slice(-6)}) is on its way!`;
-
+      allowTransition = true;
     } else if (status === 'Delivered' && assignment.status === 'PickedUp') {
-      newAssignmentStatus = 'Delivered';
       newOrderStatus = 'Delivered';
       notificationTitle = 'Order Delivered! 🎉';
       notificationBody = `Your order (#${assignment.order.toString().slice(-6)}) has been successfully delivered. Thank you!`;
-
-    } else if (status === 'Cancelled') {
-        newAssignmentStatus = 'Cancelled';
+      allowTransition = true;
+    } else if (status === 'ReturnPickedUp' && assignment.status === 'ReturnAccepted') {
+      newOrderStatus = 'Return In Transit';
+      notificationTitle = 'Return Picked Up!';
+      notificationBody = `Your return package (#${assignment.order.toString().slice(-6)}) has been picked up.`;
+      allowTransition = true;
+    } else if (status === 'ReturnDelivered' && assignment.status === 'ReturnPickedUp') {
+      newOrderStatus = 'Return Completed';
+      notificationTitle = 'Return Completed';
+      notificationBody = `Your return package (#${assignment.order.toString().slice(-6)}) has been delivered back to the seller.`;
+      allowTransition = true;
+    } else if (status.includes('Cancelled')) {
+        newAssignmentStatus = status;
         newOrderStatus = 'Cancelled';
         notificationTitle = 'Order Cancelled';
-        notificationBody = `We're sorry, but your order (#${assignment.order.toString().slice(-6)}) has been cancelled.`;
-
-    } else {
-      return res.status(400).json({ message: `Invalid status transition from ${assignment.status} to ${status}.` });
+        notificationBody = `The assignment for order (#${assignment.order.toString().slice(-6)}) has been cancelled.`;
+        allowTransition = true;
+    }
+    
+    if (!allowTransition) {
+        return res.status(400).json({ message: `Invalid status transition from ${assignment.status} to ${status}.` });
     }
 
+    // --- 2. Apply Status Changes ---
     
     assignment.status = newAssignmentStatus;
     assignment.history.push({ status: newAssignmentStatus });
     await assignment.save();
 
-    const order = await Order.findById(assignment.order);
+    const order = await Order.findById(assignment.order).populate('user', 'phone fcmToken');
     if (!order) {
         return res.status(404).json({ message: 'Associated order not found.' });
     }
@@ -3718,27 +3763,49 @@ app.put('/api/delivery/assignments/:id/status', protect, authorizeRole('delivery
     order.deliveryStatus = newOrderStatus;
     order.history.push({ status: newOrderStatus, note: `Updated by Delivery Boy ${req.user.name}` });
 
+    // Handle payment completion for COD on successful delivery
     if (newOrderStatus === 'Delivered' && (order.paymentMethod === 'cod' || order.paymentMethod === 'razorpay_cod') && order.paymentStatus === 'pending') {
       order.paymentStatus = 'completed';
     }
-
+    
+    // Handle stock restore on return completion
+    if (newOrderStatus === 'Return Completed') {
+        // Find the original item in the return list (refunds array)
+        const returnRefundEntry = order.refunds.find(r => r.status === 'requested');
+        
+        if (returnRefundEntry) {
+            // Restore stock for all items
+            for(const item of order.orderItems) {
+                await Product.findByIdAndUpdate(item.product, { $inc: { stock: item.qty } });
+            }
+            
+            // Mark the refund request as completed/resolved
+            returnRefundEntry.status = 'approved';
+            returnRefundEntry.updatedAt = new Date();
+            
+            // Notify admin to process the customer refund
+            await notifyAdmin(`📦 Return Completed (Order #${order._id.toString().slice(-6)}). Admin needs to process refund for customer.`);
+        }
+    }
+    
+    // Handle cancellations (restore stock, notify admin if prepaid)
     if (newOrderStatus === 'Cancelled') {
-        if (order.paymentStatus !== 'failed' && order.deliveryStatus !== 'Payment Pending') {
+        // Stock only needs restoration if cancelled after pickup, and only for delivery flow.
+        // We will assume Flutter handles the stock for the normal flow based on when cancellation happens.
+        // If status was 'PickedUp' before this cancel, restore stock.
+        
+        if (!isReturnFlow && order.paymentStatus !== 'failed' && order.deliveryStatus !== 'Payment Pending') {
              for(const item of order.orderItems) {
                 await Product.findByIdAndUpdate(item.product, { $inc: { stock: item.qty } });
             }
-        }
-        
-        if (order.paymentMethod === 'razorpay' && order.paymentStatus === 'completed') {
-            await notifyAdmin(`Admin Alert: Order #${order._id} was CANCELLED by delivery boy after pickup. Please check for a manual refund.`);
         }
     }
 
     await order.save();
 
-    const customer = await User.findById(order.user).select('phone fcmToken');
+    // --- 3. Notifications ---
+    const customer = order.user;
     if (customer) {
-        const orderIdShort = order._id.toString().slice(-6);
         await sendWhatsApp(customer.phone, `${notificationTitle}\n${notificationBody}`);
         await sendPushNotification(
             customer.fcmToken,
@@ -3748,7 +3815,7 @@ app.put('/api/delivery/assignments/:id/status', protect, authorizeRole('delivery
         );
     }
     
-    res.json({ message: `Order status updated to ${newAssignmentStatus}`, assignment });
+    res.json({ message: `Assignment status updated to ${newAssignmentStatus}`, assignment });
 
   } catch (err) {
     console.error('Error updating order status:', err.message);
@@ -3907,6 +3974,57 @@ app.get('/api/delivery/order-payment-status/:id', protect, authorizeRole('delive
     console.error('Error checking payment status:', err.message);
     res.status(500).json({ message: 'Error checking payment status', error: err.message });
   }
+});
+
+// [NEW ADMIN ROUTE] - Admin approves customer return request and creates delivery assignment
+app.post('/api/admin/orders/:id/approve-return', protect, authorizeRole('admin'), async (req, res) => {
+    try {
+        const orderId = req.params.id;
+        const order = await Order.findById(orderId).populate('user', 'phone fcmToken');
+        
+        if (!order || order.deliveryStatus !== 'Return Requested') {
+            return res.status(400).json({ message: 'Order is not in Return Requested status.' });
+        }
+
+        // 1. Update Order Status
+        order.deliveryStatus = 'Return Accepted by Admin';
+        order.history.push({ status: 'Return Accepted by Admin' });
+        await order.save();
+
+        // 2. Create Delivery Assignment for Return Pickup
+        const assignment = await DeliveryAssignment.create({
+            order: order._id,
+            deliveryBoy: null, // Assign to pincode pool
+            status: 'ReturnPending', // CRITICAL: Status for Flutter Available Returns tab
+            pincode: order.pincode, // Customer's address pincode
+            history: [{ status: 'ReturnPending' }]
+        });
+
+        // 3. Notify Delivery Boys 
+        const nearbyDeliveryBoys = await User.find({
+          role: 'delivery', approved: true, pincodes: order.pincode
+        }).select('fcmToken');
+        const deliveryTokens = nearbyDeliveryBoys.map(db => db.fcmToken).filter(Boolean);
+
+        if (deliveryTokens.length > 0) {
+          await sendPushNotification(
+              deliveryTokens,
+              'New Return Pickup Available! 📦',
+              `A new return pickup (#${orderId.slice(-6)}) is available in Pincode: ${order.pincode}.`,
+              { orderId: order._id.toString(), type: 'NEW_RETURN_AVAILABLE' }
+          );
+        }
+        
+        // 4. Notify Customer
+        await sendWhatsApp(order.user.phone, `✅ Your return request for order #${orderId.slice(-6)} has been approved. A delivery partner will be assigned for pickup shortly.`);
+
+
+        res.json({ message: 'Return approved and assigned for pickup.', assignment });
+
+    } catch (err) {
+        console.error('Error approving return and creating assignment:', err.message);
+        res.status(500).json({ message: 'Error processing return approval.' });
+    }
 });
 
 app.get('/api/admin/products', protect, authorizeRole('admin'), async (req, res) => {
