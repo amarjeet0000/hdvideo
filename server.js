@@ -5686,6 +5686,7 @@ async function calculateSellerFinancials(sellerId) {
 
 // POST /api/seller/bank-details (Modified for Manual Payouts)
 // [CORRECTED ADMIN ROUTE] - Admin approves customer return request and creates/updates delivery assignment
+// [CORRECTED ADMIN ROUTE] - Admin approves customer return request and updates existing assignment
 app.post('/api/admin/orders/:id/approve-return', protect, authorizeRole('admin'), async (req, res) => {
     try {
         const orderId = req.params.id;
@@ -5714,7 +5715,7 @@ app.post('/api/admin/orders/:id/approve-return', protect, authorizeRole('admin')
                 },
                 $push: { history: { status: newAssignmentStatus } }
             },
-            { new: true, upsert: true } // Upsert: true creates it if it doesn't exist, new: true returns the updated document
+            { new: true, upsert: true } // Upsert: true creates it if it didn't exist (safety), new: true returns the updated document
         );
 
         // 3. Notify Delivery Boys 
