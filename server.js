@@ -5434,9 +5434,14 @@ app.post('/api/orders/buy-now', protect, async (req, res) => {
 });
 
 // [NEW] API Endpoint for a customer to initiate a return request
+// server.js
+
+// [NEW] API Endpoint for a customer to initiate a return request
 app.post('/api/orders/:id/return-request', protect, async (req, res) => {
     try {
-        const { reason } = req.body;
+        // ✅ FIX: Destructure both reason and the optional upiId from the body
+        const { reason, upiId } = req.body; 
+        
         if (!reason || reason.trim().length < 10) {
             return res.status(400).json({ 
                 message: 'A valid reason for the return/refund is required (min 10 characters).' 
@@ -5473,6 +5478,7 @@ app.post('/api/orders/:id/return-request', protect, async (req, res) => {
             });
         }
 
+        // Calculate time remaining for the response message
         const hoursLeft = Math.floor((twoDaysInMs - timeSinceDelivery) / (1000 * 60 * 60));
         const minutesLeft = Math.floor(((twoDaysInMs - timeSinceDelivery) % (1000 * 60 * 60)) / (1000 * 60));
 
@@ -5490,6 +5496,8 @@ app.post('/api/orders/:id/return-request', protect, async (req, res) => {
             reason: reason,
             status: 'requested',
             processedBy: req.user._id,
+            // ✅ FIX: Save UPI ID here if provided by the user
+            upiId: upiId || null, 
             createdAt: new Date(),
             updatedAt: new Date()
         });
@@ -5500,8 +5508,13 @@ app.post('/api/orders/:id/return-request', protect, async (req, res) => {
 
         await order.save();
         
-        // 4. Notify Admin
-        await notifyAdmin(`🔔 New Return Request for Order #${order._id.toString().slice(-6)}\n\nUser: ${req.user.name}\nReason: ${reason}`);
+        // 4. Notify Admin (Include UPI ID in notification)
+        await notifyAdmin(
+            `🔔 New Return Request for Order #${order._id.toString().slice(-6)}\n\n` +
+            `User: ${req.user.name}\n` +
+            `Reason: ${reason}\n` +
+            `UPI ID: ${upiId || 'Not Provided'}`
+        );
 
         res.json({ 
             message: `Return request successfully submitted. Returns are allowed within 48 hours of delivery. You have ${hoursLeft} hours and ${minutesLeft} minutes left in your return window. The admin will review your request shortly.`, 
