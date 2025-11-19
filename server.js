@@ -456,6 +456,13 @@ const orderSchema = new mongoose.Schema({
     status: { type: String, enum: ['requested', 'approved', 'processing', 'completed', 'rejected'], default: 'requested' },
     razorpayRefundId: String,
     processedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    
+    // 🚨 NEW MANUAL REFUND FIELDS ADDED 🚨
+    upiId: String, 
+    bankAccountNumber: String, 
+    ifsc: String, 
+    // ------------------------------------
+    
     createdAt: Date,
     updatedAt: Date
   }],
@@ -2543,32 +2550,57 @@ app.put('/api/orders/:id/cancel', protect, async (req, res) => {
 
 
 // -------- User submits UPI for COD refund --------
+// PUT /api/orders/:id/submit-upi - User submits UPI ID or Bank Details for manual refund
 app.put('/api/orders/:id/submit-upi', protect, async (req, res) => {
-  try {
-    const { upiId } = req.body;
-    if (!upiId) return res.status(400).json({ message: 'UPI ID required' });
+    try {
+        // Fetch all potential details from the client
+        const { upiId, accountNumber, ifsc } = req.body;
+        
+        // 1. Validation: Ensure at least one valid method is provided
+        // (UPI ID OR both Account Number and IFSC)
+        if (!upiId && (!accountNumber || !ifsc)) {
+            return res.status(400).json({ message: 'UPI ID or complete Bank Account/IFSC details are required for refund.' });
+        }
 
-    const order = await Order.findOne({ _id: req.params.id, user: req.user._id });
-    if (!order) return res.status(404).json({ message: 'Order not found' });
+        const order = await Order.findOne({ _id: req.params.id, user: req.user._id });
+        if (!order) return res.status(404).json({ message: 'Order not found' });
 
-    const pendingRefund = order.refunds.find(r => r.status === 'requested' && (!r.upiId));
-    if (!pendingRefund) return res.status(400).json({ message: 'No pending COD refund found or UPI already submitted' });
+        // 2. Find the pending refund entry (status: 'requested')
+        const pendingRefund = order.refunds.find(r => r.status === 'requested');
+        
+        if (!pendingRefund) {
+             return res.status(400).json({ message: 'No active COD refund request found or details already submitted.' });
+        }
+        
+        // 3. Update the refund entry with provided details
+        if (upiId) {
+            pendingRefund.upiId = upiId;
+        }
+        if (accountNumber && ifsc) {
+            pendingRefund.bankAccountNumber = accountNumber;
+            pendingRefund.ifsc = ifsc;
+        }
 
-    pendingRefund.upiId = upiId;
-    pendingRefund.notes = `UPI submitted by user: ${upiId}`;
-    pendingRefund.status = 'pending'; // waiting admin approval
-    pendingRefund.updatedAt = new Date();
+        // 4. Construct notification and change status to 'pending'
+        const notesArray = [];
+        if (upiId) notesArray.push(`UPI: ${upiId}`);
+        if (accountNumber && ifsc) notesArray.push(`A/C: ${accountNumber}, IFSC: ${ifsc}`);
+        
+        pendingRefund.notes = `Refund details submitted by user: ${notesArray.join(' / ')}`;
+        pendingRefund.status = 'pending'; // Ready for admin action
+        pendingRefund.updatedAt = new Date();
 
-    order.history.push({ status: 'UPI Submitted for COD Refund', timestamp: new Date() });
+        order.history.push({ status: 'Refund Details Submitted', timestamp: new Date() });
 
-    await order.save();
+        await order.save();
 
-    await notifyAdmin(`📩 UPI ID submitted for COD refund: ${upiId} (Order #${order._id})`);
-    res.json({ message: 'UPI ID submitted successfully. Awaiting admin approval.' });
-  } catch (err) {
-    console.error('Submit UPI error:', err && err.message ? err.message : err);
-    res.status(500).json({ message: 'Error submitting UPI ID' });
-  }
+        await notifyAdmin(`📩 Refund Details Submitted for COD: ${notesArray.join(' / ')} (Order #${order._id.toString().slice(-6)}). Awaiting manual transfer.`);
+        
+        res.json({ message: 'Refund details submitted successfully. Awaiting admin approval and manual transfer.' });
+    } catch (err) {
+        console.error('Submit UPI/Bank Details error:', err && err.message ? err.message : err);
+        res.status(500).json({ message: 'Error submitting refund details' });
+    }
 });
 
 
