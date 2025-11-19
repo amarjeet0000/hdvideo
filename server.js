@@ -405,50 +405,63 @@ const splashSchema = new mongoose.Schema({
 const Splash = mongoose.model('Splash', splashSchema);
 
 const orderSchema = new mongoose.Schema({
-  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
-  seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
-  orderItems: [{
-    product: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' },
-    name: String,
-    qty: Number,
-    originalPrice: Number,
-    price: Number,
-    category: String,
-    // ⭐️ FIX: REMOVING required: true ⭐️
-    selectedColor: { type: String, required: false }, // Allow null/undefined for non-variant items
-    selectedSize: { type: String, required: false }   // Allow null/undefined for non-variant items
+  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
+  seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
+  orderItems: [{
+    product: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' },
+    name: String,
+    qty: Number,
+    originalPrice: Number,
+    price: Number,
+    category: String,
+    // ⭐️ FIX: REMOVING required: true ⭐️
+    selectedColor: { type: String, required: false }, // Allow null/undefined for non-variant items
+    selectedSize: { type: String, required: false }   // Allow null/undefined for non-variant items
 
-    // --------------------------------------------------
-  }],
-  shippingAddress: { type: String, required: true },
-  deliveryStatus: { 
-    type: String, 
-    enum: ['Pending', 'Processing', 'Shipped', 'Delivered', 'Cancelled', 'Payment Pending', 'Return Requested'], 
-    default: 'Pending', 
-    index: true 
-  }, 
-  paymentMethod: { type: String, enum: ['cod', 'razorpay', 'razorpay_cod'], required: true, index: true },
-  paymentId: String,
-  paymentStatus: { type: String, enum: ['pending', 'completed', 'failed', 'refunded'], default: 'pending', index: true },
-  pincode: String,
-  totalAmount: Number, // Items Total (Subtotal)
-  taxRate: { type: Number, default: GST_RATE },
-  taxAmount: { type: Number, default: 0 },
-  couponApplied: String,
-  discountAmount: { type: Number, default: 0 },
-  shippingFee: { type: Number, default: 0 }, 
-  refunds: [{
-    amount: Number,
-    reason: String,
-    status: { type: String, enum: ['requested', 'approved', 'processing', 'completed', 'rejected'], default: 'requested' },
-    razorpayRefundId: String,
-    processedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-    createdAt: Date,
-    updatedAt: Date
-  }],
-  totalRefunded: { type: Number, default: 0 },
-  history: [{ status: String, timestamp: { type: Date, default: Date.now } }],
-  razorpayPaymentLinkId: { type: String, default: null }
+    // --------------------------------------------------
+  }],
+  shippingAddress: { type: String, required: true },
+  deliveryStatus: { 
+    type: String, 
+    enum: [
+        'Pending', 
+        'Processing', 
+        'Shipped', 
+        'Delivered', 
+        'Cancelled', 
+        'Payment Pending', 
+        'Return Requested',
+        // --- ADDED RETURN FLOW STATUSES ---
+        'Return Accepted by Admin', 
+        'Return In Transit',        
+        'Return Completed'
+        // ----------------------------------
+    ], 
+    default: 'Pending', 
+    index: true 
+  }, 
+  paymentMethod: { type: String, enum: ['cod', 'razorpay', 'razorpay_cod'], required: true, index: true },
+  paymentId: String,
+  paymentStatus: { type: String, enum: ['pending', 'completed', 'failed', 'refunded'], default: 'pending', index: true },
+  pincode: String,
+  totalAmount: Number, // Items Total (Subtotal)
+  taxRate: { type: Number, default: GST_RATE },
+  taxAmount: { type: Number, default: 0 },
+  couponApplied: String,
+  discountAmount: { type: Number, default: 0 },
+  shippingFee: { type: Number, default: 0 }, 
+  refunds: [{
+    amount: Number,
+    reason: String,
+    status: { type: String, enum: ['requested', 'approved', 'processing', 'completed', 'rejected'], default: 'requested' },
+    razorpayRefundId: String,
+    processedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    createdAt: Date,
+    updatedAt: Date
+  }],
+  totalRefunded: { type: Number, default: 0 },
+  history: [{ status: String, timestamp: { type: Date, default: Date.now } }],
+  razorpayPaymentLinkId: { type: String, default: null }
 }, { timestamps: true });
 
 const Order = mongoose.model('Order', orderSchema);
