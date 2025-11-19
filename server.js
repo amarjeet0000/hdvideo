@@ -5685,6 +5685,69 @@ async function calculateSellerFinancials(sellerId) {
 // Seller अपने बैंक खाते या UPI VPA को जोड़ने के लिए इस रूट का उपयोग करेगा।
 
 // POST /api/seller/bank-details (Modified for Manual Payouts)
+// [CORRECTED ADMIN ROUTE] - Admin approves customer return request and creates/updates delivery assignment
+app.post('/api/admin/orders/:id/approve-return', protect, authorizeRole('admin'), async (req, res) => {
+    try {
+        const orderId = req.params.id;
+        // Populate seller details to check if they have a phone/fcmToken
+        const order = await Order.findById(orderId).populate('user', 'phone fcmToken').populate('seller', 'fcmToken phone');
+        
+        if (!order || order.deliveryStatus !== 'Return Requested') {
+            return res.status(400).json({ message: 'Order is not in Return Requested status.' });
+        }
+
+        // 1. Update Order Status
+        order.deliveryStatus = 'Return Accepted by Admin';
+        order.history.push({ status: 'Return Accepted by Admin' });
+        await order.save();
+
+        // 2. FIND AND UPDATE THE EXISTING Delivery Assignment for Return Pickup
+        // CRITICAL FIX: Use findOneAndUpdate to prevent E11000 duplicate key errors
+        const newAssignmentStatus = 'ReturnPending';
+        
+        const assignment = await DeliveryAssignment.findOneAndUpdate(
+            { order: order._id }, // Find the existing assignment by the Order ID
+            {
+                $set: {
+                    deliveryBoy: null, // Ensure it's unassigned for the pool
+                    status: newAssignmentStatus, // Set the status for return pickup
+                },
+                $push: { history: { status: newAssignmentStatus } }
+            },
+            { new: true, upsert: true } // Upsert: true creates it if it doesn't exist, new: true returns the updated document
+        );
+
+        // 3. Notify Delivery Boys 
+        const nearbyDeliveryBoys = await User.find({
+          role: 'delivery', approved: true, pincodes: order.pincode
+        }).select('fcmToken');
+        const deliveryTokens = nearbyDeliveryBoys.map(db => db.fcmToken).filter(Boolean);
+
+        if (deliveryTokens.length > 0) {
+          await sendPushNotification(
+              deliveryTokens,
+              'New Return Pickup Available! 📦',
+              `A new return pickup (#${orderId.slice(-6)}) is available in Pincode: ${order.pincode}.`,
+              { orderId: order._id.toString(), type: 'NEW_RETURN_AVAILABLE' }
+          );
+        }
+        
+        // 4. Notify Customer
+        await sendWhatsApp(order.user.phone, `✅ Your return request for order #${orderId.slice(-6)} has been approved. A delivery partner will be assigned for pickup shortly.`);
+
+        // 5. Notify Seller (Optional, but good practice)
+        if (order.seller) {
+            await sendWhatsApp(order.seller.phone, `🔔 Return Approved: Admin accepted the return request for order #${orderId.slice(-6)}. A delivery boy will pick up the item soon.`);
+        }
+
+
+        res.json({ message: 'Return approved and assigned for pickup.', assignment });
+
+    } catch (err) {
+        console.error('Error approving return and creating assignment:', err.message);
+        res.status(500).json({ message: 'Error processing return approval.' });
+    }
+});
 
 app.post('/api/seller/bank-details', protect, authorizeRole('seller'), async (req, res) => {
     try {
