@@ -424,19 +424,19 @@ const orderSchema = new mongoose.Schema({
   deliveryStatus: { 
     type: String, 
     enum: [
-        'Pending', 
-        'Processing', 
-        'Shipped', 
-        'Delivered', 
-        'Cancelled', 
-        'Payment Pending', 
-        'Return Requested',
-        // --- ADDED RETURN FLOW STATUSES ---
-        'Return Accepted by Admin', 
-        'Return In Transit',        
-        'Return Completed'
-        // ----------------------------------
-    ], 
+        'Pending', 
+        'Processing', 
+        'Shipped', 
+        'Delivered', 
+        'Cancelled', 
+        'Payment Pending', 
+        'Return Requested',
+        // --- ADDED RETURN FLOW STATUSES ---
+        'Return Accepted by Admin', 
+        'Return In Transit',        
+        'Return Completed'
+        // ----------------------------------
+    ], 
     default: 'Pending', 
     index: true 
   }, 
@@ -553,33 +553,46 @@ const payoutSchema = new mongoose.Schema({
 const Payout = mongoose.model('Payout', payoutSchema);
 
 const deliveryAssignmentSchema = new mongoose.Schema({
-  order: { 
-    type: mongoose.Schema.Types.ObjectId, 
-    ref: 'Order', 
-    required: true, 
-    unique: true
-  },
-  deliveryBoy: { 
-    type: mongoose.Schema.Types.ObjectId, 
-    ref: 'User', 
-    default: null,
-    index: true 
-  },
-  status: { 
-    type: String, 
-    enum: ['Pending', 'Accepted', 'PickedUp', 'Delivered', 'Cancelled'], 
-    default: 'Pending',
-    index: true
-  },
-  pincode: { 
-    type: String, 
-    required: true, 
-    index: true
-  },
-  history: [{
-    status: String,
-    timestamp: { type: Date, default: Date.now }
-  }]
+  order: { 
+    type: mongoose.Schema.Types.ObjectId, 
+    ref: 'Order', 
+    required: true, 
+    unique: true
+  },
+  deliveryBoy: { 
+    type: mongoose.Schema.Types.ObjectId, 
+    ref: 'User', 
+    default: null,
+    index: true 
+  },
+  status: { 
+    type: String, 
+    enum: [
+        'Pending',       // Forward Delivery: Job available for claiming
+        'Accepted',      // Forward Delivery: Claimed by a boy
+        'PickedUp',      // Forward Delivery: Package collected from seller
+        'Delivered',     // Forward Delivery: Delivered to customer
+
+        // --- NEW RETURN/REVERSE LOGISTICS STATUSES ---
+        'ReturnPending',    // Reverse Logistics: Return job available for claiming (created upon admin approval)
+        'ReturnAccepted',   // Reverse Logistics: Claimed by a boy
+        'ReturnPickedUp',   // Reverse Logistics: Package collected from customer
+        'ReturnDelivered',  // Reverse Logistics: Delivered back to seller/warehouse
+        
+        'Cancelled'      // Applies to either flow
+    ], 
+    default: 'Pending',
+    index: true
+  },
+  pincode: { 
+    type: String, 
+    required: true, 
+    index: true
+  },
+  history: [{
+    status: String,
+    timestamp: { type: Date, default: Date.now }
+  }]
 }, { timestamps: true });
 const DeliveryAssignment = mongoose.model('DeliveryAssignment', deliveryAssignmentSchema);
 
