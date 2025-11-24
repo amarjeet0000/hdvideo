@@ -221,22 +221,19 @@ const userSchema = new mongoose.Schema({
     },
     
     // ======== ✨ NEW PAYOUT DETAILS FIELD ✨ ========
-    payoutDetails: {
-        // Razorpay Contact ID (Used to group Fund Accounts for RazorpayX)
+  payoutDetails: {
+        // ... (existing fields)
         razorpayContactId: { type: String, default: null }, 
-        
-        // The core ID for automated payouts using RazorpayX APIs
         razorpayFundAccountId: { type: String, default: null, index: true }, 
-        
-        // To classify the type of account stored
         accountType: { type: String, enum: ['bank', 'vpa', null], default: null },
-
-        // Store plain bank details (useful for display or manual transfer reference)
         bankAccountNumber: { type: String, default: null },
         ifsc: { type: String, default: null },
         vpa: { type: String, default: null } 
     },
     // ===============================================
+
+    // ✅ NEW: Track last active time for auto-deletion logic
+    lastActiveAt: { type: Date, default: Date.now, index: true },
 
     fcmToken: { type: String, default: null }
 }, { timestamps: true });
@@ -675,6 +672,10 @@ const protect = async (req, res, next) => {
       console.error('❌ Authentication Failed: User not found with token.');
       return res.status(401).json({ message: 'Invalid token' });
     }
+
+    // ✅ NEW: Update lastActiveAt automatically (Fire and forget)
+    User.findByIdAndUpdate(req.user._id, { lastActiveAt: new Date() }).exec();
+
     next();
   } catch (err) {
     console.error('❌ Authentication Failed: JWT verification error.', err.message);
@@ -5010,7 +5011,59 @@ app.use((err, req, res, next) => {
   });
 });
 
+// ----------------------------------------------------------------------
+// ✅ CRON JOB: Delete Inactive Accounts (Older than 6 Months)
+// ----------------------------------------------------------------------
+// ----------------------------------------------------------------------
+// ✅ UPDATED CRON JOB: Archive & Delete Inactive Accounts (6 Months)
+// ----------------------------------------------------------------------
+cron.schedule('0 2 * * *', async () => {
+  console.log('🧹 Running Inactive Account Cleanup...');
+  
+  try {
+    const sixMonthsAgo = new Date();
+    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
 
+    // 1. Find Users to Delete (Older than 6 months & Role is 'user')
+    const usersToDelete = await User.find({
+      role: 'user', 
+      lastActiveAt: { $lt: sixMonthsAgo } 
+    });
+
+    if (usersToDelete.length > 0) {
+      console.log(`Found ${usersToDelete.length} inactive users. Archiving...`);
+
+      // 2. Prepare Archive Data
+      const archiveData = usersToDelete.map(user => ({
+        originalUserId: user._id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        role: user.role,
+        userData: user.toObject(), // Save full backup
+        deletionReason: 'Auto-Inactive',
+        deletedAt: new Date()
+      }));
+
+      // 3. Clone Data to DeletedUser Collection
+      await DeletedUser.insertMany(archiveData);
+
+      // 4. Delete from Main User Collection
+      const userIds = usersToDelete.map(u => u._id);
+      await User.deleteMany({ _id: { $in: userIds } });
+
+      console.log(`✅ SUCCESS: Archived and Deleted ${usersToDelete.length} users.`);
+      
+      // Notify Admin
+      await notifyAdmin(`🧹 System Cleanup: ${usersToDelete.length} inactive accounts were backed up to 'DeletedUsers' and removed from main list.`);
+    } else {
+      console.log('✨ No inactive accounts found to delete.');
+    }
+
+  } catch (err) {
+    console.error('❌ Error during inactive account cleanup:', err.message);
+  }
+});
 
 cron.schedule('* * * * *', async () => {
   console.log('Running scheduled notification check...');
@@ -5789,6 +5842,62 @@ app.post('/api/seller/bank-details', protect, authorizeRole('seller'), async (re
     }
 });
 // ... (The rest of your existing order routes and other routes go here) ...
+// ✅ NEW: Allow users to delete their own account manually
+// ✅ MANUAL DELETE ACCOUNT (With Cloning)
+app.delete('/api/auth/delete-account', protect, async (req, res) => {
+  try {
+    const userId = req.user._id;
+    
+    // Check for pending orders
+    const pendingOrders = await Order.countDocuments({ 
+        user: userId, 
+        deliveryStatus: { $in: ['Pending', 'Processing', 'Shipped'] } 
+    });
+
+    if (pendingOrders > 0) {
+        return res.status(400).json({ message: 'Cannot delete account. You have pending orders.' });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ message: 'User not found.' });
+
+    // 1. Clone/Archive User
+    await DeletedUser.create({
+        originalUserId: user._id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        role: user.role,
+        userData: user.toObject(),
+        deletionReason: 'Manual-Request',
+        deletedAt: new Date()
+    });
+
+    // 2. Delete User
+    await User.findByIdAndDelete(userId);
+
+    res.json({ message: 'Your account has been securely archived and deleted.' });
+
+  } catch (err) {
+    console.error('Manual delete error:', err);
+    res.status(500).json({ message: 'Error deleting account', error: err.message });
+  }
+});
+// ------------------------------------------------------------------
+// ✅ NEW MODEL: To Store Deleted/Archived Users
+// ------------------------------------------------------------------
+const deletedUserSchema = new mongoose.Schema({
+  originalUserId: { type: mongoose.Schema.Types.ObjectId, index: true },
+  name: String,
+  email: String,
+  phone: String,
+  role: String,
+  userData: { type: Object }, // Store full original JSON data here
+  deletionReason: { type: String, enum: ['Auto-Inactive', 'Manual-Request'], required: true },
+  deletedAt: { type: Date, default: Date.now }
+}, { strict: false }); // strict: false allows saving any extra fields
+
+const DeletedUser = mongoose.model('DeletedUser', deletedUserSchema);
 
 
 const IP = '0.0.0.0';
