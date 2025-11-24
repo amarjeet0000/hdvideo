@@ -5898,7 +5898,154 @@ const deletedUserSchema = new mongoose.Schema({
 }, { strict: false }); // strict: false allows saving any extra fields
 
 const DeletedUser = mongoose.model('DeletedUser', deletedUserSchema);
+// --------- Affiliate Product Model (New) ----------
+const affiliateProductSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  description: String,
+  price: { type: Number, required: true }, // Display price
+  originalPrice: Number, // MRP (Optional)
+  
+  // External Link (Amazon/Flipkart/etc.)
+  affiliateLink: { type: String, required: true }, 
+  
+  // Platform Name (e.g., 'Amazon', 'Flipkart', 'Myntra')
+  platform: { type: String, required: true, default: 'Amazon' },
+  
+  image: {
+    url: String,
+    publicId: String
+  },
+  
+  // Optional: Link to existing category structure
+  category: { type: mongoose.Schema.Types.ObjectId, ref: 'Category' }, 
+  
+  isActive: { type: Boolean, default: true },
+  clicks: { type: Number, default: 0 }, // Analytics: Track how many people clicked
+}, { timestamps: true });
 
+const AffiliateProduct = mongoose.model('AffiliateProduct', affiliateProductSchema);
+// --------------------------------------------------------------------------------
+// --------- ADMIN AFFILIATE ROUTES (Manage External Products) ----------
+// --------------------------------------------------------------------------------
+
+// 1. Create a new Affiliate Product
+app.post('/api/admin/affiliate-products', protect, authorizeRole('admin'), uploadSingleMedia, async (req, res) => {
+  try {
+    const { name, description, price, originalPrice, affiliateLink, platform, category, isActive } = req.body;
+    
+    if (!name || !price || !affiliateLink || !req.file) {
+      return res.status(400).json({ message: 'Name, Price, Affiliate Link and Image are required.' });
+    }
+
+    const newProduct = await AffiliateProduct.create({
+      name,
+      description,
+      price: parseFloat(price),
+      originalPrice: originalPrice ? parseFloat(originalPrice) : undefined,
+      affiliateLink,
+      platform: platform || 'Amazon',
+      category: category || null,
+      isActive: isActive === 'true',
+      image: {
+        url: req.file.path,
+        publicId: req.file.filename
+      }
+    });
+
+    res.status(201).json({ message: 'Affiliate product created successfully', product: newProduct });
+
+  } catch (err) {
+    console.error('Create affiliate product error:', err.message);
+    res.status(500).json({ message: 'Error creating affiliate product', error: err.message });
+  }
+});
+
+// 2. Update an Affiliate Product
+app.put('/api/admin/affiliate-products/:id', protect, authorizeRole('admin'), uploadSingleMedia, async (req, res) => {
+  try {
+    const { name, description, price, originalPrice, affiliateLink, platform, category, isActive } = req.body;
+    
+    const product = await AffiliateProduct.findById(req.params.id);
+    if (!product) return res.status(404).json({ message: 'Product not found' });
+
+    // Handle Image Update
+    if (req.file) {
+      if (product.image && product.image.publicId) {
+        await cloudinary.uploader.destroy(product.image.publicId);
+      }
+      product.image = { url: req.file.path, publicId: req.file.filename };
+    }
+
+    if (name) product.name = name;
+    if (description) product.description = description;
+    if (price) product.price = parseFloat(price);
+    if (originalPrice) product.originalPrice = parseFloat(originalPrice);
+    if (affiliateLink) product.affiliateLink = affiliateLink;
+    if (platform) product.platform = platform;
+    if (category) product.category = category;
+    if (typeof isActive !== 'undefined') product.isActive = isActive === 'true';
+
+    await product.save();
+    res.json({ message: 'Affiliate product updated', product });
+
+  } catch (err) {
+    res.status(500).json({ message: 'Error updating affiliate product', error: err.message });
+  }
+});
+
+// 3. Delete an Affiliate Product
+app.delete('/api/admin/affiliate-products/:id', protect, authorizeRole('admin'), async (req, res) => {
+  try {
+    const product = await AffiliateProduct.findById(req.params.id);
+    if (!product) return res.status(404).json({ message: 'Product not found' });
+
+    if (product.image && product.image.publicId) {
+      await cloudinary.uploader.destroy(product.image.publicId);
+    }
+
+    await product.deleteOne();
+    res.json({ message: 'Affiliate product deleted successfully' });
+  } catch (err) {
+    res.status(500).json({ message: 'Error deleting product', error: err.message });
+  }
+});
+// --------------------------------------------------------------------------------
+// --------- PUBLIC AFFILIATE ROUTES (For Users) ----------
+// --------------------------------------------------------------------------------
+
+// 1. Get All Affiliate Products (With Filtering)
+app.get('/api/affiliate-products', async (req, res) => {
+  try {
+    const { category, platform, search } = req.query;
+    const query = { isActive: true };
+
+    if (category) query.category = category;
+    if (platform) query.platform = platform;
+    if (search) {
+        query.name = { $regex: search, $options: 'i' };
+    }
+
+    const products = await AffiliateProduct.find(query)
+      .populate('category', 'name')
+      .sort({ createdAt: -1 });
+
+    res.json(products);
+  } catch (err) {
+    res.status(500).json({ message: 'Error fetching affiliate products', error: err.message });
+  }
+});
+
+// 2. Track Clicks (Analytics) - Call this when user clicks "Buy on Amazon"
+app.put('/api/affiliate-products/:id/click', async (req, res) => {
+  try {
+    await AffiliateProduct.findByIdAndUpdate(req.params.id, { $inc: { clicks: 1 } });
+    res.json({ message: 'Click tracked' });
+  } catch (err) {
+    console.error('Error tracking click:', err.message);
+    // Don't block the UI if tracking fails
+    res.status(200).json({ message: 'Tracking ignored due to error' }); 
+  }
+});
 
 const IP = '0.0.0.0';
 const PORT = process.env.PORT || 5001;
