@@ -1185,36 +1185,48 @@ app.post('/api/auth/save-fcm-token', protect, async (req, res) => {
 
 app.get('/api/categories', async (req, res) => {
     try {
-        const { active, userPincode } = req.query;
+        // 1. Extract 'type' along with active and userPincode
+        const { active, userPincode, type } = req.query;
 
+        // 2. Basic Filter for the non-aggregation path
         const categoryFilter = {};
         if (typeof active !== 'undefined') categoryFilter.isActive = active === 'true';
+        if (type) categoryFilter.type = type; // ✅ Filter by type (product/service)
 
         let categories;
 
         if (userPincode) {
-            // AGGREGATION: Find categories that are linked to products available in the userPincode
+            // 3. Aggregation for Pincode Logic
+            
+            // Build the match object for Stage 4 dynamically
+            const categoryMatchStage = {
+                'categoryDetails.isActive': categoryFilter.isActive !== undefined ? categoryFilter.isActive : { $exists: true }
+            };
+
+            // ✅ Apply Type filter inside aggregation if provided
+            if (type) {
+                categoryMatchStage['categoryDetails.type'] = type;
+            }
+
             categories = await Product.aggregate([
-                // Stage 1: Filter products by Pincode and Active status
+                // Stage 1: Find Products available in this Pincode
                 { $match: {
                     isActive: true, 
                     pincodes: userPincode 
                 }},
-                // Stage 2: Group by Category ID to get a list of relevant categories
+                // Stage 2: Group by Category to remove duplicates
                 { $group: { _id: '$category', count: { $sum: 1 } } },
-                // Stage 3: Join back to the Category collection to get category details
+                // Stage 3: Join with Categories table
                 { $lookup: {
-                    from: 'categories', // Collection name
+                    from: 'categories', 
                     localField: '_id',
                     foreignField: '_id',
                     as: 'categoryDetails'
                 }},
                 { $unwind: '$categoryDetails' },
-                // Stage 4: Apply original category filters (e.g., isActive)
-                { $match: { 
-                    'categoryDetails.isActive': categoryFilter.isActive !== undefined ? categoryFilter.isActive : { $exists: true } 
-                }},
-                // Stage 5: Shape the output
+                // Stage 4: Filter the actual Category details (Active + Type)
+                { $match: categoryMatchStage },
+                // Stage 5: Format output
                 { $project: {
                     _id: '$categoryDetails._id',
                     name: '$categoryDetails.name',
@@ -1229,7 +1241,7 @@ app.get('/api/categories', async (req, res) => {
             ]);
 
         } else {
-            // Default: If no pincode, return all categories
+            // 4. Default (No Pincode): Simple Find
             categories = await Category.find(categoryFilter)
                 .sort({ sortOrder: 1, name: 1 })
                 .select('name slug isActive image type sortOrder');
@@ -1237,7 +1249,7 @@ app.get('/api/categories', async (req, res) => {
 
         res.json(categories);
     } catch (err) {
-        console.error('Error fetching categories with pincode filter:', err); 
+        console.error('Error fetching categories:', err); 
         res.status(500).json({ message: 'Error fetching categories', error: err.message });
     }
 });
@@ -1255,9 +1267,12 @@ app.get('/api/categories/:id', async (req, res) => {
 
 app.get('/api/admin/categories', protect, authorizeRole('admin'), async (req, res) => {
   try {
-    const { active } = req.query;
+    const { active, type } = req.query; // Added type here
     const filter = {};
+    
     if (typeof active !== 'undefined') filter.isActive = active === 'true';
+    if (type) filter.type = type; // Added type filter
+
     const categories = await Category.find(filter)
       .sort({ sortOrder: 1, name: 1 })
       .select('name slug isActive image type sortOrder');
