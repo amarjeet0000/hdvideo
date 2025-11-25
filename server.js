@@ -1185,36 +1185,41 @@ app.post('/api/auth/save-fcm-token', protect, async (req, res) => {
 
 app.get('/api/categories', async (req, res) => {
     try {
-        const { active, userPincode } = req.query;
+        const { active, userPincode, type } = req.query;
 
         const categoryFilter = {};
         if (typeof active !== 'undefined') categoryFilter.isActive = active === 'true';
+        
+        // ✅ FILTER: Only show specific type (service vs product) if requested
+        if (type) categoryFilter.type = type;
 
         let categories;
 
         if (userPincode) {
-            // AGGREGATION: Find categories that are linked to products available in the userPincode
-            categories = await Product.aggregate([
-                // Stage 1: Filter products by Pincode and Active status
+            const pipeline = [
+                // Stage 1: Filter products by Pincode
                 { $match: {
                     isActive: true, 
-                    pincodes: userPincode 
+                    $or: [
+                        { isGlobal: true },
+                        { pincodes: userPincode }
+                    ]
                 }},
-                // Stage 2: Group by Category ID to get a list of relevant categories
+                // Stage 2: Group by Category ID
                 { $group: { _id: '$category', count: { $sum: 1 } } },
-                // Stage 3: Join back to the Category collection to get category details
+                // Stage 3: Join Category details
                 { $lookup: {
-                    from: 'categories', // Collection name
+                    from: 'categories',
                     localField: '_id',
                     foreignField: '_id',
                     as: 'categoryDetails'
                 }},
                 { $unwind: '$categoryDetails' },
-                // Stage 4: Apply original category filters (e.g., isActive)
+                // Stage 4: Filter Active Categories
                 { $match: { 
-                    'categoryDetails.isActive': categoryFilter.isActive !== undefined ? categoryFilter.isActive : { $exists: true } 
+                    'categoryDetails.isActive': true
                 }},
-                // Stage 5: Shape the output
+                // Stage 5: Project fields
                 { $project: {
                     _id: '$categoryDetails._id',
                     name: '$categoryDetails.name',
@@ -1224,12 +1229,26 @@ app.get('/api/categories', async (req, res) => {
                     type: '$categoryDetails.type',
                     sortOrder: '$categoryDetails.sortOrder',
                 }},
-                // Stage 6: Sort
                 { $sort: { sortOrder: 1, name: 1 } }
-            ]);
+            ];
+
+            // ✅ AGGREGATION FILTER: Apply type filter inside aggregation
+            if (type) {
+                pipeline[3].$match['categoryDetails.type'] = type;
+            }
+
+            categories = await Product.aggregate(pipeline);
+
+            // ✅ FALLBACK: If no categories found via product lookup (common for services with no listed "products" yet)
+            // fetch directly from Category collection.
+            if (categories.length === 0) {
+                 categories = await Category.find(categoryFilter)
+                    .sort({ sortOrder: 1, name: 1 })
+                    .select('name slug isActive image type sortOrder');
+            }
 
         } else {
-            // Default: If no pincode, return all categories
+            // Default: No pincode provided, return filtered categories from DB
             categories = await Category.find(categoryFilter)
                 .sort({ sortOrder: 1, name: 1 })
                 .select('name slug isActive image type sortOrder');
@@ -1237,7 +1256,7 @@ app.get('/api/categories', async (req, res) => {
 
         res.json(categories);
     } catch (err) {
-        console.error('Error fetching categories with pincode filter:', err); 
+        console.error('Error fetching categories:', err); 
         res.status(500).json({ message: 'Error fetching categories', error: err.message });
     }
 });
@@ -4434,9 +4453,10 @@ app.post('/api/admin/broadcast', protect, authorizeRole('admin'), uploadSingleMe
     res.status(500).json({ message: 'Error sending broadcast message', error: err.message });
   }
 });
+// CREATE Banner (Admin) - Saves the 'section'
 app.post('/api/admin/banners', protect, authorizeRole('admin'), uploadSingleMedia, async (req, res) => {
   try {
-    const { title, link, isActive, position, type } = req.body;
+    const { title, link, isActive, position, type, section } = req.body;
     const file = req.file;
     if (!file) {
       return res.status(400).json({ message: 'Media file (image or video) is required' });
@@ -4446,6 +4466,7 @@ app.post('/api/admin/banners', protect, authorizeRole('admin'), uploadSingleMedi
       link: link || '',
       isActive: isActive === 'true',
       position: position || 'top',
+      section: section || 'home', // ✅ Save section (home/product/service)
       type: type || (file.mimetype.startsWith('video') ? 'video' : 'image'),
     };
     if (bannerData.type === 'image') {
@@ -4461,13 +4482,45 @@ app.post('/api/admin/banners', protect, authorizeRole('admin'), uploadSingleMedi
   }
 });
 
+// GET Hero Banners (Filtered by ?section=...)
 app.get('/api/banners/hero', async (req, res) => {
   try {
-    const banners = await Banner.find({ isActive: true, position: 'top' }).sort({ createdAt: -1 });
+    const { section } = req.query;
+    const query = { isActive: true, position: 'top' };
+    
+    // ✅ Filter by section
+    if (section) {
+        query.section = section;
+    } else {
+        query.section = 'home'; // Default to home
+    }
+
+    const banners = await Banner.find(query).sort({ createdAt: -1 });
     res.json(banners);
   } catch (err) {
     console.error('Error fetching hero banners:', err.message);
     res.status(500).json({ message: 'Error fetching hero banners' });
+  }
+});
+
+// GET Dynamic Banners (Filtered by ?section=...)
+app.get('/api/banners/dynamic', async (req, res) => {
+  try {
+    const { section } = req.query;
+    const query = { isActive: true, position: { $in: ['middle', 'bottom'] } };
+
+    // ✅ Filter by section
+    if (section) {
+        query.section = section;
+    } else {
+        query.section = 'home'; // Default to home
+    }
+
+    const banners = await Banner.find(query).sort({ createdAt: -1 });
+    res.json(banners);
+  } catch (err) {
+    console.error('Error fetching dynamic banners:', err.message);
+    res.status(500).json({ message: 'Error fetching dynamic banners' });
   }
 });
 
@@ -6099,6 +6152,78 @@ app.put('/api/affiliate-products/:id/click', async (req, res) => {
     console.error('Error tracking click:', err.message);
     // Don't block the UI if tracking fails
     res.status(200).json({ message: 'Tracking ignored due to error' }); 
+  }
+});
+
+
+// [NEW ROUTE] Only fetch Service Listings (Doctors, Mechanics, etc.)
+// GET /api/services/listings
+app.get('/api/services/listings', async (req, res) => {
+  try {
+    const { pincode, search } = req.query;
+    
+    // 1. Find all categories that are of type 'service'
+    const serviceCategories = await Category.find({ type: 'service', isActive: true }).select('_id');
+    const serviceCategoryIds = serviceCategories.map(c => c._id);
+
+    // 2. Build Query
+    const query = {
+        category: { $in: serviceCategoryIds }, // Only fetch items belonging to Service Categories
+        // variants field check ensures it's a valid item structure
+        'variants.0': { $exists: true } 
+    };
+
+    // 3. Search Filter
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: "i" } },
+        { shortDescription: { $regex: search, $options: "i" } }
+      ];
+    }
+
+    // 4. Pincode Filter (Optional: Join with Seller)
+    // Services are usually strictly local, so pincode filter is important
+    let pipeline = [
+        { $match: query },
+        {
+          $lookup: {
+            from: "users",
+            localField: "seller",
+            foreignField: "_id",
+            as: "sellerDetails"
+          }
+        },
+        { $unwind: "$sellerDetails" }
+    ];
+
+    if (pincode) {
+        pipeline.push({
+            $match: {
+                "sellerDetails.pincodes": pincode
+            }
+        });
+    }
+
+    // Add fields to match your Product model output
+    pipeline.push({
+        $project: {
+            name: 1,
+            price: { $min: "$variants.price" }, // Starting Price
+            images: 1,
+            shortDescription: 1,
+            serviceDurationMinutes: 1, // Special field for services
+            "sellerDetails.name": 1,
+            "sellerDetails.phone": 1,
+            "sellerDetails.address": 1
+        }
+    });
+
+    const services = await Product.aggregate(pipeline);
+    res.json(services);
+
+  } catch (err) {
+    console.error('Error fetching services:', err.message);
+    res.status(500).json({ message: 'Error fetching service listings' });
   }
 });
 
