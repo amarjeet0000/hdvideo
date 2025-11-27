@@ -240,41 +240,43 @@ const userSchema = new mongoose.Schema({
 
 const User = mongoose.model('User', userSchema);
 
+
+
 // 1. User Schema को अपडेट करें (role में 'provider' जोड़ें)
 // अपना पुराना userSchema ढूंढें और 'role' वाली लाइन को इससे बदल दें:
 // role: { type: String, enum: ['user', 'seller', 'admin', 'delivery', 'provider'], default: 'user', index: true },
 
 // 2. Service Booking Model (नया मॉडल बनाएँ)
+// --- SERVICE BOOKING SCHEMA ---
 const serviceBookingSchema = new mongoose.Schema({
-  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }, // ग्राहक (गाँव का निवासी)
-  service: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true }, // सर्विस का नाम (जैसे: खेती पंप रिपेयर)
-  provider: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }, // मिस्त्री/डॉक्टर
+  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   
-  bookingDate: { type: Date, required: true }, // कब बुलाना है
-  timeSlot: { type: String, required: true }, // समय (जैसे: सुबह 10 बजे)
+  // CHANGE: ref 'Product' se hatakar 'Service' kar diya
+  service: { type: mongoose.Schema.Types.ObjectId, ref: 'Service', required: true }, 
+  
+  provider: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, 
+  
+  bookingDate: { type: Date, required: true }, 
+  timeSlot: { type: String, required: true },
   
   address: {
-    street: String, // गाँव/टोला
-    village: String, // गाँव का नाम
-    landmark: String, // नज़दीकी जगह (जैसे: पंचायत भवन के पास)
+    street: String,
+    village: String, 
+    city: String,
     pincode: String,
     phone: String
   },
   
   status: { 
     type: String, 
-    enum: ['Pending', 'Accepted', 'OnTheWay', 'InProgress', 'Completed', 'Cancelled', 'Rejected'], 
+    enum: ['Pending', 'Accepted', 'OnTheWay', 'InProgress', 'Completed', 'Cancelled'], 
     default: 'Pending' 
   },
   
-  paymentStatus: { type: String, enum: ['pending', 'completed'], default: 'pending' },
-  paymentMethod: { type: String, enum: ['cod', 'online'], default: 'cod' }, // गाँव में COD ज्यादा चलता है
-  amount: { type: Number, required: true }, // फीस
-  
-  otp: { type: String }, // काम शुरू करने के लिए OTP (सुरक्षा के लिए)
-  
-  notes: String, // बीमारी या खराबी का विवरण
-  history: [{ status: String, timestamp: { type: Date, default: Date.now } }]
+  amount: { type: Number, required: true },
+  paymentMethod: { type: String, default: 'cod' },
+  startOtp: { type: String },
+  notes: String
 }, { timestamps: true });
 
 const ServiceBooking = mongoose.model('ServiceBooking', serviceBookingSchema);
@@ -297,6 +299,35 @@ const categorySchema = new mongoose.Schema({
   sortOrder: { type: Number, default: 0, index: true }
 }, { timestamps: true });
 const Category = mongoose.model('Category', categorySchema);
+
+// --- NEW SERVICE MODEL (Separated from Product) ---
+const serviceSchema = new mongoose.Schema({
+  name: { type: String, required: true }, // e.g., AC Repair, Haircut
+  category: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', required: true },
+  
+  provider: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }, // Jo service de raha hai
+  
+  price: { type: Number, required: true }, // Service Charge
+  visitCharge: { type: Number, default: 0 }, // Visiting Fee (if any)
+  
+  description: String,
+  experience: { type: String, default: '0 Years' }, // e.g., 5 Years
+  
+  images: [{
+    url: String,
+    publicId: String
+  }],
+  
+  // Village/Location specific availability
+  villages: [String], // Kin gaon me service available hai
+  isAvailable: { type: Boolean, default: true },
+  
+  rating: { type: Number, default: 0 },
+  totalReviews: { type: Number, default: 0 }
+
+}, { timestamps: true });
+
+const Service = mongoose.model('Service', serviceSchema);
 
 const subcategorySchema = new mongoose.Schema({
   name: { type: String, required: true },
@@ -668,10 +699,7 @@ if (serviceCategoryCount === 0) {
   console.log('Creating Village Service categories...');
   const serviceCategories = [
     { name: 'Doctor (Medical)', slug: 'doctor', type: 'service', sortOrder: 10 },
-    { name: 'Pashu Doctor (Vet)', slug: 'pashu-doctor', type: 'service', sortOrder: 11 }, // पशु चिकित्सक
-    { name: 'Electrician', slug: 'electrician', type: 'service', sortOrder: 12 }, // बिजली मिस्त्री
-    { name: 'Pump/Motor Mechanic', slug: 'pump-mechanic', type: 'service', sortOrder: 13 }, // खेत का मोटर ठीक करने वाला
-    { name: 'Plumber', slug: 'plumber', type: 'service', sortOrder: 14 },
+   
   ];
   await Category.insertMany(serviceCategories);
   console.log('Village Service categories created.');
@@ -6122,122 +6150,284 @@ app.put('/api/affiliate-products/:id/click', async (req, res) => {
 // --------------------------------------------------------------------------------
 
 // 1. सर्विस बुक करें (Book a Service)
+// --------------------------------------------------------------------------------
+// --------- VILLAGE SERVICE BOOKING ROUTES ----------
+// --------------------------------------------------------------------------------
+
+// 1. Book a Service (Direct Booking - No Cart)
+// ------------------------------------------------------------------
+// ✅ BOOKING ROUTES (Updated for Service Model)
+// ------------------------------------------------------------------
+
+// ------------------------------------------------------------------
+// ✅ BOOKING ROUTES (Updated for Service Model)
+// ------------------------------------------------------------------
+
 app.post('/api/services/book', protect, async (req, res) => {
   try {
-    const { serviceId, providerId, bookingDate, timeSlot, address, paymentMethod, notes } = req.body;
+    const { serviceId, date, time, addressId, notes } = req.body;
 
-    if (!serviceId || !bookingDate || !timeSlot || !address) {
-      return res.status(400).json({ message: 'कृपया सभी जानकारी भरें (तारीख, समय, पता)।' });
+    // 1. Fetch from SERVICE model, not Product
+    const serviceItem = await Service.findById(serviceId).populate('provider'); 
+    
+    if (!serviceItem) {
+      return res.status(404).json({ message: 'Invalid service selected.' });
     }
+    
+    // Check Address
+    const userAddress = await Address.findById(addressId);
+    if (!userAddress) return res.status(404).json({ message: 'Address not found.' });
 
-    // सर्विस की जानकारी निकालें
-    const serviceItem = await Product.findById(serviceId);
-    if (!serviceItem) return res.status(404).json({ message: 'सर्विस नहीं मिली।' });
-
-    // OTP जनरेट करें (गाँव में पहचान के लिए ज़रूरी है)
-    const startOtp = Math.floor(1000 + Math.random() * 9000).toString();
+    // 2. Create Booking
+    const otp = Math.floor(1000 + Math.random() * 9000).toString(); // Start OTP
 
     const booking = await ServiceBooking.create({
       user: req.user._id,
-      service: serviceId,
-      provider: providerId || serviceItem.seller, // अगर कोई खास मिस्त्री नहीं चुना, तो डिफ़ॉल्ट चुनें
-      bookingDate: new Date(bookingDate),
-      timeSlot,
-      address,
-      amount: serviceItem.price, // विजिटिंग चार्ज
-      paymentMethod: paymentMethod || 'cod',
-      notes,
-      otp: startOtp,
-      history: [{ status: 'Pending' }]
+      service: serviceId, // Links to Service Model
+      provider: serviceItem.provider._id, // Links to Provider User
+      bookingDate: new Date(date),
+      timeSlot: time,
+      address: {
+        street: userAddress.street,
+        village: userAddress.village,
+        city: userAddress.city,
+        phone: userAddress.phone || req.user.phone
+      },
+      amount: serviceItem.price + (serviceItem.visitCharge || 0), // Total Price
+      startOtp: otp,
+      notes: notes,
+      status: 'Pending'
     });
 
-    // मिस्त्री/डॉक्टर को WhatsApp भेजें
-    const provider = await User.findById(booking.provider);
-    if (provider && provider.phone) {
-      const msg = `नमस्ते! नई बुकिंग आई है:\nकाम: ${serviceItem.name}\nतारीख: ${bookingDate}\nसमय: ${timeSlot}\nगाँव: ${address.village || address.street}`;
-      await sendWhatsApp(provider.phone, msg);
+    // Notify Provider (WhatsApp)
+    if (serviceItem.provider && serviceItem.provider.phone) {
+        const msg = `🔔 New Booking!\nService: ${serviceItem.name}\nCustomer: ${req.user.name}\nVillage: ${userAddress.village}\nTime: ${time}`;
+        await sendWhatsApp(serviceItem.provider.phone, msg);
     }
 
-    res.status(201).json({ message: 'बुकिंग सफल रही! मिस्त्री/डॉक्टर को सूचना भेज दी गई है।', booking });
+    res.status(201).json({ message: 'Booking confirmed!', bookingId: booking._id });
 
   } catch (err) {
-    console.error('Service booking error:', err.message);
-    res.status(500).json({ message: 'बुकिंग में त्रुटि आई।', error: err.message });
+    console.error('Booking error:', err.message);
+    res.status(500).json({ message: 'Error booking service' });
   }
 });
 
-// 2. मेरी बुकिंग देखें (Customer/Villager)
-app.get('/api/services/my-bookings', protect, async (req, res) => {
+// 2. Get Customer's Bookings
+app.get('/api/services/bookings', protect, async (req, res) => {
   try {
     const bookings = await ServiceBooking.find({ user: req.user._id })
       .populate('service', 'name images price')
       .populate('provider', 'name phone')
-      .sort({ bookingDate: -1 });
+      .sort({ createdAt: -1 });
     res.json(bookings);
   } catch (err) {
-    res.status(500).json({ message: 'बुकिंग लोड करने में समस्या आई।' });
+    res.status(500).json({ message: 'Error fetching bookings' });
   }
 });
 
-// 3. मिस्त्री/डॉक्टर के लिए बुकिंग लिस्ट (Provider View)
-app.get('/api/provider/bookings', protect, authorizeRole('provider', 'seller', 'admin'), async (req, res) => {
+// 3. Get Provider's Assigned Jobs (For "Provider" Role)
+// ------------------------------------------------------------------
+// ✅ PROVIDER SPECIFIC ENDPOINTS (Updated)
+// ------------------------------------------------------------------
+
+// 1. Get Provider's Assigned Jobs (For "Provider" Role)
+// This populates the "Service Bookings" tab in your HTML panel
+app.get('/api/provider/jobs', protect, async (req, res) => {
   try {
-    const bookings = await ServiceBooking.find({ provider: req.user._id })
-      .populate('service', 'name')
-      .populate('user', 'name phone address') // ग्राहक का नाम और पता
-      .sort({ bookingDate: 1 });
-    res.json(bookings);
+    // Allow sellers (who listed the service) or dedicated providers to see jobs
+    if (!['seller', 'provider', 'admin'].includes(req.user.role)) {
+        return res.status(403).json({ message: 'Access denied. Only providers can view jobs.' });
+    }
+
+    // Find bookings where the logged-in user is the 'provider'
+    const jobs = await ServiceBooking.find({ provider: req.user._id })
+      .populate('service', 'name price images') // Get Service Name & Price
+      .populate('user', 'name phone')           // Get Customer Details
+      .sort({ bookingDate: 1 });                // Sort by upcoming date
+      
+    res.json(jobs);
   } catch (err) {
-    res.status(500).json({ message: 'बुकिंग लिस्ट नहीं मिली।' });
+    console.error("Error fetching provider jobs:", err.message);
+    res.status(500).json({ message: 'Error fetching jobs', error: err.message });
   }
 });
 
-// 4. स्टेटस अपडेट (Accept, Start with OTP, Complete)
-app.put('/api/services/bookings/:id/status', protect, authorizeRole('provider', 'seller', 'admin'), async (req, res) => {
+// 2. Update Booking Status (Accept, Start with OTP, Complete)
+// This handles the buttons: "Accept", "I'm On The Way", "Start Service (OTP)", "Complete"
+app.put('/api/services/bookings/:id/status', protect, async (req, res) => {
   try {
     const { status, otp } = req.body;
     const bookingId = req.params.id;
 
-    const booking = await ServiceBooking.findById(bookingId).populate('user', 'phone fcmToken');
-    if (!booking) return res.status(404).json({ message: 'बुकिंग नहीं मिली।' });
+    const booking = await ServiceBooking.findById(bookingId)
+      .populate('user', 'phone fcmToken name')
+      .populate('service', 'name');
 
-    // OTP चेक करें (जब मिस्त्री काम शुरू करने "InProgress" करे)
+    if (!booking) return res.status(404).json({ message: 'Booking not found' });
+
+    // Authorization Check: Ensure the logged-in user is the assigned provider or admin
+    if (booking.provider.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
+        return res.status(403).json({ message: 'Not authorized to update this booking' });
+    }
+
+    // --- OTP VERIFICATION LOGIC ---
+    // When provider clicks "Start Service", status becomes 'InProgress'
     if (status === 'InProgress') {
-      if (booking.otp !== otp) {
-        return res.status(400).json({ message: 'गलत OTP है। ग्राहक से सही OTP पूछें।' });
+      if (!otp) {
+        return res.status(400).json({ message: 'Start OTP is required to begin service.' });
+      }
+      if (booking.startOtp !== otp) {
+        return res.status(400).json({ message: '❌ Invalid OTP. Please ask the customer for the correct code.' });
       }
     }
 
+    // Update Status
     booking.status = status;
-    booking.history.push({ status: status });
-    
-    // काम खत्म होने पर पेमेंट कम्पलीट मानें (अगर COD है)
+    booking.history.push({ status: status, timestamp: new Date() });
+
+    // If COD and Service Completed -> Mark Payment as Completed
     if (status === 'Completed' && booking.paymentMethod === 'cod') {
         booking.paymentStatus = 'completed';
     }
 
     await booking.save();
 
-    // ग्राहक को मैसेज भेजें
+    // --- NOTIFICATIONS (WhatsApp + Push) ---
     let msg = '';
-    if (status === 'Accepted') msg = `✅ आपकी बुकिंग स्वीकार कर ली गई है। ${req.user.name} जल्द आएंगे।`;
-    if (status === 'OnTheWay') msg = `🚗 ${req.user.name} आपके घर के लिए निकल चुके हैं।`;
-    if (status === 'InProgress') msg = `🛠️ काम शुरू हो गया है।`;
-    if (status === 'Completed') msg = `🎉 काम पूरा हो गया है। सेवा का उपयोग करने के लिए धन्यवाद!`;
-    if (status === 'Cancelled') msg = `❌ बुकिंग रद्द कर दी गई है।`;
+    const customerName = booking.user.name;
+    const serviceName = booking.service ? booking.service.name : 'Service';
+
+    if (status === 'Accepted') {
+        msg = `✅ Booking Confirmed! Dear ${customerName}, your request for ${serviceName} has been accepted by ${req.user.name}.`;
+    } else if (status === 'OnTheWay') {
+        msg = `🚗 Technician En Route! ${req.user.name} is on the way to your location for ${serviceName}.`;
+    } else if (status === 'InProgress') {
+        msg = `🛠️ Service Started! The work for ${serviceName} has begun.`;
+    } else if (status === 'Completed') {
+        msg = `🎉 Service Completed! Your ${serviceName} is done. Please pay ₹${booking.amount}. Thank you!`;
+    } else if (status === 'Rejected') {
+        msg = `❌ Booking Update: Your request for ${serviceName} could not be accepted at this time.`;
+    }
 
     if (booking.user && msg) {
+      // Send WhatsApp
       await sendWhatsApp(booking.user.phone, msg);
+      
+      // Send Push Notification
       if (booking.user.fcmToken) {
-         await sendPushNotification(booking.user.fcmToken, 'Service Update', msg, { type: 'SERVICE_UPDATE' });
+         await sendPushNotification(
+             booking.user.fcmToken, 
+             'Service Update 🛠️', 
+             msg, 
+             { type: 'SERVICE_UPDATE', bookingId: booking._id.toString() }
+         );
       }
     }
 
-    res.json({ message: `स्टेटस अपडेट: ${status}`, booking });
+    res.json({ message: `Booking status updated to ${status}`, booking });
 
   } catch (err) {
-    res.status(500).json({ message: 'अपडेट करने में त्रुटि।', error: err.message });
+    console.error('Error updating service status:', err.message);
+    res.status(500).json({ message: 'Error updating status', error: err.message });
   }
+});
+
+// ------------------------------------------------------------------
+// ✅ SERVICE API ROUTES (Separate from Products)
+// ------------------------------------------------------------------
+
+// 1. Get All Services (With Village Filter)
+app.get('/api/services', async (req, res) => {
+  try {
+    const { village, categoryId, search } = req.query;
+    const filter = { isAvailable: true };
+
+    if (village) {
+      // Check if service is available in this village (or all)
+      filter.$or = [
+          { villages: { $in: [village] } },
+          { villages: { $size: 0 } } // If empty, assume available everywhere
+      ];
+    }
+    if (categoryId) filter.category = categoryId;
+    if (search) filter.name = { $regex: search, $options: 'i' };
+
+    const services = await Service.find(filter)
+      .populate('provider', 'name phone profileImage rating') // Provider details
+      .populate('category', 'name');
+      
+    res.json(services);
+  } catch (err) {
+    res.status(500).json({ message: 'Error fetching services' });
+  }
+});
+
+// 2. Get Single Service Details
+app.get('/api/services/:id', async (req, res) => {
+  try {
+    const service = await Service.findById(req.params.id)
+      .populate('provider', 'name phone experience')
+      .populate('category', 'name');
+    if(!service) return res.status(404).json({ message: 'Service not found' });
+    res.json(service);
+  } catch (err) {
+    res.status(500).json({ message: 'Error fetching service details' });
+  }
+});
+
+// 3. Add New Service (Provider Only)
+app.post('/api/services', protect, authorizeRole('provider', 'seller', 'admin'), upload.array('images', 5), async (req, res) => {
+  try {
+    const { name, category, price, visitCharge, description, experience, villages } = req.body;
+    
+    // Image Upload Process
+    const imageFiles = req.files.map(file => ({
+      url: file.path,
+      publicId: file.filename
+    }));
+
+    // Parse villages JSON if sent as string
+    let villageList = [];
+    if(villages) {
+        try { villageList = JSON.parse(villages); } catch(e) { villageList = [villages]; }
+    }
+
+    const newService = await Service.create({
+      name,
+      category,
+      provider: req.user._id, // Logged in user is the provider
+      price: parseFloat(price),
+      visitCharge: parseFloat(visitCharge || 0),
+      description,
+      experience,
+      images: imageFiles,
+      villages: villageList
+    });
+
+    res.status(201).json({ message: 'Service listed successfully', service: newService });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Error creating service', error: err.message });
+  }
+});
+
+// 4. Delete Service (Provider/Admin)
+app.delete('/api/services/:id', protect, authorizeRole('provider', 'admin'), async (req, res) => {
+    try {
+        const service = await Service.findById(req.params.id);
+        if(!service) return res.status(404).json({ message: 'Service not found' });
+        
+        // Ensure provider owns the service
+        if(req.user.role !== 'admin' && service.provider.toString() !== req.user._id.toString()){
+             return res.status(403).json({ message: 'Unauthorized' });
+        }
+        
+        await service.deleteOne();
+        res.json({ message: 'Service deleted successfully' });
+    } catch (err) {
+        res.status(500).json({ message: 'Error deleting service' });
+    }
 });
 
 
