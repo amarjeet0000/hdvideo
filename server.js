@@ -1069,15 +1069,21 @@ app.post('/api/auth/verify-login-otp', async (req, res) => {
 
 app.post('/api/auth/register', async (req, res) => {
   try {
-    const { name, email, password, phone, role = 'user', pincodes } = req.body;
+    // 1️⃣ CHANGE: 'vehicleType' को req.body से निकाला
+    const { name, email, password, phone, role = 'user', pincodes, vehicleType } = req.body;
+    
     if (!name || !password || !phone) return res.status(400).json({ message: 'Name, password, and phone number are required' });
 
-    
     if (role === 'seller' && !email) {
         return res.status(400).json({ message: 'Email is required for seller registration.' });
     }
     if ((role === 'user' || role === 'delivery') && !phone) {
       return res.status(400).json({ message: 'Phone number is required for user/delivery registration.' });
+    }
+
+    // 2️⃣ CHANGE: अगर ड्राइवर है और vehicleType नहीं भेजा, तो error दें
+    if (role === 'driver' && !vehicleType) {
+        return res.status(400).json({ message: 'Vehicle Type is required for drivers.' });
     }
 
     let existingUser;
@@ -1098,7 +1104,7 @@ app.post('/api/auth/register', async (req, res) => {
       approved = false;
     }
 
-
+    // 3️⃣ CHANGE: Database में vehicleType सेव करें
     const user = await User.create({ 
         name, 
         email, 
@@ -1106,7 +1112,8 @@ app.post('/api/auth/register', async (req, res) => {
         phone, 
         role, 
         pincodes: Array.isArray(pincodes) ? pincodes : [], 
-        approved 
+        approved,
+        vehicleType: role === 'driver' ? vehicleType : null // ✅ यहाँ vehicleType सेव होगा
     });
 
     if (role === 'seller') {
@@ -1114,7 +1121,22 @@ app.post('/api/auth/register', async (req, res) => {
     }
 
     const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
-    res.status(201).json({ token, user: { id: user._id, name: user.name, email: user.email, phone: user.phone, role: user.role, pincodes: user.pincodes, approved: user.approved } });
+    
+    // Response में भी vehicleType भेजें ताकि confirm हो सके
+    res.status(201).json({ 
+        token, 
+        user: { 
+            id: user._id, 
+            name: user.name, 
+            email: user.email, 
+            phone: user.phone, 
+            role: user.role, 
+            pincodes: user.pincodes, 
+            approved: user.approved,
+            vehicleType: user.vehicleType // ✅ Updated response
+        } 
+    });
+
   } catch (err) {
     console.error('Register error:', err.message);
     res.status(500).json({ message: 'Server error' });
