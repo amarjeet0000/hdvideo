@@ -2604,32 +2604,28 @@ app.get('/api/orders', protect, async (req, res) => {
 });
 
 // ✅ UPDATED ROUTE: Get Details for E-commerce Order OR Ride Request
+// ✅ KEEP THIS BLOCK (यह सही कोड है, इसे रखें)
 app.get('/api/orders/:id', protect, async (req, res) => {
   try {
     const id = req.params.id;
     const userId = req.user._id.toString();
 
-    // ---------------------------------------------------------
     // 1. Check if this is a RIDE (For Village Ride Polling)
-    // ---------------------------------------------------------
     const ride = await Ride.findById(id).populate('driver', 'name phone vehicleType');
     
     if (ride) {
-      // Security Check: Only allow the Customer or the Assigned Driver to see details
       const isCustomer = ride.customer.toString() === userId;
       const isDriver = ride.driver && ride.driver.toString() === userId;
       const isAdmin = req.user.role === 'admin';
 
       if (isCustomer || isDriver || isAdmin) {
-        return res.json(ride); // Return Ride Data (contains status, otp, driver info)
+        return res.json(ride);
       } else {
         return res.status(403).json({ message: 'Access denied to this ride.' });
       }
     }
 
-    // ---------------------------------------------------------
     // 2. If not a Ride, check if it is an E-COMMERCE ORDER
-    // ---------------------------------------------------------
     const order = await Order.findOne({ _id: id, user: userId })
       .populate({
         path: 'orderItems.product',
@@ -2638,12 +2634,9 @@ app.get('/api/orders/:id', protect, async (req, res) => {
       .populate('seller', 'name email');
 
     if (order) {
-      return res.json(order); // Return Order Data
+      return res.json(order);
     }
 
-    // ---------------------------------------------------------
-    // 3. Not found in either collection
-    // ---------------------------------------------------------
     return res.status(404).json({ message: 'Order or Ride not found' });
 
   } catch (err) {
