@@ -6522,7 +6522,7 @@ app.delete('/api/services/:id', protect, authorizeRole('provider', 'admin'), asy
 // --------------------------------------------------------------------------------
 
 // Constants
-const MIN_DRIVER_BALANCE = 50;
+const MIN_DRIVER_BALANCE = 00;
 const COMMISSION_PERCENTAGE = 10; // 10% Platform fee
 
 // 1. Update Driver Location & Status (Online/Offline)
@@ -6596,10 +6596,10 @@ app.post('/api/ride/request', protect, async (req, res) => {
         // Rates per KM
         const rates = { 
             'Bike': 10, 
-            'Auto': 15, 
+            'Auto': 12, 
             'Car': 25, 
             'Tempo': 30, 
-            'E-Rickshaw': 12 
+            'E-Rickshaw': 10 
         };
         
         const ratePerKm = rates[vehicleType] || 15;
@@ -6833,3 +6833,4 @@ const PORT = process.env.PORT || 5001;
 app.listen(PORT, IP, () => {
   console.log(`🚀 Server running on http://${IP}:${PORT}`);
 });
+
