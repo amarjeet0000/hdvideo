@@ -6255,9 +6255,11 @@ app.get('/api/provider/jobs', protect, async (req, res) => {
 
 // 2. Update Booking Status (Accept, Start with OTP, Complete)
 // This handles the buttons: "Accept", "I'm On The Way", "Start Service (OTP)", "Complete"
+// 2. Update Booking Status (Accept, Start with OTP, Complete)
+// 2. Update Booking Status (Accept, Start, Complete) - OTP Removed
 app.put('/api/services/bookings/:id/status', protect, async (req, res) => {
   try {
-    const { status, otp } = req.body;
+    const { status } = req.body; // OTP ab body se nahi chahiye
     const bookingId = req.params.id;
 
     const booking = await ServiceBooking.findById(bookingId)
@@ -6266,21 +6268,16 @@ app.put('/api/services/bookings/:id/status', protect, async (req, res) => {
 
     if (!booking) return res.status(404).json({ message: 'Booking not found' });
 
-    // Authorization Check: Ensure the logged-in user is the assigned provider or admin
-    if (booking.provider.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
+    // --- FIX 1: Safe Authorization Check ---
+    const providerId = booking.provider ? booking.provider.toString() : null;
+    
+    if (providerId !== req.user._id.toString() && req.user.role !== 'admin') {
         return res.status(403).json({ message: 'Not authorized to update this booking' });
     }
 
-    // --- OTP VERIFICATION LOGIC ---
-    // When provider clicks "Start Service", status becomes 'InProgress'
-    if (status === 'InProgress') {
-      if (!otp) {
-        return res.status(400).json({ message: 'Start OTP is required to begin service.' });
-      }
-      if (booking.startOtp !== otp) {
-        return res.status(400).json({ message: '❌ Invalid OTP. Please ask the customer for the correct code.' });
-      }
-    }
+    // --- OTP LOGIC REMOVED ---
+    // Maine yahan se OTP check karne wala 'if' block hata diya hai.
+    // Ab direct status update hoga.
 
     // Update Status
     booking.status = status;
@@ -6293,11 +6290,12 @@ app.put('/api/services/bookings/:id/status', protect, async (req, res) => {
 
     await booking.save();
 
-    // --- NOTIFICATIONS (WhatsApp + Push) ---
-    let msg = '';
-    const customerName = booking.user.name;
+    // --- FIX 2: Safe Notifications ---
+    const customerName = booking.user ? booking.user.name : 'Customer';
     const serviceName = booking.service ? booking.service.name : 'Service';
-
+    
+    // Construct Message
+    let msg = '';
     if (status === 'Accepted') {
         msg = `✅ Booking Confirmed! Dear ${customerName}, your request for ${serviceName} has been accepted by ${req.user.name}.`;
     } else if (status === 'OnTheWay') {
@@ -6310,18 +6308,21 @@ app.put('/api/services/bookings/:id/status', protect, async (req, res) => {
         msg = `❌ Booking Update: Your request for ${serviceName} could not be accepted at this time.`;
     }
 
+    // Send Notifications (Safe)
     if (booking.user && msg) {
-      // Send WhatsApp
-      await sendWhatsApp(booking.user.phone, msg);
+      if (booking.user.phone) {
+          try { await sendWhatsApp(booking.user.phone, msg); } catch (e) {}
+      }
       
-      // Send Push Notification
       if (booking.user.fcmToken) {
-         await sendPushNotification(
-             booking.user.fcmToken, 
-             'Service Update 🛠️', 
-             msg, 
-             { type: 'SERVICE_UPDATE', bookingId: booking._id.toString() }
-         );
+         try {
+             await sendPushNotification(
+                 booking.user.fcmToken, 
+                 'Service Update 🛠️', 
+                 msg, 
+                 { type: 'SERVICE_UPDATE', bookingId: booking._id.toString() }
+             );
+         } catch (e) {}
       }
     }
 
@@ -6332,7 +6333,6 @@ app.put('/api/services/bookings/:id/status', protect, async (req, res) => {
     res.status(500).json({ message: 'Error updating status', error: err.message });
   }
 });
-
 // ------------------------------------------------------------------
 // ✅ SERVICE API ROUTES (Separate from Products)
 // ------------------------------------------------------------------
