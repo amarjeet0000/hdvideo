@@ -251,7 +251,6 @@ const User = mongoose.model('User', userSchema);
 const serviceBookingSchema = new mongoose.Schema({
   user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   
-  // CHANGE: ref 'Product' se hatakar 'Service' kar diya
   service: { type: mongoose.Schema.Types.ObjectId, ref: 'Service', required: true }, 
   
   provider: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, 
@@ -269,14 +268,24 @@ const serviceBookingSchema = new mongoose.Schema({
   
   status: { 
     type: String, 
-    enum: ['Pending', 'Accepted', 'OnTheWay', 'InProgress', 'Completed', 'Cancelled'], 
+    // Added 'Rejected' to enum to prevent validation error
+    enum: ['Pending', 'Accepted', 'OnTheWay', 'InProgress', 'Completed', 'Cancelled', 'Rejected'], 
     default: 'Pending' 
   },
   
   amount: { type: Number, required: true },
   paymentMethod: { type: String, default: 'cod' },
+  paymentStatus: { type: String, default: 'pending' }, // Added for better tracking
   startOtp: { type: String },
-  notes: String
+  notes: String,
+
+  // ✅ FIX: Ye field missing tha, isliye crash ho raha tha
+  history: [{
+    status: String,
+    timestamp: { type: Date, default: Date.now },
+    note: String
+  }]
+
 }, { timestamps: true });
 
 const ServiceBooking = mongoose.model('ServiceBooking', serviceBookingSchema);
