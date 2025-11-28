@@ -6549,36 +6549,83 @@ app.put('/api/ride/driver/status', protect, async (req, res) => {
     }
 });
 
+function getDistanceFromLatLonInKm(lat1, lon1, lat2, lon2) {
+  const R = 6371; // Radius of the earth in km
+  const dLat = deg2rad(lat2 - lat1);
+  const dLon = deg2rad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(deg2rad(lat1)) * Math.cos(deg2rad(lat2)) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  const d = R * c; // Distance in km
+  return d;
+}
+
+function deg2rad(deg) {
+  return deg * (Math.PI / 180);
+}
+
 // 2. Request a Ride (Customer)
+// 2. Request a Ride (Customer) - AUTO CALCULATION UPDATE
 app.post('/api/ride/request', protect, async (req, res) => {
     try {
-        const { pickupAddress, pickupCoordinates, dropAddress, dropCoordinates, vehicleType, distanceKm } = req.body;
+        // Frontend se ab hum sirf coordinates aur address lenge (distanceKm nahi)
+        const { pickupAddress, pickupCoordinates, dropAddress, dropCoordinates, vehicleType } = req.body;
 
-        // 1. Calculate Fare
-        // (For simplicity, using static rates. Ideally fetch from VehicleType model)
-        const rates = { 'Bike': 10, 'Auto': 15, 'Car': 25, 'Tempo': 30, 'E-Rickshaw': 12 };
+        // Validation check
+        if (!pickupCoordinates || pickupCoordinates.length !== 2 || !dropCoordinates || dropCoordinates.length !== 2) {
+            return res.status(400).json({ message: 'Valid Pickup and Drop coordinates are required.' });
+        }
+
+        // --- 1. Automatic Distance Calculation ---
+        // MongoDB stores [Longitude, Latitude], so index 1 is Lat, 0 is Lng
+        const lat1 = pickupCoordinates[1];
+        const lon1 = pickupCoordinates[0];
+        const lat2 = dropCoordinates[1];
+        const lon2 = dropCoordinates[0];
+
+        // Calculate air distance
+        let rawDistance = getDistanceFromLatLonInKm(lat1, lon1, lat2, lon2);
+
+        // Add 30% buffer because roads are never straight (Road Factor)
+        // e.g., If air distance is 10km, road distance approx 13km
+        const distanceKm = parseFloat((rawDistance * 1.3).toFixed(1));
+
+        // --- 2. Calculate Fare ---
+        // Rates per KM
+        const rates = { 
+            'Bike': 10, 
+            'Auto': 15, 
+            'Car': 25, 
+            'Tempo': 30, 
+            'E-Rickshaw': 12 
+        };
+        
         const ratePerKm = rates[vehicleType] || 15;
-        const baseFare = 20;
+        const baseFare = 20; // Min fare to start ride
+        
+        // Final Fare Formula
         let estimatedFare = Math.round(baseFare + (distanceKm * ratePerKm));
 
-        // 2. Create Ride
+        // --- 3. Create Ride in Database ---
         const newRide = await Ride.create({
             customer: req.user._id,
             vehicleType,
             pickupLocation: { address: pickupAddress, coordinates: pickupCoordinates },
             dropLocation: { address: dropAddress, coordinates: dropCoordinates },
-            distanceKm,
-            estimatedFare,
+            distanceKm: distanceKm,      // Auto Calculated
+            estimatedFare: estimatedFare, // Auto Calculated
             otp: Math.floor(1000 + Math.random() * 9000).toString(),
             status: 'Requested'
         });
 
-        // 3. Find Nearby Drivers (Online + Not Locked + Matches Vehicle)
+        // --- 4. Find Nearby Drivers ---
         const nearbyDrivers = await User.find({
             role: 'driver',
             vehicleType: vehicleType,
             isOnline: true,
-            isLocked: false, // CRITICAL: Only unlocked drivers
+            isLocked: false,
             location: {
                 $near: {
                     $geometry: { type: "Point", coordinates: pickupCoordinates },
@@ -6587,25 +6634,31 @@ app.post('/api/ride/request', protect, async (req, res) => {
             }
         }).select('fcmToken phone name');
 
-        // 4. Send Notification to Drivers
+        // --- 5. Notify Drivers ---
         const driverTokens = nearbyDrivers.map(d => d.fcmToken).filter(Boolean);
         if (driverTokens.length > 0) {
             await sendPushNotification(
                 driverTokens,
                 'New Ride Request 🚖',
-                `New ${distanceKm}km ride request nearby! Earn ₹${estimatedFare}.`,
+                `Ride: ${distanceKm}km | Earn ₹${estimatedFare}`,
                 { rideId: newRide._id.toString(), type: 'NEW_RIDE' }
             );
         }
 
-        res.status(201).json({ message: 'Ride requested', rideId: newRide._id, driversFound: nearbyDrivers.length });
+        // Response me ab hum Calculated Distance aur Fare bhejenge
+        res.status(201).json({ 
+            message: 'Ride requested successfully', 
+            rideId: newRide._id, 
+            distance: distanceKm,
+            fare: estimatedFare,
+            driversFound: nearbyDrivers.length 
+        });
 
     } catch (err) {
         console.error('Ride Request Error:', err);
         res.status(500).json({ error: err.message });
     }
 });
-
 // 3. Accept Ride (Driver)
 app.post('/api/ride/accept', protect, async (req, res) => {
     try {
