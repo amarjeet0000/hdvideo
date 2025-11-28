@@ -34,6 +34,8 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+
+
 // --- Setup Firebase Admin ---
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
@@ -205,11 +207,20 @@ const userSchema = new mongoose.Schema({
     email: { type: String, unique: true, sparse: true, index: true },
     password: { type: String, required: true },
     phone: { type: String, unique: true, sparse: true, index: true },
-    role: { type: String, enum: ['user', 'seller', 'admin', 'delivery', 'provider'], default: 'user', index: true },
+    
+    // ✅ UPDATE: Added 'driver' to the allowed roles
+    role: { 
+        type: String, 
+        enum: ['user', 'seller', 'admin', 'delivery', 'provider', 'driver'], 
+        default: 'user', 
+        index: true 
+    },
+    
     pincodes: { type: [String], default: [] },
     approved: { type: Boolean, default: true, index: true },
     passwordResetOTP: String,
     passwordResetOTPExpire: Date,
+    
     pickupAddress: {
         street: String,
         village: String,
@@ -220,9 +231,8 @@ const userSchema = new mongoose.Schema({
         isSet: { type: Boolean, default: false }
     },
     
-    // ======== ✨ NEW PAYOUT DETAILS FIELD ✨ ========
-  payoutDetails: {
-        // ... (existing fields)
+    // ======== ✨ EXISTING PAYOUT DETAILS ✨ ========
+    payoutDetails: {
         razorpayContactId: { type: String, default: null }, 
         razorpayFundAccountId: { type: String, default: null, index: true }, 
         accountType: { type: String, enum: ['bank', 'vpa', null], default: null },
@@ -230,15 +240,81 @@ const userSchema = new mongoose.Schema({
         ifsc: { type: String, default: null },
         vpa: { type: String, default: null } 
     },
-    // ===============================================
+    
+    // ======== 🚖 NEW DRIVER / RIDE BOOKING FIELDS 🚖 ========
+    vehicleType: { 
+        type: String, 
+        enum: ['Bike', 'Auto', 'Car', 'Tempo', 'E-Rickshaw'],
+        default: null 
+        
+    },
+    
+    walletBalance: { type: Number, default: 0 }, // Driver's wallet (can go negative)
+    isLocked: { type: Boolean, default: false }, // Locks driver if balance < 50
+    isOnline: { type: Boolean, default: false }, // Driver on/off duty status
+    
+    // GeoJSON for finding nearest driver
+    location: {
+        type: { type: String, default: 'Point' },
+        coordinates: { type: [Number], default: [0, 0] } // [longitude, latitude]
+    },
+    // ========================================================
 
-    // ✅ NEW: Track last active time for auto-deletion logic
+    // ✅ Track last active time for auto-deletion logic
     lastActiveAt: { type: Date, default: Date.now, index: true },
 
     fcmToken: { type: String, default: null }
 }, { timestamps: true });
 
+// ✅ IMPORTANT: Create Index for Geospatial Queries (Finding nearest driver)
+userSchema.index({ location: '2dsphere' });
+
 const User = mongoose.model('User', userSchema);
+
+
+
+
+// 1. Vehicle Rates (Hardcoded in logic, but schema needed for future)
+const vehicleTypeSchema = new mongoose.Schema({
+    name: { type: String, required: true },
+    baseFare: Number,
+    perKmRate: Number
+});
+
+// 2. Ride Schema
+const rideSchema = new mongoose.Schema({
+    customer: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    driver: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    vehicleType: { type: String, required: true },
+    pickupLocation: { address: String, coordinates: [Number] },
+    dropLocation: { address: String, coordinates: [Number] },
+    distanceKm: Number,
+    estimatedFare: Number,
+    finalFare: Number,
+    commissionAmount: Number,
+    otp: String,
+    status: { 
+        type: String, 
+        enum: ['Requested', 'Accepted', 'InProgress', 'Completed', 'Cancelled'], 
+        default: 'Requested' 
+    },
+    paymentStatus: { type: String, default: 'Pending' }
+}, { timestamps: true });
+
+// 3. Wallet Transaction Schema
+const walletTransactionSchema = new mongoose.Schema({
+    driver: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    rideId: { type: mongoose.Schema.Types.ObjectId, ref: 'Ride' },
+    type: { type: String, enum: ['Credit', 'Debit'], required: true },
+    amount: Number,
+    balanceBefore: Number,
+    balanceAfter: Number,
+    description: String
+}, { timestamps: true });
+
+// ✅ SAHI CODE (Isse replace karein)
+const Ride = mongoose.model('Ride', rideSchema);
+const WalletTransaction = mongoose.model('WalletTransaction', walletTransactionSchema);
 
 
 
@@ -350,6 +426,8 @@ const subcategorySchema = new mongoose.Schema({
   }
 }, { timestamps: true });
 const Subcategory = mongoose.model('Subcategory', subcategorySchema);
+
+
 
 const productSchema = new mongoose.Schema({
   name: String,
@@ -6439,6 +6517,261 @@ app.delete('/api/services/:id', protect, authorizeRole('provider', 'admin'), asy
     }
 });
 
+// --------------------------------------------------------------------------------
+// --------- 🚖 RIDE BOOKING & WALLET ROUTES (NEW) 🚖 ----------
+// --------------------------------------------------------------------------------
+
+// Constants
+const MIN_DRIVER_BALANCE = 50;
+const COMMISSION_PERCENTAGE = 10; // 10% Platform fee
+
+// 1. Update Driver Location & Status (Online/Offline)
+app.put('/api/ride/driver/status', protect, async (req, res) => {
+    try {
+        const { isOnline, latitude, longitude } = req.body;
+        const user = req.user;
+
+        if (user.role !== 'driver') return res.status(403).json({ message: 'Only drivers can update status' });
+
+        // Check lock status before allowing online
+        if (isOnline && user.isLocked) {
+            return res.status(400).json({ message: 'Wallet balance low. Please recharge to go online.' });
+        }
+
+        user.isOnline = isOnline;
+        if (latitude && longitude) {
+            user.location = { type: 'Point', coordinates: [longitude, latitude] };
+        }
+        await user.save();
+        res.json({ message: 'Driver status updated', isOnline: user.isOnline, isLocked: user.isLocked });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 2. Request a Ride (Customer)
+app.post('/api/ride/request', protect, async (req, res) => {
+    try {
+        const { pickupAddress, pickupCoordinates, dropAddress, dropCoordinates, vehicleType, distanceKm } = req.body;
+
+        // 1. Calculate Fare
+        // (For simplicity, using static rates. Ideally fetch from VehicleType model)
+        const rates = { 'Bike': 10, 'Auto': 15, 'Car': 25, 'Tempo': 30, 'E-Rickshaw': 12 };
+        const ratePerKm = rates[vehicleType] || 15;
+        const baseFare = 20;
+        let estimatedFare = Math.round(baseFare + (distanceKm * ratePerKm));
+
+        // 2. Create Ride
+        const newRide = await Ride.create({
+            customer: req.user._id,
+            vehicleType,
+            pickupLocation: { address: pickupAddress, coordinates: pickupCoordinates },
+            dropLocation: { address: dropAddress, coordinates: dropCoordinates },
+            distanceKm,
+            estimatedFare,
+            otp: Math.floor(1000 + Math.random() * 9000).toString(),
+            status: 'Requested'
+        });
+
+        // 3. Find Nearby Drivers (Online + Not Locked + Matches Vehicle)
+        const nearbyDrivers = await User.find({
+            role: 'driver',
+            vehicleType: vehicleType,
+            isOnline: true,
+            isLocked: false, // CRITICAL: Only unlocked drivers
+            location: {
+                $near: {
+                    $geometry: { type: "Point", coordinates: pickupCoordinates },
+                    $maxDistance: 5000 // 5km Radius
+                }
+            }
+        }).select('fcmToken phone name');
+
+        // 4. Send Notification to Drivers
+        const driverTokens = nearbyDrivers.map(d => d.fcmToken).filter(Boolean);
+        if (driverTokens.length > 0) {
+            await sendPushNotification(
+                driverTokens,
+                'New Ride Request 🚖',
+                `New ${distanceKm}km ride request nearby! Earn ₹${estimatedFare}.`,
+                { rideId: newRide._id.toString(), type: 'NEW_RIDE' }
+            );
+        }
+
+        res.status(201).json({ message: 'Ride requested', rideId: newRide._id, driversFound: nearbyDrivers.length });
+
+    } catch (err) {
+        console.error('Ride Request Error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 3. Accept Ride (Driver)
+app.post('/api/ride/accept', protect, async (req, res) => {
+    try {
+        const { rideId } = req.body;
+        const driver = req.user;
+
+        // Security Check
+        if (driver.isLocked || driver.walletBalance < MIN_DRIVER_BALANCE) {
+            return res.status(403).json({ message: 'Wallet Low. Please recharge (Min ₹50) to accept rides.' });
+        }
+
+        const ride = await Ride.findById(rideId);
+        if (!ride || ride.status !== 'Requested') {
+            return res.status(400).json({ message: 'Ride already accepted or cancelled.' });
+        }
+
+        ride.driver = driver._id;
+        ride.status = 'Accepted';
+        await ride.save();
+
+        // Notify Customer
+        const customer = await User.findById(ride.customer).select('fcmToken phone');
+        if (customer && customer.fcmToken) {
+            await sendPushNotification(
+                customer.fcmToken,
+                'Ride Accepted ✅',
+                `${driver.name} is on the way! OTP: ${ride.otp}`,
+                { rideId: ride._id.toString(), type: 'RIDE_ACCEPTED' }
+            );
+        }
+
+        res.json({ message: 'Ride Accepted', ride });
+
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 4. Start Ride (Verify OTP)
+app.post('/api/ride/start', protect, async (req, res) => {
+    try {
+        const { rideId, otp } = req.body;
+        const ride = await Ride.findById(rideId);
+
+        if (ride.driver.toString() !== req.user._id.toString()) return res.status(403).json({message: 'Unauthorized'});
+        if (ride.otp !== otp) return res.status(400).json({ message: 'Invalid OTP' });
+
+        ride.status = 'InProgress';
+        await ride.save();
+
+        res.json({ message: 'Ride Started' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 5. Complete Ride & Deduct Commission (CORE LOGIC)
+app.post('/api/ride/complete', protect, async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+        const { rideId } = req.body;
+        const ride = await Ride.findById(rideId).session(session);
+
+        if (!ride || ride.status !== 'InProgress') {
+            await session.abortTransaction();
+            return res.status(400).json({ message: 'Invalid Ride Status' });
+        }
+
+        // Calculate Stats
+        const finalFare = ride.estimatedFare; // In real app, re-calculate based on actual time/dist
+        const commission = Math.round((finalFare * COMMISSION_PERCENTAGE) / 100);
+        
+        ride.status = 'Completed';
+        ride.finalFare = finalFare;
+        ride.commissionAmount = commission;
+        ride.paymentStatus = 'Completed'; // Assuming Cash collected
+        await ride.save({ session });
+
+        // --- WALLET DEDUCTION ---
+        const driver = await User.findById(req.user._id).session(session);
+        const balanceBefore = driver.walletBalance;
+        
+        driver.walletBalance -= commission; // Deduct commission
+        
+        // CHECK LOCK CONDITION
+        let lockMessage = '';
+        if (driver.walletBalance < MIN_DRIVER_BALANCE) {
+            driver.isLocked = true;
+            driver.isOnline = false; // Force offline
+            lockMessage = ' ALERT: Wallet low. You are now locked from receiving new rides.';
+        }
+
+        await driver.save({ session });
+
+        // Log Transaction
+        await WalletTransaction.create([{
+            driver: driver._id,
+            rideId: ride._id,
+            type: 'Debit',
+            amount: commission,
+            balanceBefore: balanceBefore,
+            balanceAfter: driver.walletBalance,
+            description: `Commission for Ride #${ride._id.toString().slice(-4)}`
+        }], { session });
+
+        await session.commitTransaction();
+
+        res.json({ 
+            message: `Ride Completed. Commission ₹${commission} deducted.${lockMessage}`, 
+            walletBalance: driver.walletBalance, 
+            isLocked: driver.isLocked 
+        });
+
+    } catch (err) {
+        await session.abortTransaction();
+        console.error(err);
+        res.status(500).json({ error: err.message });
+    } finally {
+        session.endSession();
+    }
+});
+
+// 6. Add Money to Wallet (Simulated for Demo)
+app.post('/api/wallet/add', protect, async (req, res) => {
+    try {
+        const { amount } = req.body; // In real app, verify Razorpay/Payment ID here
+        const user = req.user;
+
+        if (user.role !== 'driver') return res.status(403).json({ message: 'Only drivers have wallets' });
+
+        const balanceBefore = user.walletBalance;
+        user.walletBalance += parseFloat(amount);
+
+        // UNLOCK if balance is sufficient
+        if (user.walletBalance >= MIN_DRIVER_BALANCE) {
+            user.isLocked = false;
+        }
+
+        await user.save();
+
+        await WalletTransaction.create({
+            driver: user._id,
+            type: 'Credit',
+            amount: amount,
+            balanceBefore,
+            balanceAfter: user.walletBalance,
+            description: 'Wallet Recharge'
+        });
+
+        res.json({ message: 'Wallet recharged successfully', newBalance: user.walletBalance, isLocked: user.isLocked });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 7. Get Wallet History
+app.get('/api/wallet/history', protect, async (req, res) => {
+    try {
+        const history = await WalletTransaction.find({ driver: req.user._id }).sort({ createdAt: -1 });
+        res.json({ balance: req.user.walletBalance, isLocked: req.user.isLocked, history });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
 
 
 const IP = '0.0.0.0';
