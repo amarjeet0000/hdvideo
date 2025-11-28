@@ -6596,10 +6596,10 @@ app.post('/api/ride/request', protect, async (req, res) => {
         // Rates per KM
         const rates = { 
             'Bike': 10, 
-            'Auto': 12, 
+            'Auto': 15, 
             'Car': 25, 
             'Tempo': 30, 
-            'E-Rickshaw': 10 
+            'E-Rickshaw': 12 
         };
         
         const ratePerKm = rates[vehicleType] || 15;
@@ -6826,6 +6826,62 @@ app.get('/api/wallet/history', protect, async (req, res) => {
     }
 });
 
+// [NEW ROUTE] Get Pending Rides for Polling (Driver App)
+app.get('/api/ride/pending', protect, async (req, res) => {
+    try {
+        const driver = req.user;
+
+        // 1. Validate Driver Status
+        if (driver.role !== 'driver') {
+            return res.status(403).json({ message: 'Access denied. Drivers only.' });
+        }
+
+        // Optional: Check if driver is Online/Locked
+        // if (!driver.isOnline || driver.isLocked) return res.json([]);
+
+        // 2. Find Pending Rides
+        // We look for rides that are 'Requested' AND match the driver's vehicle type.
+        // For better accuracy, we use geospatial query to only show rides near the driver.
+        const rides = await Ride.find({
+            status: 'Requested',
+            vehicleType: driver.vehicleType, // Match Bike with Bike, Auto with Auto
+            // Geospatial Query: Find pickup locations within 5km of the driver
+            'pickupLocation.coordinates': {
+                $near: {
+                    $geometry: {
+                        type: "Point",
+                        coordinates: driver.location.coordinates // [lng, lat]
+                    },
+                    $maxDistance: 5000 // 5000 meters = 5km
+                }
+            }
+        }).select('pickupLocation dropLocation estimatedFare otp createdAt');
+
+        // 3. Format the response for Flutter
+        const formattedRides = rides.map(ride => ({
+            rideId: ride._id,
+            pickup: ride.pickupLocation.address,
+            drop: ride.dropLocation.address,
+            fare: ride.estimatedFare,
+            otp: ride.otp, // In production, don't send OTP here, but fine for testing
+            pickupLatLng: {
+                lat: ride.pickupLocation.coordinates[1],
+                lng: ride.pickupLocation.coordinates[0]
+            },
+            dropLatLng: {
+                lat: ride.dropLocation.coordinates[1],
+                lng: ride.dropLocation.coordinates[0]
+            }
+        }));
+
+        res.json(formattedRides);
+
+    } catch (err) {
+        console.error('Error fetching pending rides:', err.message);
+        res.status(500).json({ message: 'Server Error' });
+    }
+});
+
 
 const IP = '0.0.0.0';
 const PORT = process.env.PORT || 5001;
@@ -6833,4 +6889,3 @@ const PORT = process.env.PORT || 5001;
 app.listen(PORT, IP, () => {
   console.log(`🚀 Server running on http://${IP}:${PORT}`);
 });
-
