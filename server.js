@@ -6989,34 +6989,32 @@ app.get('/api/ride/nearby-count', async (req, res) => {
 // --------------------------------------------------------------------
 
 // 1. Create Razorpay Order for Wallet Recharge
+// --------------------------------------------------------------------
+// 💰 WALLET RECHARGE WITH RAZORPAY (Real Payment)
+// --------------------------------------------------------------------
+
+// 1. Create Razorpay Order
 app.post('/api/wallet/create-order', protect, async (req, res) => {
     try {
         const { amount } = req.body;
-        
-        if (!amount || amount < 1) {
-            return res.status(400).json({ message: 'Invalid amount' });
-        }
+        if (!amount || amount < 1) return res.status(400).json({ message: 'Invalid amount' });
 
         const options = {
             amount: Math.round(amount * 100), // Amount in paise
             currency: "INR",
             receipt: `wlt_${crypto.randomBytes(4).toString('hex')}`,
-            notes: {
-                userId: req.user._id.toString(),
-                type: 'wallet_recharge'
-            }
+            notes: { userId: req.user._id.toString(), type: 'wallet_recharge' }
         };
 
         const order = await razorpay.orders.create(options);
         res.json(order);
-
     } catch (err) {
         console.error("Razorpay Order Error:", err);
         res.status(500).json({ message: 'Error creating payment order' });
     }
 });
 
-// 2. Verify Payment & Update Wallet Balance
+// 2. Verify Payment & Credit Wallet
 app.post('/api/wallet/verify-recharge', protect, async (req, res) => {
     try {
         const { razorpay_order_id, razorpay_payment_id, razorpay_signature, amount } = req.body;
@@ -7031,16 +7029,12 @@ app.post('/api/wallet/verify-recharge', protect, async (req, res) => {
             return res.status(400).json({ message: 'Transaction verification failed' });
         }
 
-        // --- SUCCESS: Update Wallet ---
-        const balanceBefore = user.walletBalance;
+        // ✅ Update Wallet
         const rechargeAmount = parseFloat(amount);
-        
+        const balanceBefore = user.walletBalance;
         user.walletBalance += rechargeAmount;
 
-        // Unlock driver if balance is sufficient
-        if (user.walletBalance >= MIN_DRIVER_BALANCE) {
-            user.isLocked = false;
-        }
+        if (user.walletBalance >= MIN_DRIVER_BALANCE) user.isLocked = false;
 
         await user.save();
 
@@ -7049,20 +7043,15 @@ app.post('/api/wallet/verify-recharge', protect, async (req, res) => {
             driver: user._id,
             type: 'Credit',
             amount: rechargeAmount,
-            balanceBefore: balanceBefore,
+            balanceBefore,
             balanceAfter: user.walletBalance,
             description: `Wallet Recharge (Txn: ${razorpay_payment_id})`
         });
 
-        res.json({ 
-            message: 'Wallet recharged successfully!', 
-            newBalance: user.walletBalance,
-            isLocked: user.isLocked
-        });
-
+        res.json({ message: 'Wallet recharged successfully!', newBalance: user.walletBalance });
     } catch (err) {
-        console.error("Wallet Verify Error:", err);
-        res.status(500).json({ message: 'Server error during verification' });
+        console.error("Verify Error:", err);
+        res.status(500).json({ message: 'Verification failed' });
     }
 });
 
