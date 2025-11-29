@@ -2605,27 +2605,34 @@ app.get('/api/orders', protect, async (req, res) => {
 
 // ✅ UPDATED ROUTE: Get Details for E-commerce Order OR Ride Request
 // ✅ KEEP THIS BLOCK (यह सही कोड है, इसे रखें)
+// ✅ UPDATED ROUTE: Get Details for E-commerce Order OR Ride Request
 app.get('/api/orders/:id', protect, async (req, res) => {
   try {
     const id = req.params.id;
     const userId = req.user._id.toString();
 
+    // ---------------------------------------------------------
     // 1. Check if this is a RIDE (For Village Ride Polling)
-    const ride = await Ride.findById(id).populate('driver', 'name phone vehicleType');
+    // ---------------------------------------------------------
+    // ✅ FIXED: Added 'location' to populate so Rider can track Driver
+    const ride = await Ride.findById(id).populate('driver', 'name phone vehicleType location');
     
     if (ride) {
+      // Security Check: Only allow the Customer, the Assigned Driver, or Admin to see details
       const isCustomer = ride.customer.toString() === userId;
-      const isDriver = ride.driver && ride.driver.toString() === userId;
+      const isDriver = ride.driver && ride.driver._id.toString() === userId; // Safely check _id
       const isAdmin = req.user.role === 'admin';
 
       if (isCustomer || isDriver || isAdmin) {
-        return res.json(ride);
+        return res.json(ride); // Return Ride Data (contains status, otp, driver location)
       } else {
         return res.status(403).json({ message: 'Access denied to this ride.' });
       }
     }
 
+    // ---------------------------------------------------------
     // 2. If not a Ride, check if it is an E-COMMERCE ORDER
+    // ---------------------------------------------------------
     const order = await Order.findOne({ _id: id, user: userId })
       .populate({
         path: 'orderItems.product',
@@ -2634,9 +2641,12 @@ app.get('/api/orders/:id', protect, async (req, res) => {
       .populate('seller', 'name email');
 
     if (order) {
-      return res.json(order);
+      return res.json(order); // Return Order Data
     }
 
+    // ---------------------------------------------------------
+    // 3. Not found in either collection
+    // ---------------------------------------------------------
     return res.status(404).json({ message: 'Order or Ride not found' });
 
   } catch (err) {
@@ -6575,25 +6585,44 @@ const MIN_DRIVER_BALANCE = 00;
 const COMMISSION_PERCENTAGE = 10; // 10% Platform fee
 
 // 1. Update Driver Location & Status (Online/Offline)
+// 1. Update Driver Location & Status (Online/Offline)
 app.put('/api/ride/driver/status', protect, async (req, res) => {
     try {
         const { isOnline, latitude, longitude } = req.body;
         const user = req.user;
 
-        if (user.role !== 'driver') return res.status(403).json({ message: 'Only drivers can update status' });
+        // सिर्फ ड्राइवर ही अपना स्टेटस अपडेट कर सकता है
+        if (user.role !== 'driver') {
+            return res.status(403).json({ message: 'Only drivers can update status' });
+        }
 
-        // Check lock status before allowing online
+        // अगर वॉलेट लॉक है, तो ऑनलाइन जाने से रोकें (Allow offline updates though)
         if (isOnline && user.isLocked) {
             return res.status(400).json({ message: 'Wallet balance low. Please recharge to go online.' });
         }
 
+        // ऑनलाइन/ऑफलाइन स्टेटस अपडेट करें
         user.isOnline = isOnline;
-        if (latitude && longitude) {
-            user.location = { type: 'Point', coordinates: [longitude, latitude] };
+
+        // अगर लोकेशन भेजी गई है, तो उसे अपडेट करें
+        // Note: MongoDB में coordinates [Longitude, Latitude] के क्रम में होते हैं
+        if (latitude !== undefined && longitude !== undefined) {
+            user.location = { 
+                type: 'Point', 
+                coordinates: [parseFloat(longitude), parseFloat(latitude)] 
+            };
         }
+
         await user.save();
-        res.json({ message: 'Driver status updated', isOnline: user.isOnline, isLocked: user.isLocked });
+
+        res.json({ 
+            message: 'Driver status updated', 
+            isOnline: user.isOnline, 
+            isLocked: user.isLocked 
+        });
+
     } catch (err) {
+        console.error('Driver status update error:', err.message);
         res.status(500).json({ error: err.message });
     }
 });
@@ -6919,6 +6948,121 @@ app.get('/api/ride/pending', protect, async (req, res) => {
     } catch (err) {
         console.error('❌ Polling Error:', err.message);
         res.status(500).json({ message: 'Server Error' });
+    }
+});
+
+app.post('/api/ride/decline', protect, async (req, res) => {
+    try {
+        // अभी के लिए बस success भेज रहे हैं
+        // (Future में आप यहाँ next driver logic लगा सकते हैं)
+        res.json({ message: 'Ride declined' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/ride/nearby-count', async (req, res) => {
+    try {
+        const { lat, lng } = req.query;
+        if (!lat || !lng) return res.json({ count: 0 });
+
+        const drivers = await User.find({
+            role: 'driver',
+            isOnline: true,
+            isLocked: false,
+            location: {
+                $near: {
+                    $geometry: { type: "Point", coordinates: [parseFloat(lng), parseFloat(lat)] },
+                    $maxDistance: 5000 // 5km Radius
+                }
+            }
+        });
+        res.json({ count: drivers.length });
+    } catch (err) {
+        console.error(err);
+        res.json({ count: 0 });
+    }
+});
+
+// --------------------------------------------------------------------
+// 💰 WALLET RECHARGE WITH RAZORPAY (Real Payment)
+// --------------------------------------------------------------------
+
+// 1. Create Razorpay Order for Wallet Recharge
+app.post('/api/wallet/create-order', protect, async (req, res) => {
+    try {
+        const { amount } = req.body;
+        
+        if (!amount || amount < 1) {
+            return res.status(400).json({ message: 'Invalid amount' });
+        }
+
+        const options = {
+            amount: Math.round(amount * 100), // Amount in paise
+            currency: "INR",
+            receipt: `wlt_${crypto.randomBytes(4).toString('hex')}`,
+            notes: {
+                userId: req.user._id.toString(),
+                type: 'wallet_recharge'
+            }
+        };
+
+        const order = await razorpay.orders.create(options);
+        res.json(order);
+
+    } catch (err) {
+        console.error("Razorpay Order Error:", err);
+        res.status(500).json({ message: 'Error creating payment order' });
+    }
+});
+
+// 2. Verify Payment & Update Wallet Balance
+app.post('/api/wallet/verify-recharge', protect, async (req, res) => {
+    try {
+        const { razorpay_order_id, razorpay_payment_id, razorpay_signature, amount } = req.body;
+        const user = req.user;
+
+        // Verify Signature
+        const shasum = crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET);
+        shasum.update(`${razorpay_order_id}|${razorpay_payment_id}`);
+        const digest = shasum.digest('hex');
+
+        if (digest !== razorpay_signature) {
+            return res.status(400).json({ message: 'Transaction verification failed' });
+        }
+
+        // --- SUCCESS: Update Wallet ---
+        const balanceBefore = user.walletBalance;
+        const rechargeAmount = parseFloat(amount);
+        
+        user.walletBalance += rechargeAmount;
+
+        // Unlock driver if balance is sufficient
+        if (user.walletBalance >= MIN_DRIVER_BALANCE) {
+            user.isLocked = false;
+        }
+
+        await user.save();
+
+        // Log Transaction
+        await WalletTransaction.create({
+            driver: user._id,
+            type: 'Credit',
+            amount: rechargeAmount,
+            balanceBefore: balanceBefore,
+            balanceAfter: user.walletBalance,
+            description: `Wallet Recharge (Txn: ${razorpay_payment_id})`
+        });
+
+        res.json({ 
+            message: 'Wallet recharged successfully!', 
+            newBalance: user.walletBalance,
+            isLocked: user.isLocked
+        });
+
+    } catch (err) {
+        console.error("Wallet Verify Error:", err);
+        res.status(500).json({ message: 'Server error during verification' });
     }
 });
 
