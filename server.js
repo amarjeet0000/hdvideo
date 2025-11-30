@@ -281,7 +281,7 @@ const vehicleTypeSchema = new mongoose.Schema({
     perKmRate: Number
 });
 
-// 2. Ride Schema
+
 // 2. Ride Schema
 const rideSchema = new mongoose.Schema({
     customer: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
@@ -311,13 +311,20 @@ const rideSchema = new mongoose.Schema({
     paymentStatus: { type: String, default: 'Pending' },
 
     // ✅ NEW: Fields for "Nearest Driver First" Logic
-    potentialDrivers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }], // नजदीकी ड्राइवरों की लिस्ट
-    currentDriverIndex: { type: Number, default: 0 }, // अभी किस ड्राइवर को रिक्वेस्ट दिख रही है
-    rejectedDrivers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }], // जिन ड्राइवरों ने मना कर दिया
+    // यह लिस्ट उन सभी ड्राइवरों की है जो राइड के लिए उपलब्ध हैं (दूरी के अनुसार सॉर्ट की गई)
+    potentialDrivers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }], 
+    
+    // यह ट्रैक करता है कि लिस्ट में से किस नंबर के ड्राइवर को अभी रिक्वेस्ट भेजी जा रही है
+    currentDriverIndex: { type: Number, default: 0 }, 
+    
+    // जिन ड्राइवरों ने राइड डिक्लाइन (Decline) कर दी, उनकी लिस्ट
+    rejectedDrivers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }], 
 
-    requestTime: { type: Date, default: Date.now } // रिक्वेस्ट का समय (Timeout के लिए)
+    requestTime: { type: Date, default: Date.now } // रिक्वेस्ट का समय (Timeout कैलकुलेशन के लिए)
 
 }, { timestamps: true });
+
+
 
 // 3. Wallet Transaction Schema
 const walletTransactionSchema = new mongoose.Schema({
@@ -6888,8 +6895,6 @@ app.get('/api/wallet/history', protect, async (req, res) => {
     }
 });
 
-// [NEW ROUTE] Get Pending Rides for Polling (Driver App)
-// [NEW ROUTE] - Driver Polling Route (Fix for Popup Issue)
 // [UPDATED] Driver Polling Route (Sequential Dispatch - Nearest First)
 app.get('/api/ride/pending', protect, async (req, res) => {
     try {
@@ -6901,7 +6906,7 @@ app.get('/api/ride/pending', protect, async (req, res) => {
             vehicleType: req.user.vehicleType
         }).sort({ createdAt: -1 });
 
-        // ✅ 2. FILTER: Show ride ONLY if it's this driver's turn
+        // ✅ 2. FILTER: Show ride ONLY if it's THIS driver's turn
         // (Check potentialDrivers array at currentDriverIndex)
         const myRide = rides.find(ride => {
             if (!ride.potentialDrivers || ride.potentialDrivers.length === 0) return false;
@@ -6940,9 +6945,9 @@ app.get('/api/ride/pending', protect, async (req, res) => {
         res.status(500).json({ message: 'Server Error' });
     }
 });
-
 // 3. Decline Ride (Pass to Next Driver)
 // 3. Decline Ride (Shift to Next Driver)
+// 3. Decline Ride (With Loop / Cycle Logic)
 app.post('/api/ride/decline', protect, async (req, res) => {
     try {
         const { rideId } = req.body;
@@ -6951,39 +6956,41 @@ app.post('/api/ride/decline', protect, async (req, res) => {
         const ride = await Ride.findById(rideId);
         if (!ride) return res.status(404).json({ message: 'Ride not found' });
 
-        // Add to rejected list
+        // 1. Add to rejected list (ताकि हमें पता रहे किसने मना किया)
         if (!ride.rejectedDrivers.includes(driverId)) {
             ride.rejectedDrivers.push(driverId);
         }
 
-        // ✅ Move to Next Driver
+        // ✅ 2. Move to Next Driver
         ride.currentDriverIndex += 1;
 
-        // Check if next driver exists
-        if (ride.potentialDrivers && ride.currentDriverIndex < ride.potentialDrivers.length) {
-            await ride.save();
-            
-            // Notify Next Driver
-            const nextDriverId = ride.potentialDrivers[ride.currentDriverIndex];
-            const nextDriver = await User.findById(nextDriverId);
-            
-            if (nextDriver && nextDriver.fcmToken) {
-                await sendPushNotification(
-                    [nextDriver.fcmToken],
-                    'New Ride Request 🚖',
-                    `Ride Available! Earn ₹${ride.estimatedFare}`,
-                    { rideId: ride._id.toString(), type: 'NEW_RIDE' }
-                );
-            }
-            res.json({ message: 'Passed to next driver' });
-
-        } else {
-            ride.status = 'Cancelled'; // No more drivers
-            await ride.save();
-            res.json({ message: 'No more drivers available' });
+        // 🔄 3. LOOP LOGIC: अगर लिस्ट खत्म हो गई, तो वापस पहले ड्राइवर (0) पर जाएं
+        if (ride.currentDriverIndex >= ride.potentialDrivers.length) {
+            console.log(`♻️ All drivers declined. Looping back to first driver for Ride #${ride._id}`);
+            ride.currentDriverIndex = 0; // Reset Index
+            ride.rejectedDrivers = [];   // Clear rejection history for new round
         }
 
+        await ride.save();
+
+        // ✅ 4. Notify the Driver at current index (Next or First)
+        const nextDriverId = ride.potentialDrivers[ride.currentDriverIndex];
+        const nextDriver = await User.findById(nextDriverId).select('fcmToken name');
+
+        if (nextDriver && nextDriver.fcmToken) {
+            console.log(`🔀 Shifting ride to: ${nextDriver.name}`);
+            await sendPushNotification(
+                [nextDriver.fcmToken],
+                'New Ride Request 🚖',
+                `Ride Available! Earn ₹${ride.estimatedFare}`,
+                { rideId: ride._id.toString(), type: 'NEW_RIDE' }
+            );
+        }
+
+        res.json({ message: 'Ride passed to next driver (Loop active)' });
+
     } catch (err) {
+        console.error('Decline Error:', err.message);
         res.status(500).json({ error: err.message });
     }
 });
