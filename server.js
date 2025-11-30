@@ -6662,55 +6662,37 @@ function deg2rad(deg) {
   return deg * (Math.PI / 180);
 }
 
-// 2. Request a Ride (Customer)
-// 2. Request a Ride (Customer) - AUTO CALCULATION UPDATE
-// 2. Request a Ride (Updated: Sequential Dispatch - Nearest First)
+// 2. Request a Ride (Sequential Dispatch Logic)
 app.post('/api/ride/request', protect, async (req, res) => {
     try {
         const { pickupAddress, pickupCoordinates, dropAddress, dropCoordinates, vehicleType } = req.body;
 
-        // Validation check
-        if (!pickupCoordinates || pickupCoordinates.length !== 2 || !dropCoordinates || dropCoordinates.length !== 2) {
-            return res.status(400).json({ message: 'Valid Pickup and Drop coordinates are required.' });
-        }
-
-        // --- 1. Distance Calculation ---
-        const lat1 = pickupCoordinates[1];
-        const lon1 = pickupCoordinates[0];
-        const lat2 = dropCoordinates[1];
-        const lon2 = dropCoordinates[0];
-
+        // Calculate Distance & Fare
+        const lat1 = pickupCoordinates[1]; const lon1 = pickupCoordinates[0];
+        const lat2 = dropCoordinates[1]; const lon2 = dropCoordinates[0];
         let rawDistance = getDistanceFromLatLonInKm(lat1, lon1, lat2, lon2);
-        const distanceKm = parseFloat((rawDistance * 1.3).toFixed(1)); // 30% buffer for road curves
+        const distanceKm = parseFloat((rawDistance * 1.3).toFixed(1));
+        
+        const rates = { 'Bike': 10, 'Auto': 15, 'Car': 25, 'E-Rickshaw': 12 };
+        let estimatedFare = Math.round(20 + (distanceKm * (rates[vehicleType] || 15)));
 
-        // --- 2. Calculate Fare ---
-        const rates = { 
-            'Bike': 10, 'Auto': 15, 'Car': 25, 'Tempo': 30, 'E-Rickshaw': 12 
-        };
-        const ratePerKm = rates[vehicleType] || 15;
-        const baseFare = 20;
-        let estimatedFare = Math.round(baseFare + (distanceKm * ratePerKm));
-
-        // --- 3. Find ALL Nearby Drivers (Sorted by Distance) ---
+        // ✅ 1. Find ALL Nearby Drivers
         const nearbyDrivers = await User.find({
             role: 'driver',
             vehicleType: vehicleType,
             isOnline: true,
-            isLocked: false, // Driver must have wallet balance
+            isLocked: false,
             location: {
                 $near: {
                     $geometry: { type: "Point", coordinates: pickupCoordinates },
                     $maxDistance: 5000 // 5km Radius
                 }
             }
-        }).select('_id fcmToken name');
+        });
 
-        // If no drivers found
-        if (nearbyDrivers.length === 0) {
-            return res.status(404).json({ message: 'No drivers available nearby.' });
-        }
+        if (nearbyDrivers.length === 0) return res.status(404).json({ message: 'No drivers nearby' });
 
-        // --- 4. Create Ride with Driver Queue ---
+        // ✅ 2. Create Ride with Driver List (Queue)
         const newRide = await Ride.create({
             customer: req.user._id,
             vehicleType,
@@ -6721,35 +6703,21 @@ app.post('/api/ride/request', protect, async (req, res) => {
             otp: Math.floor(1000 + Math.random() * 9000).toString(),
             status: 'Requested',
             
-            // ✅ Save List of Potential Drivers for Sequential Logic
+            // Store List & Index
             potentialDrivers: nearbyDrivers.map(d => d._id), 
-            currentDriverIndex: 0, // Start with the first (nearest) driver
+            currentDriverIndex: 0, 
             rejectedDrivers: []
         });
 
-        // --- 5. Notify ONLY the FIRST Driver ---
+        // ✅ 3. Notify ONLY the FIRST Driver
         const firstDriver = nearbyDrivers[0];
-        
         if (firstDriver.fcmToken) {
-            console.log(`Sending request to nearest driver: ${firstDriver.name}`);
-            await sendPushNotification(
-                [firstDriver.fcmToken], // Send to only one
-                'New Ride Request 🚖',
-                `Ride: ${distanceKm}km | Earn ₹${estimatedFare}`,
-                { rideId: newRide._id.toString(), type: 'NEW_RIDE' }
-            );
+            await sendPushNotification([firstDriver.fcmToken], 'New Ride Request 🚖', `Earn ₹${estimatedFare}`, { rideId: newRide._id.toString() });
         }
 
-        res.status(201).json({ 
-            message: 'Ride requested. Searching for nearest driver...', 
-            rideId: newRide._id, 
-            distance: distanceKm,
-            fare: estimatedFare,
-            driversQueue: nearbyDrivers.length 
-        });
+        res.status(201).json({ message: 'Ride requested', rideId: newRide._id });
 
     } catch (err) {
-        console.error('Ride Request Error:', err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -6974,35 +6942,32 @@ app.get('/api/ride/pending', protect, async (req, res) => {
 });
 
 // 3. Decline Ride (Pass to Next Driver)
+// 3. Decline Ride (Shift to Next Driver)
 app.post('/api/ride/decline', protect, async (req, res) => {
     try {
         const { rideId } = req.body;
         const driverId = req.user._id;
 
-        // राइड ढूंढें
         const ride = await Ride.findById(rideId);
-        if (!ride) {
-            return res.status(404).json({ message: 'Ride not found' });
-        }
+        if (!ride) return res.status(404).json({ message: 'Ride not found' });
 
-        // 1. इस ड्राइवर को Rejected लिस्ट में डालें
+        // Add to rejected list
         if (!ride.rejectedDrivers.includes(driverId)) {
             ride.rejectedDrivers.push(driverId);
         }
 
-        // 2. अगले ड्राइवर का नंबर लगाएं (Increase Index)
+        // ✅ Move to Next Driver
         ride.currentDriverIndex += 1;
 
-        // 3. चेक करें कि क्या लिस्ट में अगला ड्राइवर है?
+        // Check if next driver exists
         if (ride.potentialDrivers && ride.currentDriverIndex < ride.potentialDrivers.length) {
             await ride.save();
             
-            // --- अगले ड्राइवर को नोटिफिकेशन भेजें ---
+            // Notify Next Driver
             const nextDriverId = ride.potentialDrivers[ride.currentDriverIndex];
-            const nextDriver = await User.findById(nextDriverId).select('fcmToken name');
+            const nextDriver = await User.findById(nextDriverId);
             
             if (nextDriver && nextDriver.fcmToken) {
-                console.log(`Pass ride to next driver: ${nextDriver.name}`);
                 await sendPushNotification(
                     [nextDriver.fcmToken],
                     'New Ride Request 🚖',
@@ -7010,23 +6975,15 @@ app.post('/api/ride/decline', protect, async (req, res) => {
                     { rideId: ride._id.toString(), type: 'NEW_RIDE' }
                 );
             }
-            
-            res.json({ message: 'Ride declined. Passed to next driver.' });
+            res.json({ message: 'Passed to next driver' });
 
         } else {
-            // --- कोई ड्राइवर नहीं बचा ---
-            ride.status = 'Cancelled'; // या 'NoDrivers' स्टेटस सेट करें
+            ride.status = 'Cancelled'; // No more drivers
             await ride.save();
-            
-            // Optional: यूजर को बता सकते हैं कि कोई ड्राइवर नहीं मिला
-            // const customer = await User.findById(ride.customer);
-            // sendWhatsApp(customer.phone, "Sorry, no drivers available nearby.");
-
-            res.json({ message: 'Ride declined. No more drivers available.' });
+            res.json({ message: 'No more drivers available' });
         }
 
     } catch (err) {
-        console.error('Decline Ride Error:', err.message);
         res.status(500).json({ error: err.message });
     }
 });
