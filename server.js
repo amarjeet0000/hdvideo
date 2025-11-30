@@ -282,23 +282,41 @@ const vehicleTypeSchema = new mongoose.Schema({
 });
 
 // 2. Ride Schema
+// 2. Ride Schema
 const rideSchema = new mongoose.Schema({
     customer: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     driver: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     vehicleType: { type: String, required: true },
-    pickupLocation: { address: String, coordinates: [Number] },
-    dropLocation: { address: String, coordinates: [Number] },
+    
+    pickupLocation: { 
+        address: String, 
+        coordinates: [Number] // [Longitude, Latitude]
+    },
+    dropLocation: { 
+        address: String, 
+        coordinates: [Number] // [Longitude, Latitude]
+    },
+    
     distanceKm: Number,
     estimatedFare: Number,
     finalFare: Number,
     commissionAmount: Number,
     otp: String,
+    
     status: { 
         type: String, 
         enum: ['Requested', 'Accepted', 'InProgress', 'Completed', 'Cancelled'], 
         default: 'Requested' 
     },
-    paymentStatus: { type: String, default: 'Pending' }
+    paymentStatus: { type: String, default: 'Pending' },
+
+    // ✅ NEW: Fields for "Nearest Driver First" Logic
+    potentialDrivers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }], // नजदीकी ड्राइवरों की लिस्ट
+    currentDriverIndex: { type: Number, default: 0 }, // अभी किस ड्राइवर को रिक्वेस्ट दिख रही है
+    rejectedDrivers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }], // जिन ड्राइवरों ने मना कर दिया
+
+    requestTime: { type: Date, default: Date.now } // रिक्वेस्ट का समय (Timeout के लिए)
+
 }, { timestamps: true });
 
 // 3. Wallet Transaction Schema
@@ -6646,9 +6664,9 @@ function deg2rad(deg) {
 
 // 2. Request a Ride (Customer)
 // 2. Request a Ride (Customer) - AUTO CALCULATION UPDATE
+// 2. Request a Ride (Updated: Sequential Dispatch - Nearest First)
 app.post('/api/ride/request', protect, async (req, res) => {
     try {
-        // Frontend se ab hum sirf coordinates aur address lenge (distanceKm nahi)
         const { pickupAddress, pickupCoordinates, dropAddress, dropCoordinates, vehicleType } = req.body;
 
         // Validation check
@@ -6656,80 +6674,78 @@ app.post('/api/ride/request', protect, async (req, res) => {
             return res.status(400).json({ message: 'Valid Pickup and Drop coordinates are required.' });
         }
 
-        // --- 1. Automatic Distance Calculation ---
-        // MongoDB stores [Longitude, Latitude], so index 1 is Lat, 0 is Lng
+        // --- 1. Distance Calculation ---
         const lat1 = pickupCoordinates[1];
         const lon1 = pickupCoordinates[0];
         const lat2 = dropCoordinates[1];
         const lon2 = dropCoordinates[0];
 
-        // Calculate air distance
         let rawDistance = getDistanceFromLatLonInKm(lat1, lon1, lat2, lon2);
-
-        // Add 30% buffer because roads are never straight (Road Factor)
-        // e.g., If air distance is 10km, road distance approx 13km
-        const distanceKm = parseFloat((rawDistance * 1.3).toFixed(1));
+        const distanceKm = parseFloat((rawDistance * 1.3).toFixed(1)); // 30% buffer for road curves
 
         // --- 2. Calculate Fare ---
-        // Rates per KM
         const rates = { 
-            'Bike': 10, 
-            'Auto': 15, 
-            'Car': 25, 
-            'Tempo': 30, 
-            'E-Rickshaw': 12 
+            'Bike': 10, 'Auto': 15, 'Car': 25, 'Tempo': 30, 'E-Rickshaw': 12 
         };
-        
         const ratePerKm = rates[vehicleType] || 15;
-        const baseFare = 20; // Min fare to start ride
-        
-        // Final Fare Formula
+        const baseFare = 20;
         let estimatedFare = Math.round(baseFare + (distanceKm * ratePerKm));
 
-        // --- 3. Create Ride in Database ---
-        const newRide = await Ride.create({
-            customer: req.user._id,
-            vehicleType,
-            pickupLocation: { address: pickupAddress, coordinates: pickupCoordinates },
-            dropLocation: { address: dropAddress, coordinates: dropCoordinates },
-            distanceKm: distanceKm,      // Auto Calculated
-            estimatedFare: estimatedFare, // Auto Calculated
-            otp: Math.floor(1000 + Math.random() * 9000).toString(),
-            status: 'Requested'
-        });
-
-        // --- 4. Find Nearby Drivers ---
+        // --- 3. Find ALL Nearby Drivers (Sorted by Distance) ---
         const nearbyDrivers = await User.find({
             role: 'driver',
             vehicleType: vehicleType,
             isOnline: true,
-            isLocked: false,
+            isLocked: false, // Driver must have wallet balance
             location: {
                 $near: {
                     $geometry: { type: "Point", coordinates: pickupCoordinates },
                     $maxDistance: 5000 // 5km Radius
                 }
             }
-        }).select('fcmToken phone name');
+        }).select('_id fcmToken name');
 
-        // --- 5. Notify Drivers ---
-        const driverTokens = nearbyDrivers.map(d => d.fcmToken).filter(Boolean);
-        if (driverTokens.length > 0) {
+        // If no drivers found
+        if (nearbyDrivers.length === 0) {
+            return res.status(404).json({ message: 'No drivers available nearby.' });
+        }
+
+        // --- 4. Create Ride with Driver Queue ---
+        const newRide = await Ride.create({
+            customer: req.user._id,
+            vehicleType,
+            pickupLocation: { address: pickupAddress, coordinates: pickupCoordinates },
+            dropLocation: { address: dropAddress, coordinates: dropCoordinates },
+            distanceKm,
+            estimatedFare,
+            otp: Math.floor(1000 + Math.random() * 9000).toString(),
+            status: 'Requested',
+            
+            // ✅ Save List of Potential Drivers for Sequential Logic
+            potentialDrivers: nearbyDrivers.map(d => d._id), 
+            currentDriverIndex: 0, // Start with the first (nearest) driver
+            rejectedDrivers: []
+        });
+
+        // --- 5. Notify ONLY the FIRST Driver ---
+        const firstDriver = nearbyDrivers[0];
+        
+        if (firstDriver.fcmToken) {
+            console.log(`Sending request to nearest driver: ${firstDriver.name}`);
             await sendPushNotification(
-                driverTokens,
+                [firstDriver.fcmToken], // Send to only one
                 'New Ride Request 🚖',
                 `Ride: ${distanceKm}km | Earn ₹${estimatedFare}`,
                 { rideId: newRide._id.toString(), type: 'NEW_RIDE' }
             );
         }
 
-        // Response me ab hum Calculated Distance aur Fare bhejenge
         res.status(201).json({ 
-            message: 'Ride requested successfully', 
+            message: 'Ride requested. Searching for nearest driver...', 
             rideId: newRide._id, 
             distance: distanceKm,
             fare: estimatedFare,
-            driversFound: nearbyDrivers.length 
+            driversQueue: nearbyDrivers.length 
         });
 
     } catch (err) {
@@ -6906,42 +6922,48 @@ app.get('/api/wallet/history', protect, async (req, res) => {
 
 // [NEW ROUTE] Get Pending Rides for Polling (Driver App)
 // [NEW ROUTE] - Driver Polling Route (Fix for Popup Issue)
+// [UPDATED] Driver Polling Route (Sequential Dispatch - Nearest First)
 app.get('/api/ride/pending', protect, async (req, res) => {
     try {
-        const driver = req.user;
-        
-        // 1. Check if user is a driver
-        if (driver.role !== 'driver') {
-            return res.status(403).json({ message: 'Access denied. Drivers only.' });
-        }
+        const driverId = req.user._id.toString();
 
-        console.log(`🔍 Driver ${driver.name} is looking for rides...`);
-
-        // 2. Find Pending Rides (Simplified Logic for Testing)
-        // Note: We removed the distance check ($near) to ensure it works instantly for testing.
+        // 1. Find rides where status is Requested & matches vehicle type
         const rides = await Ride.find({
             status: 'Requested',
-            vehicleType: driver.vehicleType // Must match (e.g., 'Bike' === 'Bike')
+            vehicleType: req.user.vehicleType
         }).sort({ createdAt: -1 });
 
-        console.log(`✅ Found ${rides.length} pending rides.`);
+        // ✅ 2. FILTER: Show ride ONLY if it's this driver's turn
+        // (Check potentialDrivers array at currentDriverIndex)
+        const myRide = rides.find(ride => {
+            if (!ride.potentialDrivers || ride.potentialDrivers.length === 0) return false;
+            
+            const currentDriverId = ride.potentialDrivers[ride.currentDriverIndex];
+            return currentDriverId && currentDriverId.toString() === driverId;
+        });
 
-        // 3. Format data for Flutter App
-        const formattedRides = rides.map(ride => ({
-            rideId: ride._id,
-            pickup: ride.pickupLocation.address || "Unknown Pickup",
-            drop: ride.dropLocation.address || "Unknown Drop",
-            fare: ride.estimatedFare,
-            otp: ride.otp,
+        if (!myRide) {
+            return res.json([]); // If no ride is assigned to this driver currently
+        }
+
+        console.log(`🚖 Driver ${req.user.name} is seeing ride: ${myRide._id}`);
+
+        // 3. Format Data for Flutter
+        const formattedRides = [{
+            rideId: myRide._id,
+            pickup: myRide.pickupLocation.address || "Unknown Pickup",
+            drop: myRide.dropLocation.address || "Unknown Drop",
+            fare: myRide.estimatedFare,
+            otp: myRide.otp,
             pickupLatLng: {
-                lat: ride.pickupLocation.coordinates[1],
-                lng: ride.pickupLocation.coordinates[0]
+                lat: myRide.pickupLocation.coordinates[1],
+                lng: myRide.pickupLocation.coordinates[0]
             },
             dropLatLng: {
-                lat: ride.dropLocation.coordinates[1],
-                lng: ride.dropLocation.coordinates[0]
+                lat: myRide.dropLocation.coordinates[1],
+                lng: myRide.dropLocation.coordinates[0]
             }
-        }));
+        }];
 
         res.json(formattedRides);
 
@@ -6951,12 +6973,60 @@ app.get('/api/ride/pending', protect, async (req, res) => {
     }
 });
 
+// 3. Decline Ride (Pass to Next Driver)
 app.post('/api/ride/decline', protect, async (req, res) => {
     try {
-        // अभी के लिए बस success भेज रहे हैं
-        // (Future में आप यहाँ next driver logic लगा सकते हैं)
-        res.json({ message: 'Ride declined' });
+        const { rideId } = req.body;
+        const driverId = req.user._id;
+
+        // राइड ढूंढें
+        const ride = await Ride.findById(rideId);
+        if (!ride) {
+            return res.status(404).json({ message: 'Ride not found' });
+        }
+
+        // 1. इस ड्राइवर को Rejected लिस्ट में डालें
+        if (!ride.rejectedDrivers.includes(driverId)) {
+            ride.rejectedDrivers.push(driverId);
+        }
+
+        // 2. अगले ड्राइवर का नंबर लगाएं (Increase Index)
+        ride.currentDriverIndex += 1;
+
+        // 3. चेक करें कि क्या लिस्ट में अगला ड्राइवर है?
+        if (ride.potentialDrivers && ride.currentDriverIndex < ride.potentialDrivers.length) {
+            await ride.save();
+            
+            // --- अगले ड्राइवर को नोटिफिकेशन भेजें ---
+            const nextDriverId = ride.potentialDrivers[ride.currentDriverIndex];
+            const nextDriver = await User.findById(nextDriverId).select('fcmToken name');
+            
+            if (nextDriver && nextDriver.fcmToken) {
+                console.log(`Pass ride to next driver: ${nextDriver.name}`);
+                await sendPushNotification(
+                    [nextDriver.fcmToken],
+                    'New Ride Request 🚖',
+                    `Ride Available! Earn ₹${ride.estimatedFare}`,
+                    { rideId: ride._id.toString(), type: 'NEW_RIDE' }
+                );
+            }
+            
+            res.json({ message: 'Ride declined. Passed to next driver.' });
+
+        } else {
+            // --- कोई ड्राइवर नहीं बचा ---
+            ride.status = 'Cancelled'; // या 'NoDrivers' स्टेटस सेट करें
+            await ride.save();
+            
+            // Optional: यूजर को बता सकते हैं कि कोई ड्राइवर नहीं मिला
+            // const customer = await User.findById(ride.customer);
+            // sendWhatsApp(customer.phone, "Sorry, no drivers available nearby.");
+
+            res.json({ message: 'Ride declined. No more drivers available.' });
+        }
+
     } catch (err) {
+        console.error('Decline Ride Error:', err.message);
         res.status(500).json({ error: err.message });
     }
 });
