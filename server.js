@@ -7089,6 +7089,31 @@ app.post('/api/wallet/verify-recharge', protect, async (req, res) => {
     }
 });
 
+// 4. Cancel Ride by User (Rider)
+app.post('/api/ride/cancel', protect, async (req, res) => {
+    try {
+        const { rideId } = req.body;
+        const ride = await Ride.findById(rideId);
+
+        if (!ride) return res.status(404).json({ message: 'Ride not found' });
+
+        // सिर्फ जिसने बुक की है वही कैंसिल कर सकता है
+        if (ride.customer.toString() !== req.user._id.toString()) {
+            return res.status(403).json({ message: 'Not authorized' });
+        }
+
+        ride.status = 'Cancelled';
+        await ride.save();
+
+        // Optional: Notify Driver if assigned
+        // if (ride.driver) { ... send notification to driver ... }
+
+        res.json({ message: 'Ride cancelled successfully' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 const IP = '0.0.0.0';
 const PORT = process.env.PORT || 5001;
 
