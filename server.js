@@ -6677,6 +6677,8 @@ function deg2rad(deg) {
 }
 
 // 2. Request a Ride (Sequential Dispatch Logic)
+// 2. Request a Ride (Sequential Dispatch Logic)
+// 2. Request a Ride (Sequential Dispatch Logic)
 app.post('/api/ride/request', protect, async (req, res) => {
     try {
         const { pickupAddress, pickupCoordinates, dropAddress, dropCoordinates, vehicleType } = req.body;
@@ -6684,6 +6686,8 @@ app.post('/api/ride/request', protect, async (req, res) => {
         // Calculate Distance & Fare
         const lat1 = pickupCoordinates[1]; const lon1 = pickupCoordinates[0];
         const lat2 = dropCoordinates[1]; const lon2 = dropCoordinates[0];
+        
+        // Ensure you have the helper function 'getDistanceFromLatLonInKm' defined in server.js
         let rawDistance = getDistanceFromLatLonInKm(lat1, lon1, lat2, lon2);
         const distanceKm = parseFloat((rawDistance * 1.3).toFixed(1));
         
@@ -6726,12 +6730,27 @@ app.post('/api/ride/request', protect, async (req, res) => {
         // ✅ 3. Notify ONLY the FIRST Driver
         const firstDriver = nearbyDrivers[0];
         if (firstDriver.fcmToken) {
-            await sendPushNotification([firstDriver.fcmToken], 'New Ride Request 🚖', `Earn ₹${estimatedFare}`, { rideId: newRide._id.toString() });
+            // Updated payload to include 'type' so Flutter app knows to open the Ride Popup
+            await sendPushNotification(
+                [firstDriver.fcmToken], 
+                'New Ride Request 🚖', 
+                `A Rider is within your range! 📍 Earn ₹${estimatedFare}`, 
+                { rideId: newRide._id.toString(), type: 'NEW_RIDE' }
+            );
+        }
+
+        // ✅ 4. START BACKEND TIMER (Crucial Step)
+        // This starts the 30s countdown for the first driver (index 0)
+        if (typeof scheduleRideTimeout === 'function') {
+            scheduleRideTimeout(newRide._id, 0);
+        } else {
+            console.error("❌ Error: scheduleRideTimeout function is missing in server.js");
         }
 
         res.status(201).json({ message: 'Ride requested', rideId: newRide._id });
 
     } catch (err) {
+        console.error("Ride Request Error:", err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -7120,6 +7139,71 @@ app.post('/api/ride/cancel', protect, async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+
+// --- RIDE TIMER SETTINGS ---
+const RIDE_TIMEOUT_SECONDS = 30; // 30 Seconds Timer
+
+// Helper Function: Auto-Move to Next Driver on Timeout
+const scheduleRideTimeout = (rideId, driverIndexAtStart) => {
+    console.log(`⏳ Timer started for Ride ${rideId} (Index: ${driverIndexAtStart}) for ${RIDE_TIMEOUT_SECONDS}s`);
+
+    setTimeout(async () => {
+        try {
+            const ride = await Ride.findById(rideId);
+
+            // 1. Validation: Stop if ride is no longer valid, accepted, or cancelled
+            if (!ride || ride.status !== 'Requested') {
+                console.log(`⏹️ Timer stopped for Ride ${rideId}: Status is ${ride ? ride.status : 'Deleted'}`);
+                return;
+            }
+
+            // 2. Validation: Stop if the driver index changed manually (Driver declined manually)
+            if (ride.currentDriverIndex !== driverIndexAtStart) {
+                console.log(`⏩ Timer skipped: Driver index changed manually for Ride ${rideId}`);
+                return;
+            }
+
+            console.log(`⏰ Timeout reached for Ride ${rideId}. Auto-switching to next driver.`);
+
+            // 3. Logic: Add current driver to rejected list & Increment Index
+            const currentDriverId = ride.potentialDrivers[ride.currentDriverIndex];
+            if (!ride.rejectedDrivers.includes(currentDriverId)) {
+                ride.rejectedDrivers.push(currentDriverId);
+            }
+
+            ride.currentDriverIndex += 1;
+
+            // 4. Logic: Loop back if end of list
+            if (ride.currentDriverIndex >= ride.potentialDrivers.length) {
+                console.log(`♻️ All drivers timed out. Looping back to first driver.`);
+                ride.currentDriverIndex = 0;
+                ride.rejectedDrivers = []; // Optional: Clear rejection to give them another chance
+            }
+
+            await ride.save();
+
+            // 5. Notify the NEW Driver
+            const nextDriverId = ride.potentialDrivers[ride.currentDriverIndex];
+            const nextDriver = await User.findById(nextDriverId).select('fcmToken name');
+
+            if (nextDriver && nextDriver.fcmToken) {
+                console.log(`🔔 Notifying Next Driver (Auto): ${nextDriver.name}`);
+                await sendPushNotification(
+                    [nextDriver.fcmToken],
+                    'New Ride Request 🚖',
+                    `Ride Available! Earn ₹${ride.estimatedFare}`,
+                    { rideId: ride._id.toString(), type: 'NEW_RIDE' }
+                );
+            }
+
+            // 6. RECURSION: Start Timer for the NEW Driver
+            scheduleRideTimeout(rideId, ride.currentDriverIndex);
+
+        } catch (err) {
+            console.error("❌ Error in Ride Timeout Logic:", err.message);
+        }
+    }, RIDE_TIMEOUT_SECONDS * 1000);
+};
 
 const IP = '0.0.0.0';
 const PORT = process.env.PORT || 5001;
