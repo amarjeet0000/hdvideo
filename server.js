@@ -2565,6 +2565,13 @@ app.post('/api/orders', protect, async (req, res) => {
         await sendWhatsApp(req.user.phone, userMessage);
       }
     }
+    // ✅ Change Notification Message
+await sendPushNotification(
+    [firstDriver.fcmToken],
+    'New Ride Request 🚖',
+    `A Rider is within your range! 📍 Earn ₹${estimatedFare}`, // Updated Text
+    { rideId: newRide._id.toString(), type: 'NEW_RIDE' }
+);
     // -------------------------------------------------------------
 
     if (effectivePaymentMethod === 'cod') {
