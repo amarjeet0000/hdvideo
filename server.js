@@ -230,6 +230,8 @@ const userSchema = new mongoose.Schema({
         pincode: String,
         isSet: { type: Boolean, default: false }
     },
+    lockExpiresAt: { type: Date, default: null }, // Kab tak block rahega (48 hours logic)
+    blockReason: { type: String, default: null }, // "Abuse", "Low Balance", "Permanent"
     
     // ======== ✨ EXISTING PAYOUT DETAILS ✨ ========
     payoutDetails: {
@@ -270,6 +272,19 @@ const userSchema = new mongoose.Schema({
 userSchema.index({ location: '2dsphere' });
 
 const User = mongoose.model('User', userSchema);
+
+
+// --- COMPLAINT MODEL (For Village Admin Control) ---
+const complaintSchema = new mongoose.Schema({
+    user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }, // Customer
+    driver: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, // Driver (Optional)
+    ride: { type: mongoose.Schema.Types.ObjectId, ref: 'Ride' }, // Ride Ref
+    reason: { type: String, required: true }, // "Rude behavior", "Late", "Overcharge"
+    status: { type: String, enum: ['Pending', 'Resolved', 'Ignored'], default: 'Pending' },
+    adminNote: String
+}, { timestamps: true });
+
+const Complaint = mongoose.model('Complaint', complaintSchema);
 
 
 
@@ -6618,6 +6633,7 @@ const COMMISSION_PERCENTAGE = 10; // 10% Platform fee
 
 // 1. Update Driver Location & Status (Online/Offline)
 // 1. Update Driver Location & Status (Online/Offline)
+// 1. Update Driver Location & Status (With Auto-Unblock Logic)
 app.put('/api/ride/driver/status', protect, async (req, res) => {
     try {
         const { isOnline, latitude, longitude } = req.body;
@@ -6628,16 +6644,27 @@ app.put('/api/ride/driver/status', protect, async (req, res) => {
             return res.status(403).json({ message: 'Only drivers can update status' });
         }
 
-        // अगर वॉलेट लॉक है, तो ऑनलाइन जाने से रोकें (Allow offline updates though)
-        if (isOnline && user.isLocked) {
-            return res.status(400).json({ message: 'Wallet balance low. Please recharge to go online.' });
+        // ✅ 1. AUTO-UNLOCK LOGIC (Smart Check)
+        // अगर ड्राइवर लॉक्ड है और उसका बैन टाइम खत्म हो चुका है, तो उसे अनब्लॉक करें
+        if (user.isLocked && user.lockExpiresAt && new Date() > user.lockExpiresAt) {
+            user.isLocked = false;
+            user.lockExpiresAt = null;
+            user.blockReason = null;
+            console.log(`🔓 Driver ${user.name} auto-unlocked after ban expiry.`);
         }
 
-        // ऑनलाइन/ऑफलाइन स्टेटस अपडेट करें
+        // ✅ 2. BLOCK CHECK (Prevent Online if still locked)
+        // यह 'Low Balance' या 'Permanent Ban' दोनों को हैंडल करेगा
+        if (isOnline && user.isLocked) {
+            // अगर कोई खास वजह (blockReason) है तो वह दिखाओ, वरना "Low Balance" दिखाओ
+            const msg = user.blockReason || 'Wallet balance low (Min ₹30). Please recharge.';
+            return res.status(400).json({ message: `Access Denied: ${msg}` });
+        }
+
+        // 3. ऑनलाइन/ऑफलाइन स्टेटस अपडेट करें
         user.isOnline = isOnline;
 
-        // अगर लोकेशन भेजी गई है, तो उसे अपडेट करें
-        // Note: MongoDB में coordinates [Longitude, Latitude] के क्रम में होते हैं
+        // 4. अगर लोकेशन भेजी गई है, तो उसे अपडेट करें
         if (latitude !== undefined && longitude !== undefined) {
             user.location = { 
                 type: 'Point', 
@@ -6650,7 +6677,8 @@ app.put('/api/ride/driver/status', protect, async (req, res) => {
         res.json({ 
             message: 'Driver status updated', 
             isOnline: user.isOnline, 
-            isLocked: user.isLocked 
+            isLocked: user.isLocked,
+            walletBalance: user.walletBalance
         });
 
     } catch (err) {
@@ -7123,26 +7151,68 @@ app.post('/api/wallet/verify-recharge', protect, async (req, res) => {
 });
 
 // 4. Cancel Ride by User (Rider)
+// 4. Cancel Ride (Updated for Village Driver Control)
 app.post('/api/ride/cancel', protect, async (req, res) => {
     try {
-        const { rideId } = req.body;
-        const ride = await Ride.findById(rideId);
+        const { rideId, reason } = req.body;
+        const userId = req.user._id.toString();
+
+        // Populate driver and customer to get FCM tokens for notification
+        const ride = await Ride.findById(rideId).populate('driver customer', 'name phone fcmToken');
 
         if (!ride) return res.status(404).json({ message: 'Ride not found' });
 
-        // सिर्फ जिसने बुक की है वही कैंसिल कर सकता है
-        if (ride.customer.toString() !== req.user._id.toString()) {
-            return res.status(403).json({ message: 'Not authorized' });
+        if (['Completed', 'Cancelled'].includes(ride.status)) {
+            return res.status(400).json({ message: 'Ride is already completed or cancelled.' });
         }
 
+        // Check who is cancelling
+        const isCustomer = ride.customer._id.toString() === userId;
+        const isDriver = ride.driver && ride.driver._id.toString() === userId;
+
+        if (!isCustomer && !isDriver) {
+            return res.status(403).json({ message: 'Not authorized to cancel this ride.' });
+        }
+
+        // Update Status
         ride.status = 'Cancelled';
         await ride.save();
 
-        // Optional: Notify Driver if assigned
-        // if (ride.driver) { ... send notification to driver ... }
+        // --- SCENARIO A: CUSTOMER CANCELS ---
+        if (isCustomer) {
+            // Notify Driver if assigned
+            if (ride.driver && ride.driver.fcmToken) {
+                await sendPushNotification(
+                    [ride.driver.fcmToken],
+                    'Ride Cancelled ❌',
+                    `Customer has cancelled the ride.`,
+                    { rideId: ride._id.toString(), type: 'RIDE_CANCELLED' }
+                );
+            }
+            console.log(`👤 Customer ${req.user.name} cancelled Ride #${ride._id}`);
+        }
+
+        // --- SCENARIO B: DRIVER CANCELS (Village Control Logic) ---
+        if (isDriver) {
+            // 1. Notify Customer immediately so they can book another
+            if (ride.customer && ride.customer.fcmToken) {
+                await sendPushNotification(
+                    [ride.customer.fcmToken],
+                    'Driver Cancelled ⚠️',
+                    `Sorry, driver cancelled the ride. Please request again.`,
+                    { rideId: ride._id.toString(), type: 'RIDE_CANCELLED' }
+                );
+            }
+
+            // 2. Driver Behavior Tracking (Simple Log)
+            // Future Update: Add logic here to deduct ₹5 fine or block for 1 hour after 3 cancels
+            console.log(`⚠️ Driver ${req.user.name} cancelled Ride #${ride._id}. Reason: ${reason || 'None'}`);
+        }
 
         res.json({ message: 'Ride cancelled successfully' });
+
     } catch (err) {
+        console.error('Cancel Ride Error:', err.message);
         res.status(500).json({ error: err.message });
     }
 });
@@ -7219,6 +7289,218 @@ const scheduleRideTimeout = (rideId, driverIndexAtStart) => {
         }
     }, RIDE_TIMEOUT_SECONDS * 1000);
 };
+
+// 🚨 SOS Alert System (Simple & Fast)
+// 🚨 SOS Alert System (Fastest Way to Notify Admin)
+app.post('/api/ride/sos', protect, async (req, res) => {
+    try {
+        const { rideId, location } = req.body; // location = "Lat, Lng" or Address
+        const user = req.user;
+
+        // Ride details nikalo (agar ride active hai)
+        let rideInfo = "No Active Ride";
+        let driverInfo = "N/A";
+
+        if (rideId) {
+            const ride = await Ride.findById(rideId).populate('driver', 'name phone vehicleType');
+            if (ride) {
+                rideInfo = `Ride #${ride._id.toString().slice(-4)}`;
+                driverInfo = ride.driver ? `${ride.driver.name} (${ride.driver.phone}) - ${ride.driver.vehicleType}` : "Not Assigned";
+            }
+        }
+
+        // 🔔 Admin Alert Message
+        const alertMsg = `🚨 *SOS EMERGENCY ALERT!* 🚨\n\n` +
+                         `👤 *Sender:* ${user.name} (${user.role.toUpperCase()})\n` +
+                         `📞 *Phone:* ${user.phone}\n` +
+                         `📍 *Location:* ${location || 'Unknown'}\n` +
+                         `🚖 *Ride:* ${rideInfo}\n` +
+                         `👮 *Driver:* ${driverInfo}\n\n` +
+                         `⚠️ *Action Required Immediately!*`;
+
+        // Admin ko WhatsApp bhejo
+        if (process.env.WHATSAPP_ADMIN_NUMBER) {
+            await sendWhatsApp(process.env.WHATSAPP_ADMIN_NUMBER, alertMsg);
+        }
+
+        res.json({ message: 'SOS Alert Sent! Support team is checking.' });
+
+    } catch (err) {
+        console.error("SOS Error:", err.message);
+        res.status(500).json({ message: 'Error sending SOS' });
+    }
+});
+
+// [ADMIN] 1. Get All Drivers (Online/Offline, Location, Balance)
+app.get('/api/admin/drivers-status', protect, authorizeRole('admin'), async (req, res) => {
+    try {
+        const drivers = await User.find({ role: 'driver' })
+            .select('name phone isOnline isLocked walletBalance location vehicleType approved lastActiveAt')
+            .sort({ isOnline: -1, lastActiveAt: -1 }); // Online pehle dikhenge
+
+        // Format data for simple admin table
+        const formatted = drivers.map(d => ({
+            id: d._id,
+            name: d.name,
+            phone: d.phone,
+            vehicle: d.vehicleType,
+            status: d.isOnline ? '🟢 Online' : '⚪ Offline',
+            balance: `₹${d.walletBalance.toFixed(2)}`,
+            locked: d.isLocked ? '🔒 Locked' : '✅ Active',
+            location: d.location && d.location.coordinates ? 
+                `${d.location.coordinates[1]}, ${d.location.coordinates[0]}` : 'Unknown'
+        }));
+
+        res.json(formatted);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// [ADMIN] 2. Get Specific Driver History (Rides + Wallet)
+app.get('/api/admin/drivers/:id/details', protect, authorizeRole('admin'), async (req, res) => {
+    try {
+        const driverId = req.params.id;
+
+        // 1. Last 50 Rides
+        const rides = await Ride.find({ driver: driverId })
+            .select('pickupLocation dropLocation estimatedFare status createdAt distanceKm')
+            .sort({ createdAt: -1 })
+            .limit(50);
+
+        // 2. Last 20 Wallet Transactions
+        const transactions = await WalletTransaction.find({ driver: driverId })
+            .sort({ createdAt: -1 })
+            .limit(20);
+
+        // 3. Complaint Count
+        const complaintCount = await Complaint.countDocuments({ driver: driverId });
+
+        res.json({
+            totalRides: rides.length,
+            complaints: complaintCount,
+            rideHistory: rides,
+            walletHistory: transactions
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// [ADMIN] 3. Block or Unblock Driver
+app.put('/api/admin/drivers/:id/block', protect, authorizeRole('admin'), async (req, res) => {
+    try {
+        const { action } = req.body; // action = "block" or "unblock"
+        const driver = await User.findById(req.params.id);
+
+        if (!driver) return res.status(404).json({ message: 'Driver not found' });
+
+        if (action === 'block') {
+            driver.isLocked = true;
+            driver.isOnline = false; // Force Offline
+            // Optional: Add reason field logic here
+        } else {
+            driver.isLocked = false;
+        }
+
+        await driver.save();
+        res.json({ message: `Driver ${action === 'block' ? 'Blocked 🔒' : 'Unblocked ✅'} successfully.` });
+
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// [USER] Post a Complaint
+app.post('/api/complaints', protect, async (req, res) => {
+    try {
+        const { rideId, reason, driverId } = req.body;
+        
+        await Complaint.create({
+            user: req.user._id,
+            ride: rideId,
+            driver: driverId,
+            reason: reason
+        });
+
+        res.status(201).json({ message: 'Complaint submitted. Support will check shortly.' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// [ADMIN] Get All Complaints
+app.get('/api/admin/complaints', protect, authorizeRole('admin'), async (req, res) => {
+    try {
+        const complaints = await Complaint.find()
+            .populate('user', 'name phone')
+            .populate('driver', 'name phone')
+            .sort({ createdAt: -1 });
+
+        res.json(complaints);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// [ADMIN] Resolve Complaint
+app.put('/api/admin/complaints/:id/resolve', protect, authorizeRole('admin'), async (req, res) => {
+    try {
+        const { status, adminNote } = req.body; // status = 'Resolved' or 'Ignored'
+        
+        await Complaint.findByIdAndUpdate(req.params.id, {
+            status: status,
+            adminNote: adminNote
+        });
+
+        res.json({ message: 'Complaint status updated' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 👮 Admin Action: Punish Driver (48hr Block or Permanent Ban)
+app.post('/api/admin/drivers/:id/punish', protect, authorizeRole('admin'), async (req, res) => {
+    try {
+        const { action, reason } = req.body; // action: 'temp_ban' (48hr) or 'perm_ban'
+        const driver = await User.findById(req.params.id);
+
+        if (!driver) return res.status(404).json({ message: 'Driver not found' });
+
+        if (action === 'temp_ban') {
+            // 👉 CASE 1: Jhagda/Abuse -> 48 Hours Block
+            const expiryDate = new Date();
+            expiryDate.setHours(expiryDate.getHours() + 48); // Add 48 Hours
+
+            driver.isLocked = true;
+            driver.isOnline = false; // Turant Offline karo
+            driver.lockExpiresAt = expiryDate;
+            driver.blockReason = reason || "Abusive Behavior (48h Ban)";
+            
+            await sendWhatsApp(driver.phone, `⚠️ You are blocked for 48 HOURS due to: ${driver.blockReason}. Contact Admin.`);
+        
+        } else if (action === 'perm_ban') {
+            // 👉 CASE 2: Customer Misbehavior -> Permanent Block
+            driver.isLocked = true;
+            driver.isOnline = false;
+            driver.approved = false; // Login hi band ho jayega
+            driver.lockExpiresAt = null; // Permanent hai
+            driver.blockReason = reason || "Severe Misconduct (Permanent Ban)";
+
+            await sendWhatsApp(driver.phone, `🛑 ACCOUNT TERMINATED. Reason: ${driver.blockReason}. You cannot drive anymore.`);
+        } else {
+            return res.status(400).json({ message: 'Invalid action type' });
+        }
+
+        await driver.save();
+        res.json({ message: `Driver punished: ${action}`, driverStatus: driver.isLocked });
+
+    } catch (err) {
+        console.error("Punish Driver Error:", err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
 
 const IP = '0.0.0.0';
 const PORT = process.env.PORT || 5001;
