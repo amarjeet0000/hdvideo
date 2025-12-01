@@ -6974,6 +6974,7 @@ app.get('/api/ride/pending', protect, async (req, res) => {
 // 3. Decline Ride (Pass to Next Driver)
 // 3. Decline Ride (Shift to Next Driver)
 // 3. Decline Ride (With Loop / Cycle Logic)
+// 3. Decline Ride (Pass to Next Driver)
 app.post('/api/ride/decline', protect, async (req, res) => {
     try {
         const { rideId } = req.body;
@@ -6999,11 +7000,14 @@ app.post('/api/ride/decline', protect, async (req, res) => {
 
         await ride.save();
 
-        // ✅ 4. Notify the Driver at current index (Next or First)
+        // ✅ 4. Notify the Driver at current index (WITH ONLINE CHECK)
         const nextDriverId = ride.potentialDrivers[ride.currentDriverIndex];
-        const nextDriver = await User.findById(nextDriverId).select('fcmToken name');
+        
+        // 🔥 UPDATE: Added 'isOnline' to the select query
+        const nextDriver = await User.findById(nextDriverId).select('fcmToken name isOnline');
 
-        if (nextDriver && nextDriver.fcmToken) {
+        // 🔥 UPDATE: Added '&& nextDriver.isOnline' check
+        if (nextDriver && nextDriver.isOnline && nextDriver.fcmToken) {
             console.log(`🔀 Shifting ride to: ${nextDriver.name}`);
             await sendPushNotification(
                 [nextDriver.fcmToken],
@@ -7011,6 +7015,9 @@ app.post('/api/ride/decline', protect, async (req, res) => {
                 `Ride Available! Earn ₹${ride.estimatedFare}`,
                 { rideId: ride._id.toString(), type: 'NEW_RIDE' }
             );
+        } else {
+             // Log if skipped due to offline status
+             console.log(`⚠️ Next driver ${nextDriver ? nextDriver.name : 'Unknown'} is OFFLINE. Notification skipped.`);
         }
 
         res.json({ message: 'Ride passed to next driver (Loop active)' });
@@ -7144,6 +7151,7 @@ app.post('/api/ride/cancel', protect, async (req, res) => {
 const RIDE_TIMEOUT_SECONDS = 30; // 30 Seconds Timer
 
 // Helper Function: Auto-Move to Next Driver on Timeout
+// Helper Function: Auto-Move to Next Driver on Timeout
 const scheduleRideTimeout = (rideId, driverIndexAtStart) => {
     console.log(`⏳ Timer started for Ride ${rideId} (Index: ${driverIndexAtStart}) for ${RIDE_TIMEOUT_SECONDS}s`);
 
@@ -7182,11 +7190,14 @@ const scheduleRideTimeout = (rideId, driverIndexAtStart) => {
 
             await ride.save();
 
-            // 5. Notify the NEW Driver
+            // 5. Notify the NEW Driver (WITH REAL-TIME ONLINE CHECK)
             const nextDriverId = ride.potentialDrivers[ride.currentDriverIndex];
-            const nextDriver = await User.findById(nextDriverId).select('fcmToken name');
+            
+            // 🔥 UPDATE: Added 'isOnline' to the select query
+            const nextDriver = await User.findById(nextDriverId).select('fcmToken name isOnline');
 
-            if (nextDriver && nextDriver.fcmToken) {
+            // 🔥 UPDATE: Added '&& nextDriver.isOnline' check
+            if (nextDriver && nextDriver.isOnline && nextDriver.fcmToken) {
                 console.log(`🔔 Notifying Next Driver (Auto): ${nextDriver.name}`);
                 await sendPushNotification(
                     [nextDriver.fcmToken],
@@ -7194,9 +7205,13 @@ const scheduleRideTimeout = (rideId, driverIndexAtStart) => {
                     `Ride Available! Earn ₹${ride.estimatedFare}`,
                     { rideId: ride._id.toString(), type: 'NEW_RIDE' }
                 );
+            } else {
+                // Log if skipped due to offline status
+                console.log(`⚠️ Driver ${nextDriver ? nextDriver.name : 'Unknown'} is OFFLINE or invalid. Notification skipped.`);
             }
 
             // 6. RECURSION: Start Timer for the NEW Driver
+            // (Timer continues regardless of whether notification was sent, to keep the loop moving)
             scheduleRideTimeout(rideId, ride.currentDriverIndex);
 
         } catch (err) {
