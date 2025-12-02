@@ -7290,26 +7290,30 @@ const scheduleRideTimeout = (rideId, driverIndexAtStart) => {
     }, RIDE_TIMEOUT_SECONDS * 1000);
 };
 
-// 🚨 SOS Alert System (Simple & Fast)
-// 🚨 SOS Alert System (Fastest Way to Notify Admin)
+
+// 🚨 SOS Alert System (Updated: Sends WhatsApp + Saves to DB for Admin Panel)
 app.post('/api/ride/sos', protect, async (req, res) => {
     try {
-        const { rideId, location } = req.body; // location = "Lat, Lng" or Address
+        const { rideId, location } = req.body; // location = "Lat, Lng"
         const user = req.user;
 
-        // Ride details nikalo (agar ride active hai)
+        // 1. Ride details fetch karo (agar available hai)
         let rideInfo = "No Active Ride";
         let driverInfo = "N/A";
+        let reportedDriverId = null;
 
         if (rideId) {
             const ride = await Ride.findById(rideId).populate('driver', 'name phone vehicleType');
             if (ride) {
                 rideInfo = `Ride #${ride._id.toString().slice(-4)}`;
-                driverInfo = ride.driver ? `${ride.driver.name} (${ride.driver.phone}) - ${ride.driver.vehicleType}` : "Not Assigned";
+                if (ride.driver) {
+                    driverInfo = `${ride.driver.name} (${ride.driver.phone}) - ${ride.driver.vehicleType}`;
+                    reportedDriverId = ride.driver._id;
+                }
             }
         }
 
-        // 🔔 Admin Alert Message
+        // 2. Admin Alert Message (WhatsApp ke liye)
         const alertMsg = `🚨 *SOS EMERGENCY ALERT!* 🚨\n\n` +
                          `👤 *Sender:* ${user.name} (${user.role.toUpperCase()})\n` +
                          `📞 *Phone:* ${user.phone}\n` +
@@ -7318,15 +7322,26 @@ app.post('/api/ride/sos', protect, async (req, res) => {
                          `👮 *Driver:* ${driverInfo}\n\n` +
                          `⚠️ *Action Required Immediately!*`;
 
-        // Admin ko WhatsApp bhejo
+        // 3. Admin ko WhatsApp bhejo
         if (process.env.WHATSAPP_ADMIN_NUMBER) {
             await sendWhatsApp(process.env.WHATSAPP_ADMIN_NUMBER, alertMsg);
         }
 
-        res.json({ message: 'SOS Alert Sent! Support team is checking.' });
+        // 4. ✅ SAVE TO DATABASE (Critical Step for Admin Panel)
+        // Hum 'Complaint' model use kar rahe hain taaki Admin Panel ise fetch kar sake
+        await Complaint.create({
+            user: user._id,
+            ride: rideId || null,
+            driver: reportedDriverId, // Agar driver assigned tha
+            reason: `SOS EMERGENCY: Location ${location || 'Unknown'}`, // 'SOS' keyword is important for filtering
+            status: 'Pending',
+            adminNote: 'Emergency alert triggered via App'
+        });
+
+        res.json({ message: 'SOS Alert Sent & Recorded!' });
 
     } catch (err) {
-        console.error("SOS Error:", err.message);
+        console.error("SOS Error:", err);
         res.status(500).json({ message: 'Error sending SOS' });
     }
 });
