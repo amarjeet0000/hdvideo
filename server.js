@@ -1119,11 +1119,12 @@ app.post('/api/auth/verify-login-otp', async (req, res) => {
   }
 });
 
+// ✅ UPDATED REGISTER ROUTE (With ₹500 Seller Bonus)
 app.post('/api/auth/register', async (req, res) => {
   try {
-    // 1️⃣ CHANGE: 'vehicleType' को req.body से निकाला
     const { name, email, password, phone, role = 'user', pincodes, vehicleType } = req.body;
     
+    // --- 1. Validation ---
     if (!name || !password || !phone) return res.status(400).json({ message: 'Name, password, and phone number are required' });
 
     if (role === 'seller' && !email) {
@@ -1132,12 +1133,13 @@ app.post('/api/auth/register', async (req, res) => {
     if ((role === 'user' || role === 'delivery') && !phone) {
       return res.status(400).json({ message: 'Phone number is required for user/delivery registration.' });
     }
-
-    // 2️⃣ CHANGE: अगर ड्राइवर है और vehicleType नहीं भेजा, तो error दें
+    
+    // Driver Validation
     if (role === 'driver' && !vehicleType) {
         return res.status(400).json({ message: 'Vehicle Type is required for drivers.' });
     }
 
+    // --- 2. Check Existing User ---
     let existingUser;
     if (role === 'seller') {
         existingUser = await User.findOne({ email });
@@ -1151,12 +1153,17 @@ app.post('/api/auth/register', async (req, res) => {
 
     const hashed = await bcrypt.hash(password, 10);
 
+    // --- 3. Determine Status & Bonus ---
     let approved = true;
+    let initialBalance = 0; 
+    const SELLER_BONUS_AMOUNT = 500;
+
     if (role === 'seller') {
-      approved = false;
+      approved = false; // Sellers need approval
+      initialBalance = SELLER_BONUS_AMOUNT; // 🎁 GIVE 500 BONUS
     }
 
-    // 3️⃣ CHANGE: Database में vehicleType सेव करें
+    // --- 4. Create User ---
     const user = await User.create({ 
         name, 
         email, 
@@ -1165,16 +1172,34 @@ app.post('/api/auth/register', async (req, res) => {
         role, 
         pincodes: Array.isArray(pincodes) ? pincodes : [], 
         approved,
-        vehicleType: role === 'driver' ? vehicleType : null // ✅ यहाँ vehicleType सेव होगा
+        vehicleType: role === 'driver' ? vehicleType : null,
+        walletBalance: initialBalance // ✅ Apply Bonus Here
     });
 
+    // --- 5. 🎁 BONUS LOGIC: Create Transaction & Notify ---
     if (role === 'seller') {
-      await notifyAdmin(`🆕 New Seller Registered (pending approval)\n\nName: ${user.name}\nEmail: ${user.email}\nPhone: ${user.phone}`);
+      // A. Create Transaction History
+      await WalletTransaction.create({
+          seller: user._id,
+          type: 'Credit',
+          amount: SELLER_BONUS_AMOUNT,
+          balanceBefore: 0,
+          balanceAfter: SELLER_BONUS_AMOUNT,
+          description: '🎁 Welcome Bonus! (Registration Reward)'
+      });
+
+      // B. Notify Admin
+      await notifyAdmin(`🆕 New Seller Registered (pending approval)\n\nName: ${user.name}\nEmail: ${user.email}\nPhone: ${user.phone}\nWallet: Credited ₹500 Bonus`);
+      
+      // C. Notify Seller (WhatsApp)
+      if (user.phone) {
+          const welcomeMsg = `🎉 Welcome to Quick Sauda, ${user.name}!\n\nCongratulations! You have received a ₹500 Welcome Bonus in your wallet. Your account is currently under review for approval.`;
+          await sendWhatsApp(user.phone, welcomeMsg);
+      }
     }
 
     const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
     
-    // Response में भी vehicleType भेजें ताकि confirm हो सके
     res.status(201).json({ 
         token, 
         user: { 
@@ -1185,7 +1210,8 @@ app.post('/api/auth/register', async (req, res) => {
             role: user.role, 
             pincodes: user.pincodes, 
             approved: user.approved,
-            vehicleType: user.vehicleType // ✅ Updated response
+            vehicleType: user.vehicleType,
+            walletBalance: user.walletBalance // Return updated balance
         } 
     });
 
