@@ -7177,11 +7177,29 @@ app.post('/api/wallet/add', protect, async (req, res) => {
 });
 
 // 7. Get Wallet History
+// 7. Get Wallet History (Updated for both Sellers & Drivers)
 app.get('/api/wallet/history', protect, async (req, res) => {
     try {
-        const history = await WalletTransaction.find({ driver: req.user._id }).sort({ createdAt: -1 });
-        res.json({ balance: req.user.walletBalance, isLocked: req.user.isLocked, history });
+        const userId = req.user._id;
+        let query = {};
+
+        // ✅ Check Role to determine which field to query in WalletTransaction
+        if (req.user.role === 'seller') {
+            query = { seller: userId };
+        } else {
+            // Default to driver (or you can check if req.user.role === 'driver')
+            query = { driver: userId };
+        }
+
+        const history = await WalletTransaction.find(query).sort({ createdAt: -1 });
+
+        res.json({ 
+            balance: req.user.walletBalance, 
+            isLocked: req.user.isLocked, // Mostly relevant for drivers
+            history: history 
+        });
     } catch (err) {
+        console.error("Wallet History Error:", err.message);
         res.status(500).json({ error: err.message });
     }
 });
@@ -7236,9 +7254,7 @@ app.get('/api/ride/pending', protect, async (req, res) => {
         res.status(500).json({ message: 'Server Error' });
     }
 });
-// 3. Decline Ride (Pass to Next Driver)
-// 3. Decline Ride (Shift to Next Driver)
-// 3. Decline Ride (With Loop / Cycle Logic)
+
 // 3. Decline Ride (Pass to Next Driver)
 app.post('/api/ride/decline', protect, async (req, res) => {
     try {
