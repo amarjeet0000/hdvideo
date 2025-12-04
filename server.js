@@ -2801,10 +2801,14 @@ app.get('/api/orders/:id/payment-status', protect, async (req, res) => {
 });
 
 // -------- Cancel order with auto/prepaid refund or COD manual refund --------
+// -------- Cancel order with auto/prepaid refund or COD manual refund --------
 app.put('/api/orders/:id/cancel', protect, async (req, res) => {
   try {
     const { upiId } = req.body; // optional: user can provide UPI when cancelling COD
-    const order = await Order.findOne({ _id: req.params.id, user: req.user._id }).populate('seller', 'phone');
+    
+    // ✅ UPDATE: Added 'walletBalance' to populate to ensure we can update it accurately
+    const order = await Order.findOne({ _id: req.params.id, user: req.user._id })
+      .populate('seller', 'phone walletBalance');
 
     if (!order) return res.status(404).json({ message: 'Order not found or you do not have permission' });
     if (['Cancelled', 'Delivered', 'Shipped'].includes(order.deliveryStatus)) {
@@ -2824,6 +2828,48 @@ app.put('/api/orders/:id/cancel', protect, async (req, res) => {
     } catch (assignErr) {
       console.error('Error cancelling delivery assignment:', assignErr.message);
     }
+
+    // ==================================================================
+    // 💰 ✅ NEW: COMMISSION REFUND LOGIC (Seller Wallet Credit)
+    // ==================================================================
+    try {
+        // 1. Get Commission Rate
+        const appSettings = await AppSettings.findOne({ singleton: true });
+        const COMMISSION_RATE = appSettings ? appSettings.platformCommissionRate : 0.05;
+
+        // 2. Calculate Commission Amount to Refund
+        const commissionToRefund = parseFloat((order.totalAmount * COMMISSION_RATE).toFixed(2));
+
+        if (commissionToRefund > 0 && order.seller) {
+            // Fetch seller user to ensure we are writing to the latest state
+            const sellerUser = await User.findById(order.seller._id);
+            
+            if (sellerUser) {
+                const balanceBefore = sellerUser.walletBalance;
+                
+                // 3. Credit Wallet
+                sellerUser.walletBalance += commissionToRefund;
+                await sellerUser.save();
+
+                // 4. Log Transaction
+                await WalletTransaction.create({
+                    seller: sellerUser._id,
+                    orderId: order._id,
+                    type: 'Credit', // Money coming back
+                    amount: commissionToRefund,
+                    balanceBefore: balanceBefore,
+                    balanceAfter: sellerUser.walletBalance,
+                    description: `Commission Refund (Order Cancelled #${order._id.toString().slice(-6)})`
+                });
+
+                console.log(`✅ Refunded commission ₹${commissionToRefund} to seller ${sellerUser.name}`);
+            }
+        }
+    } catch (commErr) {
+        console.error('❌ Error refunding commission to seller:', commErr.message);
+        // We do not stop the cancellation process here, just log the error
+    }
+    // ==================================================================
 
     let refundMessage = '';
     const isPrepaid = ['razorpay', 'razorpay_cod'].includes(order.paymentMethod);
@@ -2894,7 +2940,6 @@ app.put('/api/orders/:id/cancel', protect, async (req, res) => {
     try {
       for (const item of order.orderItems) {
         // If product has variants and you store variant-level stock, adjust accordingly.
-        // Here we assume top-level stock decrement was used — adjust if using variant-specific stock.
         await Product.findByIdAndUpdate(item.product, { $inc: { stock: item.qty } });
       }
     } catch (stockErr) {
@@ -2905,7 +2950,8 @@ app.put('/api/orders/:id/cancel', protect, async (req, res) => {
     try {
       const orderIdShort = order._id.toString().slice(-6);
       if (order.seller && order.seller.phone) {
-        await sendWhatsApp(order.seller.phone, `Order #${orderIdShort} has been cancelled by the customer.`);
+        // Updated message to mention commission refund
+        await sendWhatsApp(order.seller.phone, `Order #${orderIdShort} has been cancelled by the customer. Commission has been refunded to your wallet.`);
       }
       await notifyAdmin(`📦 Order #${order._id} cancelled by user. ${refundMessage}`);
     } catch (notifyErr) {
@@ -2918,7 +2964,6 @@ app.put('/api/orders/:id/cancel', protect, async (req, res) => {
     res.status(500).json({ message: 'Error cancelling order' });
   }
 });
-
 
 // -------- User submits UPI for COD refund --------
 // PUT /api/orders/:id/submit-upi - User submits UPI ID or Bank Details for manual refund
