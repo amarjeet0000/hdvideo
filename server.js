@@ -343,8 +343,14 @@ const rideSchema = new mongoose.Schema({
 
 // 3. Wallet Transaction Schema
 const walletTransactionSchema = new mongoose.Schema({
-    driver: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    // ✅ Driver और Seller दोनों के लिए (Optional रखें)
+    driver: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, 
+    seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, 
+
+    // ✅ Ride (Driver के लिए) और Order (Seller के लिए)
     rideId: { type: mongoose.Schema.Types.ObjectId, ref: 'Ride' },
+    orderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order' },
+
     type: { type: String, enum: ['Credit', 'Debit'], required: true },
     amount: Number,
     balanceBefore: Number,
@@ -352,7 +358,7 @@ const walletTransactionSchema = new mongoose.Schema({
     description: String
 }, { timestamps: true });
 
-// ✅ SAHI CODE (Isse replace karein)
+// ✅ SAHI CODE
 const Ride = mongoose.model('Ride', rideSchema);
 const WalletTransaction = mongoose.model('WalletTransaction', walletTransactionSchema);
 
@@ -409,6 +415,9 @@ const ServiceBooking = mongoose.model('ServiceBooking', serviceBookingSchema);
 const appSettingsSchema = new mongoose.Schema({
   singleton: { type: Boolean, default: true, unique: true, index: true },
   platformCommissionRate: { type: Number, default: 0.05, min: 0, max: 1 },
+  
+  // ✅ NEW FIELD: Fee to charge seller for adding products after the free limit
+  productCreationFee: { type: Number, default: 10 } 
 });
 const AppSettings = mongoose.model('AppSettings', appSettingsSchema);
 
@@ -470,83 +479,86 @@ const Subcategory = mongoose.model('Subcategory', subcategorySchema);
 
 
 const productSchema = new mongoose.Schema({
-  name: String,
-  brand: { type: String, default: 'Unbranded' },
-  sku: String, // Main product SKU (optional)
-  category: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', required: true, index: true },
-  subcategory: { type: mongoose.Schema.Types.ObjectId, ref: 'Subcategory', default: null, index: true },
-  childCategory: { type: mongoose.Schema.Types.ObjectId, ref: 'Subcategory', default: null },
-  
-  // ❌ Main price and stock fields are removed from here.
-  
-  unit: {
-    type: String,
-    enum: ['kg', '100g', '250g', '500g', 'L', 'ml', 'pcs', 'pack', 'piece', 'bunch', 'packet', 'dozen', 'bag', '50g'],
-    required: false,
-  },
-  minOrderQty: { type: Number, default: 1 },
-  shortDescription: String,
-  fullDescription: String,
-  
-  // Main images for the product (can be used as default)
-  images: [{
-    url: String,
-    publicId: String
-  }],
-  videoLink: String,
-  uploadedVideo: {
-    url: String,
-    publicId: String
-  },
-  specifications: { type: Map, of: String, default: {} },
-  
-  // ✅ UPDATED VARIANTS SECTION
-  // This is now an array, where each object is a unique variant with its own details.
-  variants: [{
-      color: { type: String },
-      size: { type: String },
-      price: { type: Number, required: true },
-      originalPrice: { type: Number }, // MRP for this specific variant
-      costPrice: { type: Number }, // Cost price for this variant
-      stock: { type: Number, required: true, default: 0 },
-      sku: { type: String }, // Optional: Unique SKU for this variant
-      images: [{ // Optional: Images specific to this variant
-        url: String,
-        publicId: String
-      }]
-  }],
-  
-  shippingDetails: {
-    weight: Number,
-    dimensions: {
-      length: Number,
-      width: Number,
-      height: Number,
-    },
-    shippingType: { type: String, enum: ['Free', 'Paid', 'COD Available'], default: 'Free' },
-  },
-  otherInformation: {
-    warranty: String,
-    returnPolicy: {
-      type: String,
-      enum: ['Non-Returnable', 'Returnable', 'Replacement'],
-      default: 'Non-Returnable'
-    },
-    tags: [String],
-  },
-  serviceDurationMinutes: { type: Number },
-  
-  pincodes: [{ 
-    type: String, 
-    required: false,
-    index: true
-  }], 
-  
-  // ✨ NEW FIELD: Set to true if product is available globally, ignoring pincode filters.
+  name: String,
+  brand: { type: String, default: 'Unbranded' },
+  sku: String, 
+  category: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', required: true, index: true },
+  subcategory: { type: mongoose.Schema.Types.ObjectId, ref: 'Subcategory', default: null, index: true },
+  childCategory: { type: mongoose.Schema.Types.ObjectId, ref: 'Subcategory', default: null },
+  
+  // ❌ Main price and stock fields are removed (Variants handle this now)
+  
+  unit: {
+    type: String,
+    enum: ['kg', '100g', '250g', '500g', 'L', 'ml', 'pcs', 'pack', 'piece', 'bunch', 'packet', 'dozen', 'bag', '50g'],
+    required: false,
+  },
+  minOrderQty: { type: Number, default: 1 },
+  shortDescription: String,
+  fullDescription: String,
+  
+  images: [{
+    url: String,
+    publicId: String
+  }],
+  videoLink: String,
+  uploadedVideo: {
+    url: String,
+    publicId: String
+  },
+  specifications: { type: Map, of: String, default: {} },
+  
+  // ✅ VARIANTS SECTION
+  variants: [{
+      color: { type: String },
+      size: { type: String },
+      price: { type: Number, required: true },
+      originalPrice: { type: Number }, 
+      costPrice: { type: Number }, 
+      stock: { type: Number, required: true, default: 0 },
+      sku: { type: String }, 
+      images: [{ 
+        url: String,
+        publicId: String
+      }]
+  }],
+  
+  shippingDetails: {
+    weight: Number,
+    dimensions: {
+      length: Number,
+      width: Number,
+      height: Number,
+    },
+    shippingType: { type: String, enum: ['Free', 'Paid', 'COD Available'], default: 'Free' },
+  },
+  otherInformation: {
+    warranty: String,
+    returnPolicy: {
+      type: String,
+      enum: ['Non-Returnable', 'Returnable', 'Replacement'],
+      default: 'Non-Returnable'
+    },
+    tags: [String],
+  },
+  serviceDurationMinutes: { type: Number },
+  
+  pincodes: [{ 
+    type: String, 
+    required: false,
+    index: true
+  }], 
+  
   isGlobal: { type: Boolean, default: false, index: true }, 
   
-  seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
-  isTrending: { type: Boolean, default: false, index: true }
+  // ✅✅ NEW FIELDS ADDED HERE (Alerts & Daily Update ke liye) ✅✅
+  dailyPriceUpdate: { type: Boolean, default: false }, // Agar true hai, to roj subah notification jayega
+  lowStockThreshold: { type: Number, default: 5 },     // Isse kam stock hone par alert jayega
+  // -------------------------------------------------------------
+
+  seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
+  isTrending: { type: Boolean, default: false, index: true }
+
 }, { timestamps: true });
 
 const Product = mongoose.model('Product', productSchema);
@@ -2341,18 +2353,16 @@ app.post('/api/orders/calculate-summary', protect, async (req, res) => {
   }
 });
 
-
 app.post('/api/orders', protect, async (req, res) => {
   try {
     const { shippingAddressId, paymentMethod, couponCode } = req.body;
 
     const cart = await Cart.findOne({ user: req.user._id }).populate({
       path: 'items.product',
-      // CRITICAL: Ensure we get variants for price calculation
-      select: 'name price originalPrice variants category seller', 
+      select: 'name price originalPrice variants category seller lowStockThreshold', // ✅ Added lowStockThreshold
       populate: {
         path: 'seller',
-        select: 'pincodes name phone fcmToken'
+        select: 'pincodes name phone fcmToken walletBalance' 
       }
     });
 
@@ -2364,7 +2374,7 @@ app.post('/api/orders', protect, async (req, res) => {
 
     // --- Pre-order validation and grouping ---
     const ordersBySeller = new Map();
-    let calculatedTotalCartAmount = 0; // Use a new variable for safety
+    let calculatedTotalCartAmount = 0; 
 
     for (const item of cart.items) {
       const product = item.product;
@@ -2374,8 +2384,8 @@ app.post('/api/orders', protect, async (req, res) => {
       }
 
       // 1. Find the correct price/variant
-      let itemPrice = product.price; // Fallback to top-level price (for legacy/non-variant data structure)
-      let itemOriginalPrice = product.originalPrice; // Fallback for original price
+      let itemPrice = product.price; 
+      let itemOriginalPrice = product.originalPrice; 
       
       if (product.variants && product.variants.length > 0) {
           const selectedVariant = product.variants.find(v => 
@@ -2389,12 +2399,10 @@ app.post('/api/orders', protect, async (req, res) => {
           itemPrice = selectedVariant.price;
           itemOriginalPrice = selectedVariant.originalPrice;
           
-          // Use variant stock for the check
           if (selectedVariant.stock < item.qty) {
             return res.status(400).json({ message: `Insufficient stock for product: ${product.name} variant.` });
           }
       } else {
-          // If no variants defined, use the legacy check
           if (product.stock < item.qty) {
             return res.status(400).json({ message: `Insufficient stock for product: ${product.name}` });
           }
@@ -2419,8 +2427,8 @@ app.post('/api/orders', protect, async (req, res) => {
         product: product._id,
         name: product.name,
         qty: item.qty,
-        originalPrice: itemOriginalPrice, // Use dynamically found original price
-        price: itemPrice, // Use dynamically found price
+        originalPrice: itemOriginalPrice,
+        price: itemPrice,
         category: product.category,
         selectedColor: item.selectedColor,
         selectedSize: item.selectedSize,
@@ -2430,7 +2438,6 @@ app.post('/api/orders', protect, async (req, res) => {
       calculatedTotalCartAmount += itemPrice * item.qty;
     }
     
-    // Use the correctly calculated total
     const totalCartAmount = calculatedTotalCartAmount; 
     
     // --- Coupon, Shipping & Tax Calculations ---
@@ -2485,10 +2492,13 @@ app.post('/api/orders', protect, async (req, res) => {
     let remainingShippingFee = shippingFee;
     let remainingTaxAmount = totalTaxAmount; 
 
+    // ✅ FETCH SETTINGS (Commission Rate)
+    const appSettings = await AppSettings.findOne({ singleton: true });
+    const COMMISSION_RATE = appSettings ? appSettings.platformCommissionRate : 0.05; 
+
     // --- Create Sub-Orders for Each Seller ---
     for (const [sellerId, sellerData] of ordersBySeller.entries()) {
       
-      // ✅ FIX 1: Protect against division by zero (NaN generation)
       const proportion = (totalCartAmount > 0) ? sellerData.totalAmount / totalCartAmount : 0; 
 
       const sellerDiscount = remainingDiscount * proportion;
@@ -2501,13 +2511,25 @@ app.post('/api/orders', protect, async (req, res) => {
 
       const isCodOrFree = effectivePaymentMethod === 'cod' || finalAmountForPayment === 0;
       
-      // ✅ FIX 2: Ensure all final numbers are rounded and cast to a valid float
       const totalAmountFloat = parseFloat((sellerData.totalAmount || 0).toFixed(2));
       const shippingFeeFloat = parseFloat((sellerShippingFee || 0).toFixed(2));
       const taxAmountFloat = parseFloat((sellerTaxAmount || 0).toFixed(2));
       const discountAmountFloat = parseFloat((sellerDiscount || 0).toFixed(2));
       
       const orderGrandTotal = totalAmountFloat + shippingFeeFloat + taxAmountFloat - discountAmountFloat;
+
+      // ==========================================================
+      // 💰 COMMISSION DEDUCTION LOGIC
+      // ==========================================================
+      const commissionAmount = parseFloat((totalAmountFloat * COMMISSION_RATE).toFixed(2));
+      
+      // Update Seller Wallet
+      const sellerUser = await User.findById(sellerId);
+      const balanceBefore = sellerUser.walletBalance;
+      
+      sellerUser.walletBalance -= commissionAmount; // Deduct commission
+      await sellerUser.save();
+      // ==========================================================
 
       const order = new Order({
         user: req.user._id,
@@ -2516,12 +2538,12 @@ app.post('/api/orders', protect, async (req, res) => {
         shippingAddress: fullAddress,
         pincode: shippingAddress.pincode,
         paymentMethod: effectivePaymentMethod,
-        totalAmount: totalAmountFloat, // Use pre-processed float
+        totalAmount: totalAmountFloat, 
         taxRate: GST_RATE,
-        taxAmount: taxAmountFloat, // Use pre-processed float
+        taxAmount: taxAmountFloat, 
         couponApplied: couponCode,
-        discountAmount: discountAmountFloat, // Use pre-processed float
-        shippingFee: shippingFeeFloat, // Use pre-processed float
+        discountAmount: discountAmountFloat, 
+        shippingFee: shippingFeeFloat, 
         paymentId: razorpayOrder ? razorpayOrder.id : (isCodOrFree ? `cod_${crypto.randomBytes(8).toString('hex')}` : undefined),
         paymentStatus: isCodOrFree ? 'completed' : 'pending',
         deliveryStatus: isCodOrFree ? 'Pending' : 'Payment Pending',
@@ -2530,18 +2552,57 @@ app.post('/api/orders', protect, async (req, res) => {
       await order.save();
       createdOrders.push(order);
 
+      // 💰 LOG WALLET TRANSACTION
+      await WalletTransaction.create({
+          seller: sellerId,
+          orderId: order._id,
+          type: 'Debit',
+          amount: commissionAmount,
+          balanceBefore: balanceBefore,
+          balanceAfter: sellerUser.walletBalance,
+          description: `Platform Commission (Order #${order._id.toString().slice(-6)})`
+      });
+
       const orderIdShort = order._id.toString().slice(-6);
 
       // --- Post-creation actions (stock update, notifications) ---
       if (isCodOrFree) {
         
+        // ==========================================================
+        // 📉 STOCK UPDATE & LOW STOCK ALERT (Integrated Here)
+        // ==========================================================
         for(const item of sellerData.orderItems) {
-            // NOTE: This updates the overall product stock, not the variant stock.
-            await Product.findByIdAndUpdate(item.product, { $inc: { stock: -item.qty } });
+            const updatedProduct = await Product.findByIdAndUpdate(
+                item.product, 
+                { $inc: { stock: -item.qty } },
+                { new: true } // Return updated document
+            ).populate('seller', 'fcmToken phone'); 
+
+            // 🚨 Check for Low Stock
+            if (updatedProduct && updatedProduct.stock <= updatedProduct.lowStockThreshold) {
+                const alertMsg = `⚠️ Low Stock Alert: "${updatedProduct.name}" is running low (${updatedProduct.stock} left).`;
+                
+                // 1. Send Push Notification
+                if (updatedProduct.seller.fcmToken) {
+                    await sendPushNotification(
+                        [updatedProduct.seller.fcmToken],
+                        'Stock Alert 📉',
+                        alertMsg,
+                        { 
+                            type: 'LOW_STOCK', 
+                            productId: updatedProduct._id.toString(),
+                            currentStock: updatedProduct.stock.toString()
+                        }
+                    );
+                }
+                // 2. WhatsApp (Optional - commented out to avoid spam)
+                // if (updatedProduct.seller.phone) await sendWhatsApp(updatedProduct.seller.phone, alertMsg);
+            }
         }
+        // ==========================================================
 
         const userMessage = `✅ Your COD order #${orderIdShort} has been successfully placed! Grand Total: ₹${orderGrandTotal.toFixed(2)}.`;
-        const sellerMessage = `🎉 New Order (COD)!\nYou've received a new order #${orderIdShort}. Item Subtotal: ₹${totalAmountFloat.toFixed(2)}.`;
+        const sellerMessage = `🎉 New Order (COD)!\nYou've received a new order #${orderIdShort}. Item Subtotal: ₹${totalAmountFloat.toFixed(2)}. Commission deducted.`;
         
         await sendWhatsApp(req.user.phone, userMessage);
         await sendWhatsApp(sellerData.seller.phone, sellerMessage);
@@ -2580,14 +2641,6 @@ app.post('/api/orders', protect, async (req, res) => {
         await sendWhatsApp(req.user.phone, userMessage);
       }
     }
-    // ✅ Change Notification Message
-await sendPushNotification(
-    [firstDriver.fcmToken],
-    'New Ride Request 🚖',
-    `A Rider is within your range! 📍 Earn ₹${estimatedFare}`, // Updated Text
-    { rideId: newRide._id.toString(), type: 'NEW_RIDE' }
-);
-    // -------------------------------------------------------------
 
     if (effectivePaymentMethod === 'cod') {
       await Cart.deleteOne({ user: req.user._id }); 
@@ -3391,49 +3444,103 @@ app.get('/api/seller/financials', protect, authorizeRole('seller'), async (req, 
 
 // ... (Assumed imports)
 
+// --- Updated Product Upload Route with Wallet Logic ---
+
 app.post('/api/seller/products',
   protect,
   authorizeRole('seller', 'admin'),
   checkSellerApproved,
-  productUpload, // Handles multiple uploads: images[], video, variantImages[]
+  productUpload, // Handles multiple uploads
   async (req, res) => {
+    
+    // 1️⃣ Start a Database Session (Transaction)
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
     try {
       const {
         productTitle, brand, category, subcategory, childCategory,
         shortDescription, fullDescription, unit,
-        // Main product details that are now part of each variant
-        // mrp, sellingPrice, stockQuantity,
-        variants, // ✅ EXPECT a JSON string array of variants
+        variants, // JSON string
         videoLink, specifications, shippingWeight, shippingLength,
         shippingWidth, shippingHeight, shippingType, warranty,
         returnPolicy, tags, serviceDurationMinutes,
+        pincodeList, // JSON string
+        isGlobal,    // string 'true'/'false'
         
-        // ✨ [NEW]: Pincode and Global availability fields
-        pincodeList, // Expected: JSON string of a string array, e.g., '["800001", "800002"]'
-        isGlobal,    // Expected: string 'true' or 'false'
-        
+        // ✅ [ADDED BACK] Fields for Vegetable/Fruit Sellers
+        dailyPriceUpdate, 
+        lowStockThreshold
       } = req.body;
 
-      // --- 1. Basic Validation ---
+      const sellerId = req.user._id;
+
+      // ============================================================
+      // 💰 WALLET & LIMIT CHECK LOGIC (START)
+      // ============================================================
+      
+      const currentProductCount = await Product.countDocuments({ seller: sellerId });
+      const settings = await AppSettings.findOne({ singleton: true }).session(session);
+      const PRODUCT_FEE = settings ? settings.productCreationFee : 10; // Default ₹10
+      const FREE_LIMIT = 20;
+      let feeDeducted = false;
+
+      // If seller has crossed the free limit
+      if (currentProductCount >= FREE_LIMIT) {
+          // Fetch fresh user data with session to ensure atomic read
+          const seller = await User.findById(sellerId).session(session);
+
+          // Check Balance
+          if (seller.walletBalance < PRODUCT_FEE) {
+              await session.abortTransaction();
+              session.endSession();
+              return res.status(400).json({ 
+                  message: `Free limit (20 products) reached. Insufficient wallet balance to add more. Fee: ₹${PRODUCT_FEE}. Please recharge.` 
+              });
+          }
+
+          // Deduct Fee
+          const balanceBefore = seller.walletBalance;
+          seller.walletBalance -= PRODUCT_FEE;
+          await seller.save({ session });
+
+          // Log Transaction
+          await WalletTransaction.create([{
+              seller: sellerId,
+              type: 'Debit',
+              amount: PRODUCT_FEE,
+              balanceBefore: balanceBefore,
+              balanceAfter: seller.walletBalance,
+              description: `Fee for adding product: ${productTitle}`
+          }], { session });
+
+          feeDeducted = true;
+      }
+      // ============================================================
+      // 💰 WALLET LOGIC (END)
+      // ============================================================
+
+
+      // --- 2. Basic Validation ---
       if (!productTitle || !category || !variants) {
-        return res.status(400).json({ message: 'Product title, category, and variants are required.' });
+        throw new Error('Product title, category, and variants are required.');
       }
 
-      // --- 2. Category and Type Validation ---
-      const parentCategory = await Category.findById(category);
+      // --- 3. Category Validation ---
+      const parentCategory = await Category.findById(category).session(session);
       if (!parentCategory) {
-        return res.status(404).json({ message: 'Selected category not found.' });
+        throw new Error('Selected category not found.');
       }
       if (parentCategory.type === 'service' && (!serviceDurationMinutes || parseInt(serviceDurationMinutes) <= 0)) {
-        return res.status(400).json({ message: 'Services must have a valid "Service Duration (in minutes)".' });
+        throw new Error('Services must have a valid "Service Duration".');
       } else if (parentCategory.type === 'product' && !unit) {
-        return res.status(400).json({ message: 'Products must have a "Unit" (e.g., kg, pcs).' });
+        throw new Error('Products must have a "Unit".');
       }
       if (!req.files.images || req.files.images.length === 0) {
-        return res.status(400).json({ message: 'At least one main product image is required.' });
+        throw new Error('At least one main product image is required.');
       }
 
-      // --- 3. Process Uploaded Files ---
+      // --- 4. Process Files ---
       const mainImages = req.files.images.map(file => ({
         url: file.path,
         publicId: file.filename,
@@ -3448,10 +3555,10 @@ app.post('/api/seller/products',
         uploadedVideo = { url: videoFile.path, publicId: videoFile.filename };
       }
 
-      // --- 4. Parse and Create Product Variants ---
+      // --- 5. Parse Variants ---
       const parsedVariants = JSON.parse(variants);
       if (!Array.isArray(parsedVariants) || parsedVariants.length === 0) {
-        return res.status(400).json({ message: 'At least one product variant is required.' });
+        throw new Error('At least one product variant is required.');
       }
 
       const productVariants = parsedVariants.map((variant, index) => {
@@ -3467,37 +3574,31 @@ app.post('/api/seller/products',
           storage: variant.storage || null,
           price: parseFloat(variant.price),
           originalPrice: variant.originalPrice ? parseFloat(variant.originalPrice) : null,
-          costPrice: variant.costPrice ? parseFloat(variant.costPrice) : null, // Assuming costPrice can be passed per variant
+          costPrice: variant.costPrice ? parseFloat(variant.costPrice) : null,
           stock: parseInt(variant.stock),
-          // ✅ Assign an uploaded image to this variant
           images: variantImages[index] ? [variantImages[index]] : []
         };
       });
 
-      // --- 5. Determine Top-Level Price and Stock from Variants ---
       const firstVariant = productVariants[0];
       const totalStock = productVariants.reduce((sum, v) => sum + v.stock, 0);
 
-      // --- 6. Process Pincodes and Global Flag (NEW LOGIC) ---
+      // --- 6. Pincodes & Global Flag ---
       let finalPincodes = req.user.pincodes || [];
       if (pincodeList) {
           try {
-              // Parse the JSON string from the request body
               const parsedPincodes = JSON.parse(pincodeList);
               if (Array.isArray(parsedPincodes)) {
-                  // If a valid array is provided, use it
                   finalPincodes = parsedPincodes.filter(p => typeof p === 'string' && p.length > 0);
               }
           } catch (e) {
-              console.warn('PincodeList parsing failed, using seller default pincodes.', e);
-              // Fallback to seller's default pincodes if parsing fails
+              console.warn('Pincode parsing error, using default.', e);
               finalPincodes = req.user.pincodes || []; 
           }
       }
-      
-      const isProductGlobal = isGlobal === 'true'; // Convert string 'true'/'false' to boolean
+      const isProductGlobal = isGlobal === 'true';
 
-      // --- 7. Prepare Final Product Data ---
+      // --- 7. Prepare Data ---
       const finalSubcategory = childCategory || subcategory;
       const productData = {
         name: productTitle,
@@ -3505,23 +3606,24 @@ app.post('/api/seller/products',
         brand,
         category,
         subcategory: finalSubcategory,
-        // Set main price/stock from the first variant
         price: firstVariant.price,
         originalPrice: firstVariant.originalPrice,
         stock: totalStock,
         unit: parentCategory.type === 'product' ? unit : undefined,
         shortDescription,
         fullDescription,
-        images: mainImages, // Main gallery images
+        images: mainImages,
         uploadedVideo,
         videoLink,
-        variants: productVariants, // ✅ Save the detailed variants array
+        variants: productVariants,
         seller: req.user._id,
-        
-        // ✨ [NEW]: Save pincode list and isGlobal flag
         pincodes: finalPincodes, 
-        isGlobal: isProductGlobal, 
+        isGlobal: isProductGlobal,
         
+        // ✅ [ADDED BACK] Daily Update & Low Stock Logic
+        dailyPriceUpdate: dailyPriceUpdate === 'true', 
+        lowStockThreshold: lowStockThreshold ? parseInt(lowStockThreshold) : 5,
+
         serviceDurationMinutes: parentCategory.type === 'service' ? parseInt(serviceDurationMinutes) : undefined,
         specifications: specifications ? JSON.parse(specifications) : {},
         shippingDetails: { 
@@ -3540,20 +3642,36 @@ app.post('/api/seller/products',
         },
       };
 
-      // --- 8. Create Product and Send Response ---
-      const product = await Product.create(productData);
-      res.status(201).json(product);
+      // --- 8. Create Product (WITH SESSION) ---
+      // Note: Model.create([data], { session }) returns an array
+      const createdProducts = await Product.create([productData], { session });
+      const product = createdProducts[0];
+
+      // ✅ Commit the transaction (Save money deduction + Product)
+      await session.commitTransaction();
+      session.endSession();
+
+      res.status(201).json({
+          message: feeDeducted 
+            ? `Product added successfully. ₹${PRODUCT_FEE} deducted from wallet.` 
+            : 'Product added successfully (Free Slot).',
+          product
+      });
 
     } catch (err) {
+      // ❌ If anything fails, Abort transaction (Refund money if deducted, don't save product)
+      await session.abortTransaction();
+      session.endSession();
+      
       console.error('Create product error:', err);
-      if (err.name === 'ValidationError' || err.message.includes('must have a price and stock') || err.message.includes('MRP cannot be less than selling price')) {
+      
+      if (err.name === 'ValidationError' || err.message.includes('must have a price') || err.message.includes('MRP')) {
         return res.status(400).json({ message: 'Validation failed', error: err.message });
       }
       res.status(500).json({ message: 'Error creating product', error: err.message });
     }
   }
 );
-
 app.post('/api/seller/products/bulk', protect, authorizeRole('seller', 'admin'), checkSellerApproved, upload.array('images', 100), async (req, res) => {
   try {
     const { products } = req.body;
@@ -3636,9 +3754,13 @@ app.put('/api/seller/products/:id', protect, authorizeRole('seller', 'admin'), c
       warranty, returnPolicy, tags, serviceDurationMinutes, isTrending,
       variants, imagesToDelete,
       
-      // ✨ [NEW]: Add fields for updating pincode and global setting
+      // ✨ [NEW]: Fields for updating pincode and global setting
       pincodeList, // Expected: JSON string of a string array, e.g., '["800001", "800002"]'
       isGlobal,    // Expected: string 'true' or 'false'
+
+      // ✅ [ADDED]: Fields for Vegetable/Fruit Sellers (Daily Updates & Alerts)
+      dailyPriceUpdate, 
+      lowStockThreshold
 
     } = req.body;
 
@@ -3652,7 +3774,7 @@ app.put('/api/seller/products/:id', protect, authorizeRole('seller', 'admin'), c
     
     // --- 1. Image Deletion (Main Images) ---
     if (imagesToDelete) {
-      const idsToDelete = Array.isArray(imagesToDelete) ? imagesToDelete : [imagesToDelete];
+      const idsToDelete = Array.isArray(imagesToDelete) ? idsToDelete : [imagesToDelete];
       await Promise.all(idsToDelete.map(publicId => cloudinary.uploader.destroy(publicId)));
       product.images = product.images.filter(img => !idsToDelete.includes(img.publicId));
     }
@@ -3761,6 +3883,14 @@ app.put('/api/seller/products/:id', protect, authorizeRole('seller', 'admin'), c
     if (specifications) product.specifications = specifications ? JSON.parse(specifications) : {};
     if (tags) product.otherInformation.tags = tags ? JSON.parse(tags) : [];
 
+    // ✅ [ADDED]: Update Logic for Daily Price & Low Stock
+    if (typeof dailyPriceUpdate !== 'undefined') {
+        product.dailyPriceUpdate = dailyPriceUpdate === 'true';
+    }
+    if (lowStockThreshold) {
+        product.lowStockThreshold = parseInt(lowStockThreshold);
+    }
+
     const finalSubcategory = childCategory || subcategory;
     if (finalSubcategory) product.subcategory = finalSubcategory;
 
@@ -3786,6 +3916,87 @@ app.put('/api/seller/products/:id', protect, authorizeRole('seller', 'admin'), c
     }
     res.status(500).json({ message: 'Error updating product', error: err.message });
   }
+});
+
+// ✅ NEW CRON JOB: Daily Price Update Reminder (Runs daily at 7:00 AM)
+cron.schedule('0 7 * * *', async () => {
+  console.log('⏰ Running Daily Price Update Reminder...');
+  
+  try {
+    // 1. Find all products marked for daily update
+    // We only need the seller IDs, so we group by seller
+    const productsNeedingUpdate = await Product.find({ dailyPriceUpdate: true, stock: { $gt: 0 } })
+        .populate('seller', 'fcmToken name phone');
+
+    // 2. Extract Unique Sellers (taaki ek seller ko 10 bar msg na jaye)
+    const sellerMap = new Map();
+    
+    productsNeedingUpdate.forEach(p => {
+        if (p.seller && !sellerMap.has(p.seller._id.toString())) {
+            sellerMap.set(p.seller._id.toString(), p.seller);
+        }
+    });
+
+    // 3. Send Notifications
+    for (const seller of sellerMap.values()) {
+        const msg = `Good Morning ${seller.name}! ☀️\nPlease update your Vegetable/Fruit prices for today to ensure correct orders.`;
+
+        // Send WhatsApp
+        if (seller.phone) {
+            await sendWhatsApp(seller.phone, `🥦 *Daily Price Update*\n\n${msg}`);
+        }
+
+        // Send Push Notification
+        if (seller.fcmToken) {
+            await sendPushNotification(
+                [seller.fcmToken],
+                'Update Prices Today 📝',
+                'Market rates change daily! Tap to update your product prices now.',
+                { type: 'DAILY_PRICE_UPDATE' }
+            );
+        }
+    }
+    
+    console.log(`✅ Daily reminders sent to ${sellerMap.size} sellers.`);
+
+  } catch (err) {
+    console.error('❌ Daily Price Cron Failed:', err.message);
+  }
+});
+
+// ✅ GET ALERTS API (For Seller Dashboard Pop-up)
+app.get('/api/seller/alerts', protect, authorizeRole('seller'), async (req, res) => {
+    try {
+        // Find products with low stock
+        // Logic: stock <= lowStockThreshold
+        const lowStockProducts = await Product.find({
+            seller: req.user._id,
+            $expr: { $lte: ["$stock", "$lowStockThreshold"] } // Compare fields
+        }).select('name stock lowStockThreshold images');
+
+        // Find products needing daily update (Optional logic: You can verify last updated date)
+        const dailyUpdateProducts = await Product.find({
+            seller: req.user._id,
+            dailyPriceUpdate: true
+        }).select('name price updatedAt');
+
+        // Filter daily products that haven't been updated TODAY
+        const startOfToday = new Date();
+        startOfToday.setHours(0,0,0,0);
+        
+        const pendingDailyUpdates = dailyUpdateProducts.filter(p => {
+            return new Date(p.updatedAt) < startOfToday;
+        });
+
+        res.json({
+            lowStock: lowStockProducts,
+            pendingUpdates: pendingDailyUpdates,
+            totalAlerts: lowStockProducts.length + pendingDailyUpdates.length
+        });
+
+    } catch (err) {
+        res.status(500).json({ message: 'Error fetching alerts' });
+    }
 });
 
 
@@ -7115,7 +7326,12 @@ app.post('/api/wallet/verify-recharge', protect, async (req, res) => {
         const { razorpay_order_id, razorpay_payment_id, razorpay_signature, amount } = req.body;
         const user = req.user;
 
-        // Verify Signature
+        // ✅ 1. Role Validation: Allow both Drivers and Sellers
+        if (user.role !== 'driver' && user.role !== 'seller') {
+             return res.status(403).json({ message: 'Wallet feature is only for drivers and sellers' });
+        }
+
+        // ✅ 2. Verify Razorpay Signature
         const shasum = crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET);
         shasum.update(`${razorpay_order_id}|${razorpay_payment_id}`);
         const digest = shasum.digest('hex');
@@ -7124,18 +7340,23 @@ app.post('/api/wallet/verify-recharge', protect, async (req, res) => {
             return res.status(400).json({ message: 'Transaction verification failed' });
         }
 
-        // ✅ Update Wallet
+        // ✅ 3. Update Wallet Balance
         const rechargeAmount = parseFloat(amount);
         const balanceBefore = user.walletBalance;
         user.walletBalance += rechargeAmount;
 
-        if (user.walletBalance >= MIN_DRIVER_BALANCE) user.isLocked = false;
+        // ✅ 4. Driver Specific Logic: Unlock if balance covers minimum
+        // (Sellers don't usually get "locked" from the app, they just can't add products)
+        if (user.role === 'driver' && user.walletBalance >= MIN_DRIVER_BALANCE) {
+            user.isLocked = false;
+        }
 
         await user.save();
 
-        // Log Transaction
+        // ✅ 5. Log Transaction (Dynamic based on Role)
         await WalletTransaction.create({
-            driver: user._id,
+            driver: user.role === 'driver' ? user._id : undefined, // Only set if driver
+            seller: user.role === 'seller' ? user._id : undefined, // Only set if seller
             type: 'Credit',
             amount: rechargeAmount,
             balanceBefore,
@@ -7144,8 +7365,9 @@ app.post('/api/wallet/verify-recharge', protect, async (req, res) => {
         });
 
         res.json({ message: 'Wallet recharged successfully!', newBalance: user.walletBalance });
+
     } catch (err) {
-        console.error("Verify Error:", err);
+        console.error("Verify Recharge Error:", err);
         res.status(500).json({ message: 'Verification failed' });
     }
 });
