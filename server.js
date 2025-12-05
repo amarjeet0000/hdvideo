@@ -1028,7 +1028,7 @@ app.post('/api/auth/register-with-otp', async (req, res) => {
 
 
         // 4. Registration successful, generate local JWT token
-        const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+        const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '365d' });
         
         await sendWhatsApp(user.phone, `🎉 Welcome, ${user.name}! Your account is created. You can now log in and start shopping.`);
         
@@ -1095,7 +1095,7 @@ app.post('/api/auth/verify-login-otp', async (req, res) => {
     }
 
     // 3. Login successful, generate local JWT token
-    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '365d' });
     res.json({ 
         token, 
         user: { 
@@ -1198,7 +1198,7 @@ app.post('/api/auth/register', async (req, res) => {
       }
     }
 
-    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '365d' });
     
     res.status(201).json({ 
         token, 
@@ -1248,7 +1248,7 @@ app.post('/api/auth/login', async (req, res) => {
     if (user.role === 'seller' && !user.approved) return res.status(403).json({ message: 'Seller account awaiting admin approval' });
 
 
-    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '365d' });
     res.json({ token, user: { id: user._id, name: user.name, email: user.email, phone: user.phone, role: user.role, pincodes: user.pincodes, approved: user.approved } });
   } catch (err) {
     console.error('Login error:', err.message);
@@ -3285,34 +3285,75 @@ app.delete('/api/products/:id/reviews/:reviewId', protect, authorizeRole('admin'
   }
 });
 
+// --------------------------------------------------------------------------------
+// --------- ADDRESS ROUTES (User: Add, Edit, Delete, Get) ----------
+// --------------------------------------------------------------------------------
+
+// 1. Get All Addresses
 app.get('/api/addresses', protect, async (req, res) => {
   try {
+    // Sort by isDefault (-1 puts true first) so default address shows at top
     const addresses = await Address.find({ user: req.user._id }).sort({ isDefault: -1 });
     res.json(addresses);
   } catch (err) {
-    res.status(500).json({ message: 'Error fetching addresses' });
+    res.status(500).json({ message: 'Error fetching addresses', error: err.message });
   }
 });
 
+// 2. Add New Address
 app.post('/api/addresses', protect, async (req, res) => {
   try {
-    const { name, street, village, landmark, city, state, pincode, phone, isDefault = false } = req.body;
+    const { name, street, village, landmark, city, state, pincode, phone, isDefault } = req.body;
+
+    // Check if this is the user's first address. If so, make it default automatically.
+    const addressCount = await Address.countDocuments({ user: req.user._id });
+    let shouldBeDefault = isDefault === true;
+    if (addressCount === 0) {
+        shouldBeDefault = true;
+    }
+
+    // If this new address is set to default, unset previous default
+    if (shouldBeDefault) {
+      await Address.updateMany({ user: req.user._id }, { isDefault: false });
+    }
+
     const newAddress = await Address.create({
       user: req.user._id,
-      name, street, village, landmark, city, state, pincode, phone, isDefault
+      name, 
+      street, 
+      village, 
+      landmark, 
+      city, 
+      state, 
+      pincode, 
+      phone, 
+      isDefault: shouldBeDefault
     });
+    
     res.status(201).json(newAddress);
   } catch (err) {
-    res.status(500).json({ message: 'Error adding address' });
+    console.error("Add Address Error:", err.message);
+    res.status(500).json({ message: 'Error adding address', error: err.message });
   }
 });
 
+// 3. Edit Address
 app.put('/api/addresses/:id', protect, async (req, res) => {
   try {
     const { name, street, village, landmark, city, state, pincode, phone, isDefault } = req.body;
+    
+    // Find address and ensure it belongs to the logged-in user
     const address = await Address.findOne({ _id: req.params.id, user: req.user._id });
-    if (!address) return res.status(404).json({ message: 'Address not found or you do not have permission' });
+    if (!address) {
+        return res.status(404).json({ message: 'Address not found or you do not have permission' });
+    }
 
+    // If setting as default, unset all other addresses for this user first
+    if (isDefault === true) {
+      await Address.updateMany({ user: req.user._id }, { isDefault: false });
+    }
+
+    // Update fields if provided
     if (name) address.name = name;
     if (street) address.street = street;
     if (village) address.village = village;
@@ -3326,22 +3367,29 @@ app.put('/api/addresses/:id', protect, async (req, res) => {
     await address.save();
     res.json(address);
   } catch (err) {
-    res.status(500).json({ message: 'Error updating address' });
+    console.error("Edit Address Error:", err.message);
+    res.status(500).json({ message: 'Error updating address', error: err.message });
   }
 });
 
-app.delete('/api/addresses/:id', protect, authorizeRole('admin'), async (req, res) => {
+// 4. Delete Address
+app.delete('/api/addresses/:id', protect, async (req, res) => {
   try {
+    // Find address ensuring it belongs to the user (security check)
+    // REMOVED authorizeRole('admin') so users can delete their own
     const address = await Address.findOne({ _id: req.params.id, user: req.user._id });
-    if (!address) return res.status(404).json({ message: 'Address not found or you do not have permission' });
+    
+    if (!address) {
+        return res.status(404).json({ message: 'Address not found or you do not have permission' });
+    }
 
     await address.deleteOne();
     res.json({ message: 'Address deleted successfully' });
   } catch (err) {
-    res.status(500).json({ message: 'Error deleting address' });
+    console.error("Delete Address Error:", err.message);
+    res.status(500).json({ message: 'Error deleting address', error: err.message });
   }
 });
-
 
 // --------- Seller Routes ----------
 app.get('/api/seller/categories-and-subcategories', protect, authorizeRole('seller', 'admin'), async (req, res) => {
