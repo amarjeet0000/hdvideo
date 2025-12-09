@@ -412,12 +412,24 @@ const serviceBookingSchema = new mongoose.Schema({
 
 const ServiceBooking = mongoose.model('ServiceBooking', serviceBookingSchema);
 
+// --------- Models ----------
+
 const appSettingsSchema = new mongoose.Schema({
   singleton: { type: Boolean, default: true, unique: true, index: true },
+  
+  // 1. Commission Rate (Platform Earnings)
   platformCommissionRate: { type: Number, default: 0.05, min: 0, max: 1 },
   
-  // ✅ NEW FIELD: Fee to charge seller for adding products after the free limit
-  productCreationFee: { type: Number, default: 10 } 
+  // 2. Product Creation Fee (Seller Wallet)
+  productCreationFee: { type: Number, default: 10 }, 
+  
+  // 3. Theme Colors (Flipkart Style UI)
+  theme: {
+    primaryColor: { type: String, default: '#2874F0' }, // Flipkart Blue
+    secondaryColor: { type: String, default: '#FFC200' }, // Yellow
+    backgroundColor: { type: String, default: '#F1F3F6' }, // Light Grey
+    searchBarColor: { type: String, default: '#FFFFFF' }
+  }
 });
 const AppSettings = mongoose.model('AppSettings', appSettingsSchema);
 
@@ -430,8 +442,15 @@ const categorySchema = new mongoose.Schema({
     url: String,
     publicId: String
   },
-  sortOrder: { type: Number, default: 0, index: true }
+  sortOrder: { type: Number, default: 0, index: true },
+
+  // ✅ NEW: Design properties for Flipkart-style UI
+  bgColor: { type: String, default: '#FFFFFF' },        // Circle/Square Background Color
+  textColor: { type: String, default: '#000000' },      // Category Name Color
+  shape: { type: String, enum: ['circle', 'square', 'rectangle'], default: 'circle' }, // Shape
+  borderColor: { type: String, default: 'transparent' } // Optional Border
 }, { timestamps: true });
+
 const Category = mongoose.model('Category', categorySchema);
 
 // --- NEW SERVICE MODEL (Separated from Product) ---
@@ -1499,19 +1518,31 @@ app.get('/api/admin/categories', protect, authorizeRole('admin'), async (req, re
 
 app.post('/api/admin/categories', protect, authorizeRole('admin'), upload.single('image'), async (req, res) => {
   try {
-    const { name, type, sortOrder } = req.body;
+    // ✅ Extract new design fields from request body
+    const { name, type, sortOrder, bgColor, textColor, shape, borderColor } = req.body;
+    
     if (!name) return res.status(400).json({ message: 'Category name is required' });
+    
     const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    
     const category = await Category.create({
       name,
       slug,
       type: type || 'product',
       sortOrder: sortOrder || 0,
+      
+      // ✅ Save Design Properties (with defaults if not provided)
+      bgColor: bgColor || '#FFFFFF',
+      textColor: textColor || '#000000',
+      shape: shape || 'circle',
+      borderColor: borderColor || 'transparent',
+      
       image: {
         url: req.file ? req.file.path : undefined,
         publicId: req.file ? req.file.filename : undefined,
       }
     });
+    
     res.status(201).json(category);
   } catch (err) {
     if (err.code === 11000) return res.status(409).json({ message: 'Category with this name already exists' });
@@ -1521,17 +1552,31 @@ app.post('/api/admin/categories', protect, authorizeRole('admin'), upload.single
 
 app.put('/api/admin/categories/:id', protect, authorizeRole('admin'), upload.single('image'), async (req, res) => {
   try {
-    const { name, isActive, type, sortOrder } = req.body;
+    // ✅ Extract new design fields along with existing ones
+    const { name, isActive, type, sortOrder, bgColor, textColor, shape, borderColor } = req.body;
+    
     const category = await Category.findById(req.params.id);
     if (!category) return res.status(404).json({ message: 'Category not found' });
+
+    // --- Image Update Logic ---
     if (req.file) {
       if (category.image && category.image.publicId) await cloudinary.uploader.destroy(category.image.publicId);
       category.image = { url: req.file.path, publicId: req.file.filename };
     }
+
+    // --- Name & Slug Logic ---
     if (name) {
       category.name = name;
       category.slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
     }
+
+    // --- ✅ Update Design Fields ---
+    if (bgColor) category.bgColor = bgColor;
+    if (textColor) category.textColor = textColor;
+    if (shape) category.shape = shape;
+    if (borderColor) category.borderColor = borderColor;
+
+    // --- Update Standard Fields ---
     if (typeof isActive !== 'undefined') category.isActive = isActive;
     if (type) category.type = type;
     if (typeof sortOrder !== 'undefined') category.sortOrder = sortOrder;
@@ -5244,12 +5289,17 @@ app.get('/api/splash', async (req, res) => {
     res.status(500).json({ message: 'Error fetching splash screen' });
   }
 });
+// GET Settings
 app.get('/api/admin/settings', protect, authorizeRole('admin'), async (req, res) => {
   try {
-    const settings = await AppSettings.findOne({ singleton: true });
+    let settings = await AppSettings.findOne({ singleton: true });
     if (!settings) {
-      const newSettings = await AppSettings.create({ singleton: true, platformCommissionRate: 0.05 });
-      return res.json(newSettings);
+      // Create default if not exists
+      settings = await AppSettings.create({ 
+          singleton: true, 
+          platformCommissionRate: 0.05,
+          productCreationFee: 10 
+      });
     }
     res.json(settings);
   } catch (err) {
@@ -5258,14 +5308,15 @@ app.get('/api/admin/settings', protect, authorizeRole('admin'), async (req, res)
   }
 });
 
+// PUT Settings (Update Fee & Theme)
 app.put('/api/admin/settings', protect, authorizeRole('admin'), async (req, res) => {
   try {
-    // 1. Extract 'theme' along with 'platformCommissionRate'
-    const { platformCommissionRate, theme } = req.body;
+    // 1. Extract all fields from request
+    const { platformCommissionRate, productCreationFee, theme } = req.body;
     
     const updateData = {};
 
-    // --- Commission Rate Logic ---
+    // --- Update Commission Rate ---
     if (typeof platformCommissionRate !== 'undefined') {
       const rate = parseFloat(platformCommissionRate);
       if (rate < 0 || rate > 1) {
@@ -5274,8 +5325,16 @@ app.put('/api/admin/settings', protect, authorizeRole('admin'), async (req, res)
       updateData.platformCommissionRate = rate;
     }
 
-    // --- ✅ NEW: Theme Colors Logic ---
-    // Expecting payload like: { theme: { primaryColor: '#FF0000', backgroundColor: '#FFFFFF' } }
+    // --- ✅ Update Product Creation Fee ---
+    if (typeof productCreationFee !== 'undefined') {
+        const fee = parseFloat(productCreationFee);
+        if (fee < 0) {
+            return res.status(400).json({ message: 'Product Creation Fee cannot be negative.' });
+        }
+        updateData.productCreationFee = fee;
+    }
+
+    // --- Update Theme Colors ---
     if (theme) {
       updateData.theme = theme;
     }
@@ -5291,13 +5350,9 @@ app.put('/api/admin/settings', protect, authorizeRole('admin'), async (req, res)
 
   } catch (err) {
     console.error('Error updating settings:', err.message);
-    if (err.name === 'ValidationError') {
-      return res.status(400).json({ message: 'Validation failed', error: err.message });
-    }
     res.status(500).json({ message: 'Error updating app settings', error: err.message });
   }
 });
-
 app.get('/api/admin/reports/sales', protect, authorizeRole('admin'), async (req, res) => {
   try {
     const salesReport = await Order.aggregate([
@@ -7885,6 +7940,7 @@ app.post('/api/admin/drivers/:id/punish', protect, authorizeRole('admin'), async
 });
 
 // ✅ NEW: Get Home Layout & Theme
+// ✅ NEW: Get Home Layout & Theme (Flipkart Style)
 app.get('/api/home/layout', async (req, res) => {
   try {
     // 1. Settings (Colors) layein
@@ -7894,9 +7950,10 @@ app.get('/api/home/layout', async (req, res) => {
     }
 
     // 2. Categories layein (Sorted)
+    // ✅ Added 'borderColor' to select
     const categories = await Category.find({ isActive: true })
       .sort({ sortOrder: 1 })
-      .select('name image slug type bgColor textColor shape'); // Color fields bhi select karein
+      .select('name image slug type bgColor textColor shape borderColor'); 
 
     // 3. Banners layein
     const banners = await Banner.find({ isActive: true, position: 'top' });
