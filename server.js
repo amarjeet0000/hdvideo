@@ -1428,7 +1428,7 @@ app.get('/api/categories', async (req, res) => {
         // 2. Basic Filter for the non-aggregation path
         const categoryFilter = {};
         if (typeof active !== 'undefined') categoryFilter.isActive = active === 'true';
-        if (type) categoryFilter.type = type; // ✅ Filter by type (product/service)
+        if (type) categoryFilter.type = type;
 
         let categories;
 
@@ -1440,7 +1440,6 @@ app.get('/api/categories', async (req, res) => {
                 'categoryDetails.isActive': categoryFilter.isActive !== undefined ? categoryFilter.isActive : { $exists: true }
             };
 
-            // ✅ Apply Type filter inside aggregation if provided
             if (type) {
                 categoryMatchStage['categoryDetails.type'] = type;
             }
@@ -1463,7 +1462,7 @@ app.get('/api/categories', async (req, res) => {
                 { $unwind: '$categoryDetails' },
                 // Stage 4: Filter the actual Category details (Active + Type)
                 { $match: categoryMatchStage },
-                // Stage 5: Format output
+                // Stage 5: Format output (✅ Added Design Fields Here)
                 { $project: {
                     _id: '$categoryDetails._id',
                     name: '$categoryDetails.name',
@@ -1472,6 +1471,11 @@ app.get('/api/categories', async (req, res) => {
                     image: '$categoryDetails.image',
                     type: '$categoryDetails.type',
                     sortOrder: '$categoryDetails.sortOrder',
+                    // ✅ Dynamic Design Fields
+                    bgColor: '$categoryDetails.bgColor',
+                    textColor: '$categoryDetails.textColor',
+                    shape: '$categoryDetails.shape',
+                    borderColor: '$categoryDetails.borderColor'
                 }},
                 // Stage 6: Sort
                 { $sort: { sortOrder: 1, name: 1 } }
@@ -1481,7 +1485,8 @@ app.get('/api/categories', async (req, res) => {
             // 4. Default (No Pincode): Simple Find
             categories = await Category.find(categoryFilter)
                 .sort({ sortOrder: 1, name: 1 })
-                .select('name slug isActive image type sortOrder');
+                // ✅ Added Design Fields to Select
+                .select('name slug isActive image type sortOrder bgColor textColor shape borderColor');
         }
 
         res.json(categories);
