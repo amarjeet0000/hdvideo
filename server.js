@@ -423,12 +423,15 @@ const appSettingsSchema = new mongoose.Schema({
   // 2. Product Creation Fee (Seller Wallet)
   productCreationFee: { type: Number, default: 10 }, 
   
-  // 3. Theme Colors (Flipkart Style UI)
+  // 3. Theme Colors & Layout (Flipkart Style UI)
   theme: {
     primaryColor: { type: String, default: '#2874F0' }, // Flipkart Blue
     secondaryColor: { type: String, default: '#FFC200' }, // Yellow
     backgroundColor: { type: String, default: '#F1F3F6' }, // Light Grey
-    searchBarColor: { type: String, default: '#FFFFFF' }
+    searchBarColor: { type: String, default: '#FFFFFF' },
+    
+    // ✅ NEW FIELD: Controls if categories show as 'horizontal' (Flipkart) or 'grid'
+    categoryLayout: { type: String, enum: ['horizontal', 'grid', 'list'], default: 'horizontal' }
   }
 });
 const AppSettings = mongoose.model('AppSettings', appSettingsSchema);
