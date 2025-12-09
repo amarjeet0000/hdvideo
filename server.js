@@ -5260,9 +5260,12 @@ app.get('/api/admin/settings', protect, authorizeRole('admin'), async (req, res)
 
 app.put('/api/admin/settings', protect, authorizeRole('admin'), async (req, res) => {
   try {
-    const { platformCommissionRate } = req.body;
+    // 1. Extract 'theme' along with 'platformCommissionRate'
+    const { platformCommissionRate, theme } = req.body;
     
     const updateData = {};
+
+    // --- Commission Rate Logic ---
     if (typeof platformCommissionRate !== 'undefined') {
       const rate = parseFloat(platformCommissionRate);
       if (rate < 0 || rate > 1) {
@@ -5271,6 +5274,13 @@ app.put('/api/admin/settings', protect, authorizeRole('admin'), async (req, res)
       updateData.platformCommissionRate = rate;
     }
 
+    // --- ✅ NEW: Theme Colors Logic ---
+    // Expecting payload like: { theme: { primaryColor: '#FF0000', backgroundColor: '#FFFFFF' } }
+    if (theme) {
+      updateData.theme = theme;
+    }
+
+    // --- Update Database ---
     const updatedSettings = await AppSettings.findOneAndUpdate(
       { singleton: true },
       { $set: updateData },
@@ -5278,6 +5288,7 @@ app.put('/api/admin/settings', protect, authorizeRole('admin'), async (req, res)
     );
 
     res.json(updatedSettings);
+
   } catch (err) {
     console.error('Error updating settings:', err.message);
     if (err.name === 'ValidationError') {
@@ -7872,6 +7883,52 @@ app.post('/api/admin/drivers/:id/punish', protect, authorizeRole('admin'), async
         res.status(500).json({ error: err.message });
     }
 });
+
+// ✅ NEW: Get Home Layout & Theme
+app.get('/api/home/layout', async (req, res) => {
+  try {
+    // 1. Settings (Colors) layein
+    let settings = await AppSettings.findOne({ singleton: true });
+    if (!settings) {
+       settings = await AppSettings.create({ singleton: true }); // Default bana dein agar nahi hai
+    }
+
+    // 2. Categories layein (Sorted)
+    const categories = await Category.find({ isActive: true })
+      .sort({ sortOrder: 1 })
+      .select('name image slug type bgColor textColor shape'); // Color fields bhi select karein
+
+    // 3. Banners layein
+    const banners = await Banner.find({ isActive: true, position: 'top' });
+
+    // 4. Response structure (Flipkart Style JSON)
+    res.json({
+      theme: settings.theme, // Global Colors (App Bar, Background)
+      layout: [
+        {
+          type: 'search_bar',
+          backgroundColor: settings.theme.searchBarColor
+        },
+        {
+          type: 'category_grid',
+          data: categories, // Isme har category ka color/shape hoga
+          backgroundColor: '#FFFFFF'
+        },
+        {
+          type: 'hero_banner',
+          data: banners,
+          aspectRatio: 2.5 // Example: Banner ki height control karne ke liye
+        }
+        // Aap yahan aur sections add kar sakte hain (e.g., 'horizontal_list')
+      ]
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Error fetching home layout' });
+  }
+});
+
 
 
 const IP = '0.0.0.0';
