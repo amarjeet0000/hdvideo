@@ -1943,27 +1943,31 @@ app.get('/api/products/:id', async (req, res) => {
 
 // [NEW] API Endpoint to get products available in a specific pincode
 // [NEW] API Endpoint to get products available in a specific pincode
+// [UPDATED] API Endpoint to get products by pincode + Calculate Distance
 app.get('/api/products/pincode/:pincode', async (req, res) => {
     try {
         const userPincode = req.params.pincode;
+        
+        // ✅ 1. Get User Coordinates from Query Params
+        const userLat = req.query.lat ? parseFloat(req.query.lat) : null;
+        const userLng = req.query.lng ? parseFloat(req.query.lng) : null;
+
         if (!userPincode) {
-            return res.status(400).json({ message: 'Pincode is required for this search.' });
+            return res.status(400).json({ message: 'Pincode is required.' });
         }
 
-        // --- Aggregation Pipeline for Pincode Filtering ---
-        const products = await Product.aggregate([
+        // --- Aggregation Pipeline ---
+        let products = await Product.aggregate([
             // Stage 1: Filter products by Pincode OR isGlobal
             { $match: { 
                 $or: [
-                    // A) The product is available globally
                     { isGlobal: true },
-                    // B) OR The user's pincode is in the product's allowed list
                     { pincodes: userPincode }
                 ],
-                // AND must be in stock
-                stock: { $gt: 0 } // Only show in-stock products
+                stock: { $gt: 0 } // Only in-stock
             }},
-            // Stage 2: Join with Seller (User) details to get seller's name/info
+            
+            // Stage 2: Join with Seller (User) details
             { $lookup: {
                 from: "users",
                 localField: "seller",
@@ -1981,7 +1985,7 @@ app.get('/api/products/pincode/:pincode', async (req, res) => {
             }},
             { $unwind: { path: "$category", preserveNullAndEmptyArrays: true } },
             
-            // Stage 4: Project only the necessary fields
+            // Stage 4: Project fields (✅ Include Seller Location)
             { $project: {
                 name: 1,
                 price: 1,
@@ -1993,14 +1997,46 @@ app.get('/api/products/pincode/:pincode', async (req, res) => {
                 shortDescription: 1,
                 isTrending: 1,
                 "seller.name": 1,
+                "seller.location": 1, // ✅ Seller coordinates (GeoJSON) fetch here
                 "category.name": 1,
                 createdAt: 1,
-                pincodes: 1, // Show which pincodes this product covers
-                isGlobal: 1, // Include the flag in the output
+                pincodes: 1,
+                isGlobal: 1,
             }},
             // Stage 5: Sort by newest first
             { $sort: { createdAt: -1 } }
         ]);
+
+        // ✅ 2. Calculate Distance for each product (If User Location provided)
+        if (userLat && userLng) {
+            products = products.map(product => {
+                let distance = null;
+                
+                // Check if seller has valid coordinates [lng, lat]
+                if (product.seller && product.seller.location && 
+                    product.seller.location.coordinates && 
+                    product.seller.location.coordinates.length === 2) {
+                    
+                    // MongoDB stores as [Longitude, Latitude]
+                    const sellerLng = product.seller.location.coordinates[0];
+                    const sellerLat = product.seller.location.coordinates[1];
+
+                    // Calculate distance using helper function
+                    // Ensure getDistanceFromLatLonInKm is defined in your server.js
+                    const distRaw = getDistanceFromLatLonInKm(userLat, userLng, sellerLat, sellerLng);
+                    distance = parseFloat(distRaw.toFixed(1)); // 1 decimal place (e.g., 2.5 km)
+                }
+
+                return { ...product, distanceKm: distance };
+            });
+
+            // Optional: Sort by distance (Nearest First)
+            products.sort((a, b) => {
+                if (a.distanceKm === null) return 1;
+                if (b.distanceKm === null) return -1;
+                return a.distanceKm - b.distanceKm;
+            });
+        }
 
         if (products.length === 0) {
             return res.status(404).json({ message: `No products available for delivery to pincode ${userPincode}.` });
