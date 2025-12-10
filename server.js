@@ -1345,19 +1345,30 @@ app.get('/api/auth/profile', protect, async (req, res) => {
   }
 });
 
+// ✅ UPDATED: Update Profile (Now supports saving GPS Location)
 app.put('/api/auth/profile', protect, async (req, res) => {
   try {
-    const { name, phone, pincodes, pickupAddress } = req.body;
+    // 1. Extract lat/lng along with other fields
+    const { name, phone, pincodes, pickupAddress, lat, lng } = req.body;
+    
     const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
     if (name) user.name = name;
     if (phone) user.phone = phone;
     
-    // ✅ MODIFIED LOGIC: Check if 'pincodes' property is present in the request body.
-    // If present, overwrite user.pincodes with the new array (even if it's empty [] for Global Coverage).
+    // ✅ MODIFIED LOGIC: Check if 'pincodes' property is present
     if (pincodes !== undefined) { 
-        // Ensure it's an array before assigning, or default to empty array if null is sent.
         user.pincodes = Array.isArray(pincodes) ? pincodes : []; 
     } 
+
+    // ✅ NEW: Save Location Coordinates (For Distance Calculation)
+    if (lat && lng) {
+        user.location = {
+            type: 'Point',
+            coordinates: [parseFloat(lng), parseFloat(lat)] // MongoDB expects [Longitude, Latitude]
+        };
+    }
 
     if (user.role === 'seller' && pickupAddress) {
       user.pickupAddress = {
