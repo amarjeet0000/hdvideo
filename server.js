@@ -1753,17 +1753,16 @@ app.delete('/api/admin/subcategories/:id', protect, authorizeRole('admin'), asyn
 });
 
 
+// ✅ UPDATED: Main Products Route with Distance Calculation
 app.get('/api/products', async (req, res) => {
   try {
-    const { search, minPrice, maxPrice, categoryId, brand, subcategoryId, sellerId, userPincode } = req.query;
+    const { search, minPrice, maxPrice, categoryId, brand, subcategoryId, sellerId, userPincode, lat, lng } = req.query;
     const { ObjectId } = mongoose.Types;
 
-    // --- 1. Build initial match conditions (Pre-Pincode/Seller Join) ---
+    // --- 1. Build initial match conditions ---
     const initialMatchStage = {};
-    // Only show products that have at least one variant defined
     initialMatchStage['variants.0'] = { $exists: true };
     
-    // 🔍 Search filter
     if (search) {
       initialMatchStage.$or = [
         { name: { $regex: search, $options: "i" } },
@@ -1772,153 +1771,84 @@ app.get('/api/products', async (req, res) => {
       ];
     }
     
-    // 🏷️ Category filter
-    if (categoryId && mongoose.isValidObjectId(categoryId)) {
-      initialMatchStage.category = new ObjectId(categoryId);
-    }
-
-    // 🧩 Subcategory filter
+    if (categoryId && mongoose.isValidObjectId(categoryId)) initialMatchStage.category = new ObjectId(categoryId);
     if (subcategoryId && mongoose.isValidObjectId(subcategoryId)) {
-      // NOTE: This will match on both 'subcategory' and 'childCategory' fields
       initialMatchStage.$or = [
           { subcategory: new ObjectId(subcategoryId) },
           { childCategory: new ObjectId(subcategoryId) } 
       ];
     }
-
-    // 🏭 Brand filter
     if (brand) initialMatchStage.brand = { $regex: brand, $options: "i" };
-
-    // 👨‍💼 Seller filter
-    if (sellerId && mongoose.isValidObjectId(sellerId)) {
-      initialMatchStage.seller = new ObjectId(sellerId);
-    }
+    if (sellerId && mongoose.isValidObjectId(sellerId)) initialMatchStage.seller = new ObjectId(sellerId);
     
-    // Apply initial matching first
     const pipeline = [{ $match: initialMatchStage }];
     
-    // --- 2. Build aggregation pipeline (Pincode/Seller Joining) ---
-
-    const finalMatchStage = {}; // Will hold additional filters like minPrice/maxPrice
-    
-    // 🏠 If userPincode is given — join seller table first
+    // --- 2. Join Seller ---
     if (userPincode) {
       pipeline.push(
-        {
-          $lookup: {
-            from: "users",
-            localField: "seller",
-            foreignField: "_id",
-            as: "sellerDetails"
-          }
-        },
-        // Only keep products where the seller is found
+        { $lookup: { from: "users", localField: "seller", foreignField: "_id", as: "sellerDetails" } },
         { $unwind: "$sellerDetails" }, 
-        {
-          $match: {
-            // ✅ Match by user’s pincode in the seller's allowed list
-            "sellerDetails.pincodes": userPincode 
-          }
-        },
+        { $match: { "sellerDetails.pincodes": userPincode } },
         { $addFields: { seller: "$sellerDetails" } },
         { $unset: "sellerDetails" }
       );
     } else {
-      // 🔹 If no pincode, just join seller details without a pincode filter
       pipeline.push(
-        {
-          $lookup: {
-            from: "users",
-            localField: "seller",
-            foreignField: "_id",
-            as: "seller"
-          }
-        },
+        { $lookup: { from: "users", localField: "seller", foreignField: "_id", as: "seller" } },
         { $unwind: { path: "$seller", preserveNullAndEmptyArrays: true } }
       );
     }
 
-    // --- 3. Randomize order for homepage (If no specific filter like category is applied) ---
-    // If we are looking for a sample (like for trending/bestsellers on the homepage)
     if (req.query.sample === 'true') {
         const limit = parseInt(req.query.limit) || 20;
         pipeline.push({ $sample: { size: limit } });
     }
 
-
-    // --- 3.5. FIX: Derive price, originalPrice, and stock from variants ---
     pipeline.push({
         $addFields: {
-            // ✅ Lowest Price: Minimum value of all variants.price
             price: { $min: "$variants.price" },
-            
-            // 🔹 Highest Original Price: Maximum value of all variants.originalPrice
             originalPrice: { $max: "$variants.originalPrice" }, 
-            
-            // टोटल स्टॉक की गणना
             stock: { $sum: "$variants.stock" }, 
-            
-            // Variants array को भी भेजें ताकि Flutter में ProductDetail काम कर सके
             variants: "$variants" 
         }
     });
-    
-    // --- 3.6. Price range filter (Applied AFTER deriving price from variants) ---
-    if (minPrice || maxPrice) {
-      finalMatchStage.price = {};
-      if (minPrice) finalMatchStage.price.$gte = Number(minPrice);
-      if (maxPrice) finalMatchStage.price.$lte = Number(maxPrice);
-    }
-    
-    // Apply the price filter
-    if(Object.keys(finalMatchStage).length > 0) {
-        pipeline.push({ $match: finalMatchStage });
-    }
-    
-    // --- 4. Enrich category & subcategory info ---
+
+    // --- 3. Join Categories ---
     pipeline.push(
-      {
-        $lookup: {
-          from: "categories",
-          localField: "category",
-          foreignField: "_id",
-          as: "category"
-        }
-      },
+      { $lookup: { from: "categories", localField: "category", foreignField: "_id", as: "category" } },
       { $unwind: { path: "$category", preserveNullAndEmptyArrays: true } },
       {
-        $lookup: {
-          from: "subcategories",
-          localField: "subcategory",
-          foreignField: "_id",
-          as: "subcategory"
-        }
-      },
-      { $unwind: { path: "$subcategory", preserveNullAndEmptyArrays: true } },
-      {
         $project: {
-          name: 1,
-          price: 1,         // Lowest Price
-          originalPrice: 1, // Highest MRP
-          images: 1,
-          stock: 1,         // Total Stock
-          unit: 1,
-          brand: 1,
-          variants: 1,      // Important for Flutter models
-          shortDescription: 1,
-          isTrending: 1,    // Important for filtering
-          "seller._id": 1,
-          "seller.name": 1,
-          "seller.email": 1,
-          "category.name": 1,
-          "subcategory.name": 1,
-          createdAt: 1
+          name: 1, price: 1, originalPrice: 1, images: 1, stock: 1, unit: 1, brand: 1, variants: 1, 
+          shortDescription: 1, isTrending: 1, 
+          "seller._id": 1, "seller.name": 1, "seller.email": 1, "seller.location": 1, // ✅ Get Seller Location
+          "category.name": 1, createdAt: 1
         }
       }
     );
 
-    // --- 5. Execute query ---
-    const products = await Product.aggregate(pipeline);
+    let products = await Product.aggregate(pipeline);
+
+    // ✅ 4. Calculate Distance in Code
+    if (lat && lng) {
+        const userLat = parseFloat(lat);
+        const userLng = parseFloat(lng);
+
+        products = products.map(p => {
+            let dist = null;
+            if (p.seller && p.seller.location && p.seller.location.coordinates) {
+                const sLng = p.seller.location.coordinates[0];
+                const sLat = p.seller.location.coordinates[1];
+                // Reuse existing getDistanceFromLatLonInKm function in server.js
+                dist = parseFloat(getDistanceFromLatLonInKm(userLat, userLng, sLat, sLng).toFixed(1));
+            }
+            return { ...p, distanceKm: dist };
+        });
+
+        // Sort by distance (Nearest first)
+        products.sort((a, b) => (a.distanceKm || 9999) - (b.distanceKm || 9999));
+    }
+
     res.json(products);
   } catch (err) {
     console.error("❌ Get Products Error:", err);
