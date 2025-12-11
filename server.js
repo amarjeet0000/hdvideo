@@ -5009,63 +5009,32 @@ app.get('/api/admin/delivery-boys', protect, authorizeRole('admin'), async (req,
   }
 });
 
-// ✅ UPDATED: Admin Update User/Seller (Role, Approval, Delivery Settings)
 app.put('/api/admin/users/:id/role', protect, authorizeRole('admin'), async (req, res) => {
   try {
-    // 1. Extract all fields (Role, Approval, Delivery Settings)
-    const { role, approved, deliveryRangeKm, blockedPincodes, pincodes } = req.body;
-    
+    const { role, approved } = req.body;
     const user = await User.findById(req.params.id);
     if (!user) return res.status(404).json({ message: 'User not found' });
-
-    // 2. Update Basic Fields
     if (role) user.role = role;
-    
-    // 3. Update Approval Status & Send Notifications
     if (typeof approved !== 'undefined') {
-      // Logic for Seller Approval Notification
       if(user.role === 'seller' && approved === true && user.approved === false) {
         const msg = "Congratulations! Your seller account has been approved. You can now log in and start selling.";
+        await sendWhatsApp(user.phone, msg);
         
-        // Send WhatsApp
-        if (user.phone) await sendWhatsApp(user.phone, msg);
-        
-        // Send Push Notification
         if (user.fcmToken) {
           await sendPushNotification(
             user.fcmToken,
             'Account Approved!',
-            'Congratulations! Your seller account has been approved.',
+            'Congratulations! Your seller account has been approved. You can now log in and start selling.',
             { type: 'ACCOUNT_APPROVED' }
           );
         }
       }
       user.approved = approved;
     }
-
-    // 4. ✅ UPDATE DELIVERY SETTINGS (New Fields)
-    
-    // Update Delivery Range (in KM)
-    if (deliveryRangeKm !== undefined) {
-        user.deliveryRangeKm = parseFloat(deliveryRangeKm);
-    }
-    
-    // Update Blocked Pincodes List
-    if (blockedPincodes !== undefined) {
-        user.blockedPincodes = Array.isArray(blockedPincodes) ? blockedPincodes : [];
-    }
-
-    // Update Allowed Pincodes List
-    if (pincodes !== undefined) {
-        user.pincodes = Array.isArray(pincodes) ? pincodes : [];
-    }
-
     await user.save();
-    res.json({ message: 'User settings updated successfully', user });
-
+    res.json({ message: 'User role updated successfully', user });
   } catch (err) {
-    console.error("Admin Update Error:", err.message);
-    res.status(500).json({ message: 'Error updating user settings' });
+    res.status(500).json({ message: 'Error updating user role' });
   }
 });
 
