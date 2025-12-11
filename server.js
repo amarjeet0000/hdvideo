@@ -177,6 +177,56 @@ async function sendPushNotification(tokens, title, body, data = {}, imageUrl = n
 }
 
 /**
+ * HELPER: Save Personal Notification to DB & Send via FCM
+ */
+async function sendAndSavePersonalNotification(userId, title, body, data = {}, imageUrl = null) {
+  try {
+    // 1. Save to MongoDB
+    await Notification.create({
+      user: userId,
+      title: title,
+      body: body,
+      type: data.type || 'personal',
+      data: data,
+      sentAt: new Date()
+    });
+
+    // 2. Fetch User Token & Send FCM
+    const user = await User.findById(userId).select('fcmToken');
+    if (user && user.fcmToken) {
+      await sendPushNotification(user.fcmToken, title, body, data, imageUrl);
+    }
+  } catch (err) {
+    console.error('Error in sendAndSavePersonalNotification:', err.message);
+  }
+}
+
+/**
+ * HELPER: Save Personal Notification to DB & Send via FCM
+ */
+async function sendAndSavePersonalNotification(userId, title, body, data = {}, imageUrl = null) {
+  try {
+    // 1. Save to MongoDB
+    await Notification.create({
+      user: userId,
+      title: title,
+      body: body,
+      type: data.type || 'personal',
+      data: data,
+      sentAt: new Date()
+    });
+
+    // 2. Fetch User Token & Send FCM
+    const user = await User.findById(userId).select('fcmToken');
+    if (user && user.fcmToken) {
+      await sendPushNotification(user.fcmToken, title, body, data, imageUrl);
+    }
+  } catch (err) {
+    console.error('Error in sendAndSavePersonalNotification:', err.message);
+  }
+}
+
+/**
  * HELPER FUNCTION
  * Generates a unique SKU based on category, product name, and random characters.
  */
@@ -295,6 +345,20 @@ const vehicleTypeSchema = new mongoose.Schema({
     baseFare: Number,
     perKmRate: Number
 });
+
+// --- Personal Notification Schema (User Specific) ---
+// ✅ ISSE ADD KAREIN (Bell Icon History ke liye)
+const notificationSchema = new mongoose.Schema({
+  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  title: { type: String, required: true },
+  body: { type: String, required: true },
+  type: { type: String, default: 'personal' }, // 'order', 'wallet', 'promo'
+  isRead: { type: Boolean, default: false },
+  data: { type: Object }, // Store extra data like orderId
+  sentAt: { type: Date, default: Date.now }
+}, { timestamps: true });
+
+const Notification = mongoose.model('Notification', notificationSchema);
 
 
 // 2. Ride Schema
@@ -831,17 +895,20 @@ const deliveryAssignmentSchema = new mongoose.Schema({
 }, { timestamps: true });
 const DeliveryAssignment = mongoose.model('DeliveryAssignment', deliveryAssignmentSchema);
 
-const notificationSchema = new mongoose.Schema({
+// --- Scheduled Notification Schema (Admin Broadcasts) ---
+const scheduledNotificationSchema = new mongoose.Schema({
   title: { type: String, required: true },
   body: { type: String, required: true },
   imageUrl: { type: String, default: null },
+  // Target: 'all' = sabko, 'users' = customers, 'sellers' = dukan wale
   target: { type: String, enum: ['all', 'users', 'sellers', 'delivery_boys'], required: true },
   scheduledAt: { type: Date, required: true },
   isSent: { type: Boolean, default: false },
   sentAt: Date,
 }, { timestamps: true });
-notificationSchema.index({ isSent: 1, scheduledAt: 1 });
-const ScheduledNotification = mongoose.model('ScheduledNotification', notificationSchema);
+
+scheduledNotificationSchema.index({ isSent: 1, scheduledAt: 1 });
+const ScheduledNotification = mongoose.model('ScheduledNotification', scheduledNotificationSchema);
 
 // --- Database Seeding Function ---
 async function seedDatabaseData() {
@@ -2017,8 +2084,7 @@ app.get('/api/cart', protect, async (req, res) => {
 
 // server.js (POST /api/cart)
 
-// server.js - app.post('/api/cart') ROUTE (Fixed)
-// server.js - app.post('/api/cart') ROUTE (DEBUGGING VERSION)
+
 
 app.post('/api/cart', protect, async (req, res) => {
     try {
@@ -2429,7 +2495,7 @@ app.post('/api/orders', protect, async (req, res) => {
 
     const cart = await Cart.findOne({ user: req.user._id }).populate({
       path: 'items.product',
-      select: 'name price originalPrice variants category seller lowStockThreshold', // ✅ Added lowStockThreshold
+      select: 'name price originalPrice variants category seller lowStockThreshold', 
       populate: {
         path: 'seller',
         select: 'pincodes name phone fcmToken walletBalance' 
@@ -2652,7 +2718,7 @@ app.post('/api/orders', protect, async (req, res) => {
             if (updatedProduct && updatedProduct.stock <= updatedProduct.lowStockThreshold) {
                 const alertMsg = `⚠️ Low Stock Alert: "${updatedProduct.name}" is running low (${updatedProduct.stock} left).`;
                 
-                // 1. Send Push Notification
+                // 1. Send Push Notification to Seller
                 if (updatedProduct.seller.fcmToken) {
                     await sendPushNotification(
                         [updatedProduct.seller.fcmToken],
@@ -2665,8 +2731,6 @@ app.post('/api/orders', protect, async (req, res) => {
                         }
                     );
                 }
-                // 2. WhatsApp (Optional - commented out to avoid spam)
-                // if (updatedProduct.seller.phone) await sendWhatsApp(updatedProduct.seller.phone, alertMsg);
             }
         }
         // ==========================================================
@@ -2674,6 +2738,14 @@ app.post('/api/orders', protect, async (req, res) => {
         const userMessage = `✅ Your COD order #${orderIdShort} has been successfully placed! Grand Total: ₹${orderGrandTotal.toFixed(2)}.`;
         const sellerMessage = `🎉 New Order (COD)!\nYou've received a new order #${orderIdShort}. Item Subtotal: ₹${totalAmountFloat.toFixed(2)}. Commission deducted.`;
         
+        // ✅ [UPDATED] Save Notification to Database (For Bell Icon) & Send Push to User
+        await sendAndSavePersonalNotification(
+            req.user._id,
+            'Order Placed Successfully! 🎉',
+            `Your order #${orderIdShort} has been placed. Amount: ₹${orderGrandTotal.toFixed(2)}`,
+            { orderId: order._id.toString(), type: 'ORDER_PLACED' }
+        );
+
         await sendWhatsApp(req.user.phone, userMessage);
         await sendWhatsApp(sellerData.seller.phone, sellerMessage);
         await notifyAdmin(`Admin Alert: New COD order #${orderIdShort} placed.`);
@@ -3008,6 +3080,8 @@ app.put('/api/orders/:id/cancel', protect, async (req, res) => {
     res.status(500).json({ message: 'Error cancelling order' });
   }
 });
+
+
 
 // -------- User submits UPI for COD refund --------
 // PUT /api/orders/:id/submit-upi - User submits UPI ID or Bank Details for manual refund
@@ -4932,16 +5006,21 @@ app.get('/api/admin/orders', protect, authorizeRole('admin', 'seller'), async (r
 app.put('/api/admin/orders/:id/status', protect, authorizeRole('admin', 'seller'), async (req, res) => {
   try {
     const { status } = req.body;
+    
+    // Populate user to get ID and Phone
     const order = await Order.findById(req.params.id).populate('user');
+    
     if (!order) return res.status(404).json({ message: 'Order not found' });
+    
     if (req.user.role === 'seller' && order.seller.toString() !== req.user._id.toString()) {
       return res.status(403).json({ message: 'Access denied' });
     }
+
     order.deliveryStatus = status;
     order.history.push({ status: status });
     await order.save();
     
-    
+    // --- Handle Cancellation Logic ---
     if (status === 'Cancelled') {
         try {
             const assignment = await DeliveryAssignment.findOneAndUpdate(
@@ -4950,7 +5029,7 @@ app.put('/api/admin/orders/:id/status', protect, authorizeRole('admin', 'seller'
               { new: true }
             ).populate('deliveryBoy', 'fcmToken');
             
-            
+            // Notify Delivery Boy (if assigned)
             if (assignment && assignment.deliveryBoy && assignment.status !== 'Pending') {
                 await sendPushNotification(
                     assignment.deliveryBoy.fcmToken,
@@ -4960,6 +5039,7 @@ app.put('/api/admin/orders/:id/status', protect, authorizeRole('admin', 'seller'
                 );
             }
 
+            // Restore Stock (if not failed payment)
             if (order.paymentStatus !== 'failed' && order.deliveryStatus !== 'Payment Pending') {
                 for(const item of order.orderItems) {
                     await Product.findByIdAndUpdate(item.product, { $inc: { stock: item.qty } });
@@ -4970,20 +5050,25 @@ app.put('/api/admin/orders/:id/status', protect, authorizeRole('admin', 'seller'
             console.error("Error updating assignment on admin cancel:", assignErr.message);
         }
     }
-    const orderIdShort = order._id.toString().slice(-6);
-    const userMessage = `Order Update: Your order #${orderIdShort} has been updated to: ${status}.`;
-    await sendWhatsApp(order.user.phone, userMessage);
 
-    const user = await User.findById(order.user._id).select('fcmToken');
-    if (user && user.fcmToken) {
-      await sendPushNotification(
-        user.fcmToken,
-        'Order Status Updated',
-        `Your order #${orderIdShort} is now: ${status}.`,
-        { orderId: order._id.toString(), type: 'ORDER_STATUS' }
-      );
+    const orderIdShort = order._id.toString().slice(-6);
+    
+    // 1. Send WhatsApp Message
+    const userMessage = `Order Update: Your order #${orderIdShort} has been updated to: ${status}.`;
+    if (order.user.phone) {
+        await sendWhatsApp(order.user.phone, userMessage);
     }
+
+    // 2. ✅ [UPDATED] Save Notification to Database (Bell Icon) & Send Push
+    await sendAndSavePersonalNotification(
+        order.user._id, // User ID
+        'Order Status Updated 📦', // Title
+        `Your order #${orderIdShort} is now: ${status}.`, // Body
+        { orderId: order._id.toString(), type: 'ORDER_STATUS' } // Data
+    );
+
     res.json(order);
+
   } catch (err) {
     res.status(500).json({ message: 'Error updating order status', error: err.message });
   }
@@ -5956,25 +6041,62 @@ app.get('/api/coupons', protect, async (req, res) => {
 });
 // In server.js, add this new route (e.g., after the admin broadcast route)
 
+// ✅ GET: Notification History (Merged: Personal + Broadcasts)
 app.get('/api/notifications/history', protect, async (req, res) => {
     try {
-        const userRole = req.user.role; // 'user', 'seller', etc.
-        
-        // Find notifications that were sent and targeted 'all' or the user's specific role
-        const notifications = await ScheduledNotification.find({
-            isSent: true,
-            target: { $in: ['all', userRole] }
-        })
-        .sort({ sentAt: -1 }) // Show newest first
-        .limit(50); // Limit to the last 50 notifications
+        const userId = req.user._id;
+        const userRole = req.user.role || 'user';
+        const userCreatedAt = req.user.createdAt; // Taaki purani broadcast na dikhe
 
-        res.json(notifications);
+        // 1. Fetch Personal Notifications (Last 30)
+        const personalNotifsPromise = Notification.find({ user: userId })
+            .sort({ sentAt: -1 })
+            .limit(30)
+            .lean();
+
+        // 2. Fetch Broadcast/Scheduled Notifications (Last 30)
+        const broadcastNotifsPromise = ScheduledNotification.find({
+            isSent: true,
+            target: { $in: ['all', userRole] },
+            // Filter: Show broadcasts only created AFTER user registered (Optional logic)
+            // sentAt: { $gte: userCreatedAt } 
+        })
+        .sort({ sentAt: -1 })
+        .limit(30)
+        .lean();
+
+        // 3. Run queries in parallel
+        const [personalNotifs, broadcastNotifs] = await Promise.all([
+            personalNotifsPromise,
+            broadcastNotifsPromise
+        ]);
+
+        // 4. Merge & Sort Combined List
+        const allNotifications = [...personalNotifs, ...broadcastNotifs];
+        
+        // Sort by Date (Newest First)
+        allNotifications.sort((a, b) => new Date(b.sentAt) - new Date(a.sentAt));
+
+        // 5. Format Data for Flutter
+        const formattedNotifications = allNotifications.map(n => ({
+            id: n._id,
+            title: n.title,
+            body: n.body,
+            imageUrl: n.imageUrl || null, // ScheduledNotification has imageUrl
+            sentAt: n.sentAt,
+            isRead: n.isRead || false, // Broadcasts usually don't track read status per user
+            type: n.target ? 'broadcast' : 'personal' // Frontend icon ke liye
+        }));
+
+        res.json(formattedNotifications);
 
     } catch (err) {
         console.error('Error fetching notification history:', err.message);
-        res.status(500).json({ message: 'Error fetching notification history' });
+        res.status(500).json({ message: 'Error fetching notifications' });
     }
 });
+
+
 
 app.post('/api/orders/buy-now-summary', protect, async (req, res) => {
     try {
