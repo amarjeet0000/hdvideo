@@ -494,8 +494,18 @@ const appSettingsSchema = new mongoose.Schema({
     backgroundColor: { type: String, default: '#F1F3F6' }, // Light Grey
     searchBarColor: { type: String, default: '#FFFFFF' },
     
-    // ✅ NEW FIELD: Controls if categories show as 'horizontal' (Flipkart) or 'grid'
     categoryLayout: { type: String, enum: ['horizontal', 'grid', 'list'], default: 'horizontal' }
+  },
+
+  // ✅ [NEW] DELIVERY CONFIGURATION (Radius & Blocked Areas)
+  deliveryConfig: {
+      globalRadiusKm: { type: Number, default: 50 }, // Max delivery distance from seller (e.g., 50km)
+      blockedZones: [{
+          lat: Number,
+          lng: Number,
+          radiusKm: { type: Number, default: 1 }, // Radius of the blocked area
+          reason: String // e.g., "Flood", "Riots", "No Service"
+      }]
   }
 });
 const AppSettings = mongoose.model('AppSettings', appSettingsSchema);
@@ -812,8 +822,14 @@ const addressSchema = new mongoose.Schema({
   state: { type: String, required: true },
   pincode: { type: String, required: true },
   phone: String,
+  
+  // ✅ ADDED COORDINATES (Required for Radius Check)
+  lat: { type: Number }, 
+  lng: { type: Number },
+  
   isDefault: { type: Boolean, default: false }
 }, { timestamps: true });
+
 const Address = mongoose.model('Address', addressSchema);
 
 const reviewSchema = new mongoose.Schema({
@@ -2289,34 +2305,88 @@ app.get('/api/orders/checkout-summary', protect, async (req, res) => {
   try {
     const { shippingAddressId, couponCode } = req.query;
 
+    // 1. Fetch Cart & Populate Seller Location
+    // ✅ UPDATED: Added 'location' to select so we can calculate distance
     const cart = await Cart.findOne({ user: req.user._id }).populate({
       path: 'items.product',
       populate: {
         path: 'seller',
-        select: 'pincodes'
+        select: 'pincodes location' 
       }
     });
 
     if (!cart || cart.items.length === 0) {
       return res.status(400).json({ message: 'Cart is empty' });
     }
+
     const shippingAddress = await Address.findById(shippingAddressId);
     if (!shippingAddress) return res.status(404).json({ message: 'Shipping address not found' });
+
+    // ---------------------------------------------------------
+    // ✅ NEW: GEO-CHECK (Blocked Zones & Radius)
+    // ---------------------------------------------------------
+    const appSettings = await AppSettings.findOne({ singleton: true });
+    
+    // Only perform Geo-checks if address has coordinates and settings exist
+    if (shippingAddress.lat && shippingAddress.lng && appSettings && appSettings.deliveryConfig) {
+        const userLat = parseFloat(shippingAddress.lat);
+        const userLng = parseFloat(shippingAddress.lng);
+
+        // A. Check if User is in a Blocked Zone
+        if (appSettings.deliveryConfig.blockedZones && appSettings.deliveryConfig.blockedZones.length > 0) {
+            for (const zone of appSettings.deliveryConfig.blockedZones) {
+                const dist = getDistanceFromLatLonInKm(userLat, userLng, zone.lat, zone.lng);
+                if (dist <= zone.radiusKm) {
+                    return res.status(400).json({ 
+                        message: `Delivery is currently blocked in your area: ${zone.reason}` 
+                    });
+                }
+            }
+        }
+    }
 
     for (const item of cart.items) {
       if (!item.product || !item.product.seller) {
         return res.status(400).json({ message: `An item in your cart is no longer available.` });
       }
       const product = item.product;
+
+      // ✅ B. Check Delivery Radius (Distance from Seller)
+      // We check this ONLY if we have coordinates for both User and Seller
+      if (appSettings?.deliveryConfig?.globalRadiusKm && 
+          shippingAddress.lat && shippingAddress.lng && 
+          product.seller.location && product.seller.location.coordinates) {
+
+          const maxRadius = appSettings.deliveryConfig.globalRadiusKm;
+          const userLat = parseFloat(shippingAddress.lat);
+          const userLng = parseFloat(shippingAddress.lng);
+          
+          // MongoDB stores as [Longitude, Latitude]
+          const sellerLng = product.seller.location.coordinates[0];
+          const sellerLat = product.seller.location.coordinates[1];
+
+          const distKm = getDistanceFromLatLonInKm(userLat, userLng, sellerLat, sellerLng);
+
+          if (distKm > maxRadius) {
+             return res.status(400).json({
+                 message: `Product "${product.name}" is too far (${distKm.toFixed(1)}km). Max delivery radius is ${maxRadius}km.`
+             });
+          }
+      }
+
+      // ✅ C. Fallback: Existing Pincode Check
+      // This runs if radius check passes OR if coordinates were missing
       if (!product.seller.pincodes.includes(shippingAddress.pincode)) {
         return res.status(400).json({
           message: `Sorry, delivery not available at your location for the product: "${product.name}"`
         });
       }
+
       if (product.stock < item.qty) {
         return res.status(400).json({ message: `Insufficient stock for product: ${product.name}` });
       }
     }
+    // ---------------------------------------------------------
 
     const totalCartAmount = cart.items.reduce((sum, item) => sum + (item.product.price * item.qty), 0);
 
@@ -2357,7 +2427,10 @@ app.get('/api/orders/checkout-summary', protect, async (req, res) => {
 
   } catch (err) {
     console.error('Checkout summary error:', err.message);
-    if (err.message.includes('delivery not available') || err.message.includes('Insufficient stock') || err.message.includes('not available')) {
+    if (err.message.includes('delivery not available') || 
+        err.message.includes('Insufficient stock') || 
+        err.message.includes('too far') || 
+        err.message.includes('blocked')) {
         return res.status(400).json({ message: err.message });
     }
     res.status(500).json({ message: 'Error calculating checkout summary', error: err.message });
@@ -3419,9 +3492,14 @@ app.get('/api/addresses', protect, async (req, res) => {
 });
 
 // 2. Add New Address
+// 2. Add New Address (Updated to save Lat/Lng)
 app.post('/api/addresses', protect, async (req, res) => {
   try {
-    const { name, street, village, landmark, city, state, pincode, phone, isDefault } = req.body;
+    // ✅ Extract lat and lng from req.body along with other fields
+    const { 
+        name, street, village, landmark, city, state, pincode, phone, isDefault, 
+        lat, lng // <--- Added these
+    } = req.body;
 
     // Check if this is the user's first address. If so, make it default automatically.
     const addressCount = await Address.countDocuments({ user: req.user._id });
@@ -3444,7 +3522,10 @@ app.post('/api/addresses', protect, async (req, res) => {
       city, 
       state, 
       pincode, 
-      phone, 
+      phone,
+      // ✅ Save coordinates to database
+      lat,
+      lng,
       isDefault: shouldBeDefault
     });
     
@@ -5393,10 +5474,18 @@ app.get('/api/admin/settings', protect, authorizeRole('admin'), async (req, res)
 });
 
 // PUT Settings (Update Fee & Theme)
+// PUT Settings (Update Fee, Theme, & Delivery Radius/Blocks)
 app.put('/api/admin/settings', protect, authorizeRole('admin'), async (req, res) => {
   try {
-    // 1. Extract all fields from request
-    const { platformCommissionRate, productCreationFee, theme } = req.body;
+    // 1. Extract all fields including new Delivery Config
+    const { 
+        platformCommissionRate, 
+        productCreationFee, 
+        theme, 
+        // ✅ New fields from Admin Panel
+        deliveryRadius, 
+        blockedZones 
+    } = req.body;
     
     const updateData = {};
 
@@ -5404,23 +5493,56 @@ app.put('/api/admin/settings', protect, authorizeRole('admin'), async (req, res)
     if (typeof platformCommissionRate !== 'undefined') {
       const rate = parseFloat(platformCommissionRate);
       if (rate < 0 || rate > 1) {
-        return res.status(400).json({ message: 'Commission rate must be between 0 (0%) and 1 (100%).' });
+        return res.status(400).json({ message: 'Commission rate must be between 0 and 1.' });
       }
       updateData.platformCommissionRate = rate;
     }
 
-    // --- ✅ Update Product Creation Fee ---
+    // --- Update Product Creation Fee ---
     if (typeof productCreationFee !== 'undefined') {
         const fee = parseFloat(productCreationFee);
         if (fee < 0) {
-            return res.status(400).json({ message: 'Product Creation Fee cannot be negative.' });
+            return res.status(400).json({ message: 'Fee cannot be negative.' });
         }
         updateData.productCreationFee = fee;
     }
 
-    // --- Update Theme Colors ---
+    // --- Update Theme ---
     if (theme) {
       updateData.theme = theme;
+    }
+
+    // --- ✅ [NEW] Update Delivery Config ---
+    if (typeof deliveryRadius !== 'undefined' || blockedZones) {
+        // We use dot notation to update specific nested fields without wiping others
+        
+        // 1. Update Global Radius
+        if (typeof deliveryRadius !== 'undefined') {
+            updateData['deliveryConfig.globalRadiusKm'] = parseFloat(deliveryRadius);
+        }
+        
+        // 2. Update Blocked Zones
+        if (blockedZones) {
+            // Ensure blockedZones is an array (parse if it came as stringified JSON)
+            let zones = blockedZones;
+            if (typeof blockedZones === 'string') {
+                try {
+                    zones = JSON.parse(blockedZones);
+                } catch (e) {
+                    console.error("Error parsing blockedZones", e);
+                }
+            }
+
+            if (Array.isArray(zones)) {
+                const validZones = zones.map(z => ({
+                    lat: parseFloat(z.lat),
+                    lng: parseFloat(z.lng),
+                    radiusKm: parseFloat(z.radiusKm || 1),
+                    reason: z.reason || 'Restricted Area'
+                }));
+                updateData['deliveryConfig.blockedZones'] = validZones;
+            }
+        }
     }
 
     // --- Update Database ---
