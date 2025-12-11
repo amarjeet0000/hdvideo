@@ -1864,7 +1864,7 @@ app.delete('/api/admin/subcategories/:id', protect, authorizeRole('admin'), asyn
 
 
 // ✅ UPDATED: Main Products Route with Distance Calculation
-// ✅ UPDATED: Main Products Route (Supports Radius, Blocked Pincodes & Allowed List)
+// ✅ UPDATED: Main Products Route (Smart Pincode Logic + Self Pincode Check)
 app.get('/api/products', async (req, res) => {
   try {
     const { search, minPrice, maxPrice, categoryId, brand, subcategoryId, sellerId, userPincode, lat, lng } = req.query;
@@ -1895,17 +1895,10 @@ app.get('/api/products', async (req, res) => {
     const pipeline = [{ $match: initialMatchStage }];
     
     // --- 2. Join Seller (Get Settings) ---
-    // Note: We do NOT filter by pincode strictly here anymore, 
-    // so we can support the "Radius" feature (User might be in range but not in pincode list).
     pipeline.push(
       { $lookup: { from: "users", localField: "seller", foreignField: "_id", as: "sellerDetails" } },
       { $unwind: { path: "$sellerDetails", preserveNullAndEmptyArrays: true } }
     );
-
-    // Apply strict pincode filter ONLY if requested specifically (legacy behavior), 
-    // but usually, we want the JS filter below to handle the smart logic.
-    // If you want strict DB filtering for performance, uncomment next line, but it breaks Radius logic for new pincodes.
-    // if (userPincode) pipeline.push({ $match: { "sellerDetails.pincodes": userPincode } });
 
     if (req.query.sample === 'true') {
         const limit = parseInt(req.query.limit) || 20;
@@ -1930,10 +1923,13 @@ app.get('/api/products', async (req, res) => {
           name: 1, price: 1, originalPrice: 1, images: 1, stock: 1, unit: 1, brand: 1, variants: 1, 
           shortDescription: 1, isTrending: 1, 
           "seller._id": 1, "seller.name": 1, "seller.email": 1, "seller.location": 1, 
-          // ✅ FETCH SELLER SETTINGS FOR FILTERING
+          
+          // ✅ Settings Fetch Karein
           "seller.blockedPincodes": 1,
           "seller.deliveryRangeKm": 1,
           "seller.pincodes": 1, // Allowed List
+          "seller.pickupAddress": 1, // ✅ Seller's Own Pincode (Critical Fix)
+          
           "category.name": 1, createdAt: 1
         }
       }
@@ -1942,17 +1938,17 @@ app.get('/api/products', async (req, res) => {
     let products = await Product.aggregate(pipeline);
 
     // ✅ 4. SMART FILTERING LOGIC (Javascript Level)
+    const safeUserPincode = userPincode ? userPincode.toString().trim() : null;
+
     if (lat && lng) {
         const userLat = parseFloat(lat);
         const userLng = parseFloat(lng);
 
         products = products.map(p => {
             let dist = null;
-            // Check if seller has location data
             if (p.seller && p.seller.location && p.seller.location.coordinates) {
                 const sLng = p.seller.location.coordinates[0];
                 const sLat = p.seller.location.coordinates[1];
-                // Calculate distance
                 dist = parseFloat(getDistanceFromLatLonInKm(userLat, userLng, sLat, sLng).toFixed(1));
             }
             return { ...p, distanceKm: dist };
@@ -1962,48 +1958,41 @@ app.get('/api/products', async (req, res) => {
         products = products.filter(p => {
             if (!p.seller) return false;
 
-            // Rule 1: STRICT BLOCK (If Pincode is in Blocked List, hide it)
-            if (userPincode && p.seller.blockedPincodes && p.seller.blockedPincodes.includes(userPincode)) {
+            // Rule 1: STRICT BLOCK (Priority)
+            if (safeUserPincode && p.seller.blockedPincodes && p.seller.blockedPincodes.includes(safeUserPincode)) {
                 return false; 
             }
 
             // Rule 2: RADIUS CHECK (If GPS available)
             if (p.distanceKm !== null) {
-                const maxRange = p.seller.deliveryRangeKm || 5; // Default 5 KM
+                const maxRange = p.seller.deliveryRangeKm || 5; 
                 if (p.distanceKm > maxRange) {
-                    return false; // Out of range
+                    // Fallback: If out of radius, check if Pincode is strictly allowed
+                    return checkAllowedPincodes(p.seller, safeUserPincode);
                 }
-            } else if (userPincode) {
-                // Fallback: If distance calc failed (no seller GPS), check allowed list
-                if (p.seller.pincodes && p.seller.pincodes.length > 0) {
-                    return p.seller.pincodes.includes(userPincode);
-                }
+            } else if (safeUserPincode) {
+                // Fallback: GPS Fail -> Check Allowed List
+                return checkAllowedPincodes(p.seller, safeUserPincode);
             }
 
             return true;
         });
 
-        // Sort by distance (Nearest first)
+        // Sort by distance
         products.sort((a, b) => (a.distanceKm || 9999) - (b.distanceKm || 9999));
 
-    } else if (userPincode) {
+    } else if (safeUserPincode) {
         // 📍 CASE B: Only Pincode Available (No GPS)
         products = products.filter(p => {
              if (!p.seller) return false;
 
              // Rule 1: Blocked Check
-             if (p.seller.blockedPincodes && p.seller.blockedPincodes.includes(userPincode)) {
+             if (p.seller.blockedPincodes && p.seller.blockedPincodes.includes(safeUserPincode)) {
                 return false;
             }
 
-            // Rule 2: Allowed List Check (Strict)
-            // Since we don't have GPS to check radius, we rely on the manual list
-            if (p.seller.pincodes && p.seller.pincodes.length > 0) {
-                return p.seller.pincodes.includes(userPincode);
-            }
-
-            // If seller has no specific allowed list, assume open (or you can default to false)
-            return true; 
+            // Rule 2: Allowed List Check (Flexible)
+            return checkAllowedPincodes(p.seller, safeUserPincode);
         });
     }
 
@@ -2013,6 +2002,24 @@ app.get('/api/products', async (req, res) => {
     res.status(500).json({ message: "Error fetching products" });
   }
 });
+
+// ✅ Helper Function: Checks Pincode List + Seller's Own Address
+function checkAllowedPincodes(seller, userPin) {
+    if (!userPin) return true; // No user pincode? Allow (or handle logic as needed)
+
+    // Check 1: Kya ye Seller ka khud ka pincode hai? (Self Delivery)
+    if (seller.pickupAddress && seller.pickupAddress.pincode && seller.pickupAddress.pincode.toString() === userPin) {
+        return true;
+    }
+
+    // Check 2: Agar Allowed List hai, to usme check karo
+    if (seller.pincodes && seller.pincodes.length > 0) {
+        return seller.pincodes.includes(userPin);
+    }
+
+    // 3. Agar koi Allowed List hi nahi hai, aur Radius check bhi fail/N/A hai -> Default Open
+    return true; 
+}
 
 
 app.get('/api/products/:id', async (req, res) => {
