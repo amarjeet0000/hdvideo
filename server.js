@@ -1345,7 +1345,7 @@ app.get('/api/auth/profile', protect, async (req, res) => {
   }
 });
 
-// ✅ UPDATED: Update Profile (Now supports saving GPS Location)
+// ✅ UPDATED: Update Profile (Fixed to read lat/lng from pickupAddress)
 app.put('/api/auth/profile', protect, async (req, res) => {
   try {
     // 1. Extract lat/lng along with other fields
@@ -1357,28 +1357,42 @@ app.put('/api/auth/profile', protect, async (req, res) => {
     if (name) user.name = name;
     if (phone) user.phone = phone;
     
-    // ✅ MODIFIED LOGIC: Check if 'pincodes' property is present
+    // Check if 'pincodes' property is present
     if (pincodes !== undefined) { 
         user.pincodes = Array.isArray(pincodes) ? pincodes : []; 
     } 
 
-    // ✅ NEW: Save Location Coordinates (For Distance Calculation)
-    if (lat && lng) {
+    // ✅ CRITICAL FIX: Extract coordinates correctly
+    // Flutter sends them INSIDE pickupAddress, so we check there too.
+    const latitude = lat || (pickupAddress ? pickupAddress.lat : null);
+    const longitude = lng || (pickupAddress ? pickupAddress.lng : null);
+
+    // Save Location Coordinates (GeoJSON)
+    if (latitude && longitude) {
         user.location = {
             type: 'Point',
-            coordinates: [parseFloat(lng), parseFloat(lat)] // MongoDB expects [Longitude, Latitude]
+            // MongoDB expects [Longitude, Latitude]
+            coordinates: [parseFloat(longitude), parseFloat(latitude)] 
         };
+        console.log(`📍 Location Saved: [${longitude}, ${latitude}]`);
     }
 
-    if (user.role === 'seller' && pickupAddress) {
+    // Update Text Address Fields
+    if (pickupAddress) {
+      // Use existing values if new ones aren't provided (Partial Update Safety)
+      const currentAddress = user.pickupAddress || {};
+      
       user.pickupAddress = {
-        street: pickupAddress.street,
-        village: pickupAddress.village,
-        landmark: pickupAddress.landmark,
-        city: pickupAddress.city,
-        state: pickupAddress.state,
-        pincode: pickupAddress.pincode,
-        isSet: !!(pickupAddress.street && pickupAddress.city && pickupAddress.pincode)
+        street: pickupAddress.street || currentAddress.street,
+        village: pickupAddress.village || currentAddress.village,
+        landmark: pickupAddress.landmark || currentAddress.landmark,
+        city: pickupAddress.city || currentAddress.city,
+        state: pickupAddress.state || currentAddress.state,
+        pincode: pickupAddress.pincode || currentAddress.pincode,
+        
+        // Mark as set if essential fields exist
+        isSet: !!((pickupAddress.street || currentAddress.street) && 
+                  (pickupAddress.pincode || currentAddress.pincode))
       };
     }
 
