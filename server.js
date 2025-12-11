@@ -5010,10 +5010,11 @@ app.get('/api/admin/delivery-boys', protect, authorizeRole('admin'), async (req,
 });
 
 // ✅ UPDATED: Admin Update User/Seller (Role, Approval, Delivery Settings)
+// ✅ UPDATED: Admin Update User/Seller (Role, Approval, Delivery Settings & LOCATION)
 app.put('/api/admin/users/:id/role', protect, authorizeRole('admin'), async (req, res) => {
   try {
-    // 1. Extract all fields (Role, Approval, Delivery Settings)
-    const { role, approved, deliveryRangeKm, blockedPincodes, pincodes } = req.body;
+    // 1. Extract all fields including Lat/Lng from Map
+    const { role, approved, deliveryRangeKm, blockedPincodes, pincodes, lat, lng } = req.body;
     
     const user = await User.findById(req.params.id);
     if (!user) return res.status(404).json({ message: 'User not found' });
@@ -5021,16 +5022,13 @@ app.put('/api/admin/users/:id/role', protect, authorizeRole('admin'), async (req
     // 2. Update Basic Fields
     if (role) user.role = role;
     
-    // 3. Update Approval Status & Send Notifications
+    // 3. Approval Logic
     if (typeof approved !== 'undefined') {
-      // Logic for Seller Approval Notification
       if(user.role === 'seller' && approved === true && user.approved === false) {
         const msg = "Congratulations! Your seller account has been approved. You can now log in and start selling.";
         
-        // Send WhatsApp
         if (user.phone) await sendWhatsApp(user.phone, msg);
         
-        // Send Push Notification
         if (user.fcmToken) {
           await sendPushNotification(
             user.fcmToken,
@@ -5043,25 +5041,36 @@ app.put('/api/admin/users/:id/role', protect, authorizeRole('admin'), async (req
       user.approved = approved;
     }
 
-    // 4. ✅ UPDATE DELIVERY SETTINGS (New Fields)
-    
-    // Update Delivery Range (in KM)
+    // 4. Update Delivery Settings
     if (deliveryRangeKm !== undefined) {
         user.deliveryRangeKm = parseFloat(deliveryRangeKm);
     }
     
-    // Update Blocked Pincodes List
     if (blockedPincodes !== undefined) {
         user.blockedPincodes = Array.isArray(blockedPincodes) ? blockedPincodes : [];
     }
 
-    // Update Allowed Pincodes List
     if (pincodes !== undefined) {
         user.pincodes = Array.isArray(pincodes) ? pincodes : [];
     }
 
+    // 5. ✅ MAP LOCATION UPDATE (New Logic)
+    // जब Admin मैप पर मार्कर सेट करेगा, तो ये कॉर्डिनेट सेव होंगे
+    if (lat && lng) {
+        user.location = {
+            type: 'Point',
+            coordinates: [parseFloat(lng), parseFloat(lat)] // GeoJSON expects [Lng, Lat]
+        };
+        
+        // Backup address fields को भी सिंक करें
+        if (!user.pickupAddress) user.pickupAddress = {};
+        user.pickupAddress.lat = parseFloat(lat);
+        user.pickupAddress.lng = parseFloat(lng);
+        user.pickupAddress.isSet = true;
+    }
+
     await user.save();
-    res.json({ message: 'User settings updated successfully', user });
+    res.json({ message: 'User settings & location updated successfully', user });
 
   } catch (err) {
     console.error("Admin Update Error:", err.message);
