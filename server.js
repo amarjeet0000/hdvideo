@@ -60,6 +60,11 @@ const PER_KM_PRICE = 10;         // 2 KM के बाद हर KM का ₹10
 const GST_RATE = 0.0; 
 // --------------------------------------
 
+// --- STATIC FALLBACK CONFIGURATION (Used if GPS fails) ---
+const BASE_PINCODE = '804425';   // अपना मुख्य दुकान का पिनकोड यहाँ डालें
+const LOCAL_DELIVERY_FEE = 20;   // पास के पिनकोड के लिए फीस
+const REMOTE_DELIVERY_FEE = 50;  // दूर के पिनकोड के लिए फीस
+
 // Connect to MongoDB
 mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
   .then(async () => {
@@ -2524,102 +2529,127 @@ app.get('/api/orders/checkout-summary', protect, async (req, res) => {
   }
 });
 
+// ✅ UPDATED: Calculate Summary with Distance Logic & Multi-Seller Support
 app.post('/api/orders/calculate-summary', protect, async (req, res) => {
   try {
     const { shippingAddressId, couponCode } = req.body; 
 
-    // 1. Populate cart items to get full Product data AND Seller data
+    // 1. Populate cart items with Product AND Seller Location data
     const cart = await Cart.findOne({ user: req.user._id }).populate({
       path: 'items.product',
-      // We explicitly select variants, shortDescription, and seller
-      select: 'name variants shortDescription unit', 
-      populate: {
-        path: 'seller',
-        select: 'pincodes'
-      }
+      select: 'name variants shortDescription unit price originalPrice', 
+      populate: { 
+          path: 'seller', 
+          select: 'pincodes location' // ✅ FETCH LOCATION FOR DISTANCE CALC
+      } 
     });
 
-    if (!cart || cart.items.length === 0) {
-      return res.status(400).json({ message: 'Cart is empty' });
-    }
+    if (!cart || cart.items.length === 0) return res.status(400).json({ message: 'Cart is empty' });
+
     const shippingAddress = await Address.findById(shippingAddressId);
     if (!shippingAddress) return res.status(404).json({ message: 'Shipping address not found' });
     
-    let totalCartAmount = 0; // Initialize total
+    // --- 🚚 DYNAMIC DISTANCE CALCULATION LOGIC ---
+    let totalShippingFee = 0;
+    
+    // Group items by Seller ID to calculate fee per seller (matching placeOrder logic)
+    const sellersInCart = new Map();
 
+    for (const item of cart.items) {
+        if (item.product && item.product.seller) {
+            const sellerId = item.product.seller._id.toString();
+            if (!sellersInCart.has(sellerId)) {
+                sellersInCart.set(sellerId, item.product.seller);
+            }
+        }
+    }
+
+    const appSettings = await AppSettings.findOne({ singleton: true });
+    const maxRadius = (appSettings && appSettings.deliveryConfig) ? (appSettings.deliveryConfig.globalRadiusKm || 50) : 50;
+
+    // Calculate fee for each unique seller
+    for (const seller of sellersInCart.values()) {
+        let distanceCalculated = false;
+        let sellerFee = 0;
+
+        if (shippingAddress.lat && shippingAddress.lng && seller.location && seller.location.coordinates) {
+            const userLat = parseFloat(shippingAddress.lat);
+            const userLng = parseFloat(shippingAddress.lng);
+            const sLng = seller.location.coordinates[0];
+            const sLat = seller.location.coordinates[1];
+            
+            const distKm = getDistanceFromLatLonInKm(userLat, userLng, sLat, sLng);
+
+            // Check Radius
+            if (distKm > maxRadius) {
+                return res.status(400).json({
+                    message: `Seller is too far (${distKm.toFixed(1)}km). We only deliver within ${maxRadius}km.`
+                });
+            }
+
+            // Calculate Dynamic Fee
+            sellerFee = getDynamicDeliveryFee(distKm);
+            distanceCalculated = true;
+        }
+
+        // Fallback: Use Pincode logic if GPS failed for this seller
+        if (!distanceCalculated) {
+            sellerFee = calculateShippingFee(shippingAddress.pincode);
+        }
+
+        totalShippingFee += sellerFee;
+    }
+    // -------------------------------------
+
+    let totalCartAmount = 0;
     for (const item of cart.items) {
       const product = item.product;
       
-      // CRITICAL CHECK: Ensure Product and Seller details are available
+      // Validation
       if (!product || !product.seller) {
-        return res.status(400).json({ message: `An item in your cart is invalid or its seller is inactive.` });
+         return res.status(400).json({ message: `Invalid item or seller in cart.` });
       }
-      
-      // 2. Find the selected variant using item's color and size
+
+      // Variant Logic
       let selectedVariant;
-      
       if (product.variants && product.variants.length > 0) {
           selectedVariant = product.variants.find(v => 
               (v.color === item.selectedColor || (!v.color && !item.selectedColor)) && 
               (v.size === item.selectedSize || (!v.size && !item.selectedSize))
           );
-      } else {
-          // If product has NO variants defined in the array, something is wrong, or 
-          // we are assuming a non-variant product might have been added by mistake 
-          // (though cart POST prevents this now). 
-          // We rely on the check below for 'selectedVariant'
-          selectedVariant = null; 
       }
       
-      // Check if variant was found (if it's a non-variant product, this should default to the only variant)
-      if (!selectedVariant) {
-          // If variants exist but the specific combination wasn't found (or the single variant array is empty)
-          const variantDisplay = `${item.selectedColor || 'N/A'}/${item.selectedSize || 'N/A'}`;
-          return res.status(400).json({ 
-              message: `Invalid variant combination (${variantDisplay}) selected for product: ${product.name}.` 
-          });
-      }
-      
-      // 3. Validate and use the variant price/stock
-      const variantPrice = selectedVariant.price;
-      const variantStock = selectedVariant.stock;
+      let price = (selectedVariant) ? selectedVariant.price : product.price;
+      const stock = (selectedVariant) ? selectedVariant.stock : product.stock;
 
-      if (typeof variantPrice !== 'number' || variantPrice <= 0) {
-           return res.status(400).json({ message: `Variant price is missing or invalid for product: ${product.name}` });
+      // Stock Check
+      if (stock < item.qty) {
+        return res.status(400).json({ message: `Insufficient stock for product: ${product.name}` });
       }
       
-      // Check delivery availability based on seller pincodes
+      // Pincode Check
       if (!product.seller.pincodes.includes(shippingAddress.pincode)) {
-        return res.status(400).json({
-          message: `Sorry, delivery not available at your location for the product: "${product.name}"`
-        });
+         return res.status(400).json({ message: `Delivery not available for ${product.name} at your location.` });
       }
-      
-      // Use variant stock for check
-      if (variantStock < item.qty) {
-        return res.status(400).json({ message: `Insufficient stock for product: ${product.name}. Only ${variantStock} left.` });
-      }
-      
-      totalCartAmount += variantPrice * item.qty; // Use validated price
+
+      totalCartAmount += price * item.qty;
     }
 
-    // --- FINANCIAL CALCULATIONS (Unchanged) ---
+    // --- FINANCIAL CALCULATIONS ---
     let discountAmount = 0;
-    const totalCartAmountFinal = totalCartAmount || 0; 
-    const shippingFee = calculateShippingFee(shippingAddress.pincode) || 0;
-    const totalTaxAmount = totalCartAmountFinal * GST_RATE || 0;
+    const totalTaxAmount = totalCartAmount * GST_RATE || 0;
 
     if (couponCode) {
       const coupon = await Coupon.findOne({
         code: couponCode,
         isActive: true,
         expiryDate: { $gt: new Date() },
-        minPurchaseAmount: { $lte: totalCartAmountFinal } 
+        minPurchaseAmount: { $lte: totalCartAmount } 
       });
 
       if (coupon) {
         if (coupon.discountType === 'percentage') {
-          discountAmount = totalCartAmountFinal * (coupon.discountValue / 100);
+          discountAmount = totalCartAmount * (coupon.discountValue / 100);
           if (coupon.maxDiscountAmount && discountAmount > coupon.maxDiscountAmount) {
             discountAmount = coupon.maxDiscountAmount;
           }
@@ -2629,12 +2659,12 @@ app.post('/api/orders/calculate-summary', protect, async (req, res) => {
       }
     }
 
-    let finalAmountForPayment = Math.max(0, totalCartAmountFinal + shippingFee + totalTaxAmount - discountAmount);
+    let finalAmountForPayment = Math.max(0, totalCartAmount + totalShippingFee + totalTaxAmount - discountAmount);
 
     res.json({
       message: 'Summary calculated successfully.',
-      itemsTotal: totalCartAmountFinal,
-      totalShippingFee: shippingFee,
+      itemsTotal: totalCartAmount,
+      totalShippingFee: totalShippingFee,
       totalTaxAmount: totalTaxAmount,
       totalDiscount: discountAmount,
       grandTotal: finalAmountForPayment,
@@ -2642,13 +2672,9 @@ app.post('/api/orders/calculate-summary', protect, async (req, res) => {
 
   } catch (err) {
     console.error('POST Summary calculation error:', err.message);
-    if (err.message.includes('delivery not available') || err.message.includes('Insufficient stock') || err.message.includes('Invalid variant combination') || err.message.includes('invalid or its seller is inactive')) {
-        return res.status(400).json({ message: err.message });
-    }
     res.status(500).json({ message: 'Error calculating order summary', error: err.message });
   }
 });
-
 app.post('/api/orders', protect, async (req, res) => {
   try {
     const { shippingAddressId, paymentMethod, couponCode } = req.body;
