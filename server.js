@@ -2552,9 +2552,8 @@ app.post('/api/orders/calculate-summary', protect, async (req, res) => {
     // --- 🚚 DYNAMIC DISTANCE CALCULATION LOGIC ---
     let totalShippingFee = 0;
     
-    // Group items by Seller ID to calculate fee per seller (matching placeOrder logic)
+    // Group items by Seller ID
     const sellersInCart = new Map();
-
     for (const item of cart.items) {
         if (item.product && item.product.seller) {
             const sellerId = item.product.seller._id.toString();
@@ -2567,7 +2566,7 @@ app.post('/api/orders/calculate-summary', protect, async (req, res) => {
     const appSettings = await AppSettings.findOne({ singleton: true });
     const maxRadius = (appSettings && appSettings.deliveryConfig) ? (appSettings.deliveryConfig.globalRadiusKm || 50) : 50;
 
-    // Calculate fee for each unique seller
+    // Calculate fee for each seller
     for (const seller of sellersInCart.values()) {
         let distanceCalculated = false;
         let sellerFee = 0;
@@ -2580,35 +2579,31 @@ app.post('/api/orders/calculate-summary', protect, async (req, res) => {
             
             const distKm = getDistanceFromLatLonInKm(userLat, userLng, sLat, sLng);
 
-            // Check Radius
             if (distKm > maxRadius) {
                 return res.status(400).json({
                     message: `Seller is too far (${distKm.toFixed(1)}km). We only deliver within ${maxRadius}km.`
                 });
             }
 
-            // Calculate Dynamic Fee
             sellerFee = getDynamicDeliveryFee(distKm);
             distanceCalculated = true;
         }
 
-        // Fallback: Use Pincode logic if GPS failed for this seller
+        // Fallback: Use Pincode logic if GPS failed
         if (!distanceCalculated) {
             sellerFee = calculateShippingFee(shippingAddress.pincode);
         }
 
         totalShippingFee += sellerFee;
     }
-    // -------------------------------------
 
+    // --- CART TOTAL CALCULATION ---
     let totalCartAmount = 0;
     for (const item of cart.items) {
       const product = item.product;
       
-      // Validation
-      if (!product || !product.seller) {
-         return res.status(400).json({ message: `Invalid item or seller in cart.` });
-      }
+      // Basic Validation
+      if (!product || !product.seller) continue; 
 
       // Variant Logic
       let selectedVariant;
@@ -2620,22 +2615,10 @@ app.post('/api/orders/calculate-summary', protect, async (req, res) => {
       }
       
       let price = (selectedVariant) ? selectedVariant.price : product.price;
-      const stock = (selectedVariant) ? selectedVariant.stock : product.stock;
-
-      // Stock Check
-      if (stock < item.qty) {
-        return res.status(400).json({ message: `Insufficient stock for product: ${product.name}` });
-      }
-      
-      // Pincode Check
-      if (!product.seller.pincodes.includes(shippingAddress.pincode)) {
-         return res.status(400).json({ message: `Delivery not available for ${product.name} at your location.` });
-      }
-
       totalCartAmount += price * item.qty;
     }
 
-    // --- FINANCIAL CALCULATIONS ---
+    // --- FINANCIALS ---
     let discountAmount = 0;
     const totalTaxAmount = totalCartAmount * GST_RATE || 0;
 
