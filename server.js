@@ -509,6 +509,9 @@ const appSettingsSchema = new mongoose.Schema({
   }
 });
 
+// 👇👇👇 THIS WAS MISSING - ADD IT HERE 👇👇👇
+const AppSettings = mongoose.model('AppSettings', appSettingsSchema);
+// 👆👆👆 CRITICAL FIX 👆👆👆
 const categorySchema = new mongoose.Schema({
   name: { type: String, required: true, unique: true, index: true },
   slug: { type: String, required: true, unique: true, index: true },
