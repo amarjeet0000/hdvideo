@@ -55,14 +55,14 @@ cloudinary.config({
 // --- CONSTANTS FOR DYNAMIC DELIVERY AND TAX (UPDATED) ---
 // --- DYNAMIC DELIVERY CONFIGURATION ---
 const BASE_DELIVERY_KM = 2;      // पहले 2 KM तक फिक्स चार्ज
-const BASE_DELIVERY_PRICE = 20;  // बेस चार्ज ₹20
+const BASE_DELIVERY_PRICE = 5;  // बेस चार्ज ₹20
 const PER_KM_PRICE = 10;         // 2 KM के बाद हर KM का ₹10 एक्स्ट्रा
 const GST_RATE = 0.0; 
 // --------------------------------------
 
 // --- STATIC FALLBACK CONFIGURATION (Used if GPS fails) ---
 const BASE_PINCODE = '804425';   // अपना मुख्य दुकान का पिनकोड यहाँ डालें
-const LOCAL_DELIVERY_FEE = 20;   // पास के पिनकोड के लिए फीस
+const LOCAL_DELIVERY_FEE = 40;   // पास के पिनकोड के लिए फीस
 const REMOTE_DELIVERY_FEE = 50;  // दूर के पिनकोड के लिए फीस
 
 // Connect to MongoDB
