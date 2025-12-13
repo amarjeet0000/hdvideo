@@ -53,11 +53,12 @@ cloudinary.config({
 });
 
 // --- CONSTANTS FOR DYNAMIC DELIVERY AND TAX (UPDATED) ---
-const BASE_PINCODE = process.env.BASE_PINCODE || '804425'; // Default Pincode
-const LOCAL_DELIVERY_FEE = 20; // UPDATED: Same Pincode delivery cost (₹20)
-const REMOTE_DELIVERY_FEE = 40; // UPDATED: Different Pincode delivery cost (₹40)
-const GST_RATE = 0.0; // 0% GST for all products
-// --- END CONSTANTS ---
+// --- DYNAMIC DELIVERY CONFIGURATION ---
+const BASE_DELIVERY_KM = 2;      // पहले 2 KM तक फिक्स चार्ज
+const BASE_DELIVERY_PRICE = 20;  // बेस चार्ज ₹20
+const PER_KM_PRICE = 10;         // 2 KM के बाद हर KM का ₹10 एक्स्ट्रा
+const GST_RATE = 0.0; 
+// --------------------------------------
 
 // Connect to MongoDB
 mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
@@ -273,6 +274,20 @@ async function checkLocationBlock(pincode, lat, lng) {
     } catch (err) {
         console.error('Error checking location block:', err.message);
         return { blocked: false }; // Fail safe: Allow if error occurs
+    }
+}
+
+/**
+ * HELPER: Calculate Fee based on KM
+ */
+function getDynamicDeliveryFee(distanceKm) {
+    if (!distanceKm || distanceKm <= 0) return BASE_DELIVERY_PRICE; // अगर दूरी नहीं मिली तो बेस चार्ज
+
+    if (distanceKm <= BASE_DELIVERY_KM) {
+        return BASE_DELIVERY_PRICE; // 2km के अंदर ₹20
+    } else {
+        const extraKm = distanceKm - BASE_DELIVERY_KM;
+        return Math.round(BASE_DELIVERY_PRICE + (extraKm * PER_KM_PRICE)); // ₹20 + (एक्स्ट्रा KM * ₹10)
     }
 }
 
@@ -2364,6 +2379,7 @@ app.get('/api/orders/checkout-summary', protect, async (req, res) => {
   try {
     const { shippingAddressId, couponCode } = req.query;
 
+    // 1. Cart Fetch करें (Seller Location के साथ)
     const cart = await Cart.findOne({ user: req.user._id }).populate({
       path: 'items.product',
       populate: { path: 'seller', select: 'pincodes location' }
@@ -2374,7 +2390,7 @@ app.get('/api/orders/checkout-summary', protect, async (req, res) => {
     const shippingAddress = await Address.findById(shippingAddressId);
     if (!shippingAddress) return res.status(404).json({ message: 'Shipping address not found' });
 
-    // ✅ FETCH SETTINGS
+    // ✅ SETTINGS Fetch करें
     const appSettings = await AppSettings.findOne({ singleton: true });
     
     // ---------------------------------------------------------
@@ -2389,14 +2405,17 @@ app.get('/api/orders/checkout-summary', protect, async (req, res) => {
     }
 
     // ---------------------------------------------------------
-    // 🚫 2. CHECK GEO-RADIUS & BLOCKED ZONES
+    // 🚫 2. CHECK GEO-RADIUS & BLOCKED ZONES & CALCULATE FEE
     // ---------------------------------------------------------
-    if (shippingAddress.lat && shippingAddress.lng && appSettings && appSettings.deliveryConfig) {
+    let maxShippingFee = 0;
+    let distanceCalculated = false;
+
+    if (shippingAddress.lat && shippingAddress.lng) {
         const userLat = parseFloat(shippingAddress.lat);
         const userLng = parseFloat(shippingAddress.lng);
 
         // A. Check Blocked Geo-Zones (Flood, Riots, etc.)
-        if (appSettings.deliveryConfig.blockedZones) {
+        if (appSettings && appSettings.deliveryConfig && appSettings.deliveryConfig.blockedZones) {
             for (const zone of appSettings.deliveryConfig.blockedZones) {
                 const dist = getDistanceFromLatLonInKm(userLat, userLng, zone.lat, zone.lng);
                 if (dist <= zone.radiusKm) {
@@ -2405,34 +2424,103 @@ app.get('/api/orders/checkout-summary', protect, async (req, res) => {
             }
         }
 
-        // B. Check Seller Radius (Dynamic Radius Check)
-        const maxRadius = appSettings.deliveryConfig.globalRadiusKm || 50; // Uses Admin setting
+        // B. Check Radius & Calculate Dynamic Fee
+        const maxRadius = (appSettings && appSettings.deliveryConfig) ? (appSettings.deliveryConfig.globalRadiusKm || 50) : 50;
         
         for (const item of cart.items) {
-            if (item.product.seller.location && item.product.seller.location.coordinates) {
+            if (item.product.seller && item.product.seller.location && item.product.seller.location.coordinates) {
                 const sellerLng = item.product.seller.location.coordinates[0];
                 const sellerLat = item.product.seller.location.coordinates[1];
+                
                 const distKm = getDistanceFromLatLonInKm(userLat, userLng, sellerLat, sellerLng);
 
+                // 1. Check Max Radius
                 if (distKm > maxRadius) {
                     return res.status(400).json({
                         message: `Item "${item.product.name}" is too far (${distKm.toFixed(1)}km). We only deliver within ${maxRadius}km.`
                     });
                 }
+
+                // 2. Calculate Fee (Dynamic)
+                // (Nearest = Kam Paisa, Furthest = Jyada Paisa)
+                const itemFee = getDynamicDeliveryFee(distKm);
+                
+                // Hum max fee lenge (agar multiple seller hain to sabse dur wale ka charge lagega)
+                if (itemFee > maxShippingFee) {
+                    maxShippingFee = itemFee;
+                }
+                distanceCalculated = true;
             }
         }
     }
 
-    // ... (Rest of your calculation logic remains same) ...
+    // C. Fallback: Agar GPS nahi hai to Pincode based fee lagayein
+    if (!distanceCalculated || maxShippingFee === 0) {
+        maxShippingFee = calculateShippingFee(shippingAddress.pincode);
+    }
 
-    // Final Response
+    const shippingFee = maxShippingFee;
+
+    // ---------------------------------------------------------
+    // 💰 3. CALCULATE TOTALS (Items + Tax + Shipping - Coupon)
+    // ---------------------------------------------------------
+    
+    // Calculate Items Total (Considering Variants)
+    let totalCartAmount = 0;
+    for (const item of cart.items) {
+        const product = item.product;
+        let price = product.price;
+
+        // Variant Price Check
+        if (product.variants && product.variants.length > 0) {
+             const variant = product.variants.find(v => 
+                (v.color === item.selectedColor || (!v.color && !item.selectedColor)) && 
+                (v.size === item.selectedSize || (!v.size && !item.selectedSize))
+            );
+            if (variant) price = variant.price;
+        }
+        totalCartAmount += price * item.qty;
+    }
+
+    const totalTaxAmount = totalCartAmount * GST_RATE;
+    let discountAmount = 0;
+
+    // Coupon Logic
+    if (couponCode) {
+      const coupon = await Coupon.findOne({
+        code: couponCode,
+        isActive: true,
+        expiryDate: { $gt: new Date() },
+        minPurchaseAmount: { $lte: totalCartAmount } 
+      });
+
+      if (coupon) {
+        if (coupon.discountType === 'percentage') {
+          discountAmount = totalCartAmount * (coupon.discountValue / 100);
+          if (coupon.maxDiscountAmount && discountAmount > coupon.maxDiscountAmount) {
+            discountAmount = coupon.maxDiscountAmount;
+          }
+        } else if (coupon.discountType === 'fixed') {
+          discountAmount = coupon.discountValue;
+        }
+      }
+    }
+
+    // Final Total
+    let finalAmountForPayment = Math.max(0, totalCartAmount + shippingFee + totalTaxAmount - discountAmount);
+
     res.json({
       message: 'Checkout summary calculated successfully.',
-      // ... return totals ...
+      itemsTotal: totalCartAmount,
+      totalShippingFee: shippingFee,
+      totalTaxAmount: totalTaxAmount,
+      totalDiscount: discountAmount,
+      grandTotal: finalAmountForPayment,
     });
 
   } catch (err) {
-     // ... error handling ...
+      console.error("Checkout Summary Error:", err.message);
+      res.status(500).json({ message: 'Error calculating summary', error: err.message });
   }
 });
 
@@ -2565,18 +2653,21 @@ app.post('/api/orders', protect, async (req, res) => {
   try {
     const { shippingAddressId, paymentMethod, couponCode } = req.body;
 
+    // 1. Cart Fetch करें (Seller की Location भी साथ लाएं)
     const cart = await Cart.findOne({ user: req.user._id }).populate({
       path: 'items.product',
-      select: 'name price originalPrice variants category seller lowStockThreshold', 
+      select: 'name price originalPrice variants category seller lowStockThreshold',
       populate: {
         path: 'seller',
-        select: 'pincodes name phone fcmToken walletBalance' 
+        // ✅ Location aur Wallet Balance jaroor select karein
+        select: 'pincodes name phone fcmToken walletBalance location' 
       }
     });
 
     if (!cart || cart.items.length === 0) {
       return res.status(400).json({ message: 'Cart is empty' });
     }
+
     const shippingAddress = await Address.findById(shippingAddressId);
     if (!shippingAddress) return res.status(404).json({ message: 'Shipping address not found' });
 
@@ -2584,6 +2675,7 @@ app.post('/api/orders', protect, async (req, res) => {
     const ordersBySeller = new Map();
     let calculatedTotalCartAmount = 0; 
 
+    // ✅ Group Items by Seller
     for (const item of cart.items) {
       const product = item.product;
       
@@ -2591,7 +2683,7 @@ app.post('/api/orders', protect, async (req, res) => {
         return res.status(400).json({ message: `An item in your cart is invalid or its seller is inactive.` });
       }
 
-      // 1. Find the correct price/variant
+      // Price/Variant Validation
       let itemPrice = product.price; 
       let itemOriginalPrice = product.originalPrice; 
       
@@ -2600,7 +2692,6 @@ app.post('/api/orders', protect, async (req, res) => {
               (v.color === item.selectedColor || (!v.color && !item.selectedColor)) && 
               (v.size === item.selectedSize || (!v.size && !item.selectedSize))
           );
-          
           if (!selectedVariant) {
              return res.status(400).json({ message: `Invalid variant combination selected for product: ${product.name}.` });
           }
@@ -2616,6 +2707,7 @@ app.post('/api/orders', protect, async (req, res) => {
           }
       }
 
+      // Check Pincode Availability (Basic Check)
       if (!product.seller.pincodes.includes(shippingAddress.pincode)) {
         return res.status(400).json({ message: `Sorry, delivery not available at your location for the product: "${product.name}"` });
       }
@@ -2625,7 +2717,8 @@ app.post('/api/orders', protect, async (req, res) => {
         ordersBySeller.set(sellerId, {
           seller: product.seller,
           orderItems: [],
-          totalAmount: 0
+          totalAmount: 0,
+          calculatedShippingFee: 0 // Will be set later
         });
       }
 
@@ -2646,11 +2739,35 @@ app.post('/api/orders', protect, async (req, res) => {
       calculatedTotalCartAmount += itemPrice * item.qty;
     }
     
+    // --- 🚚 NEW: Calculate Shipping Fee (Dynamic per Seller) ---
+    // This loop calculates the specific fee for EACH seller based on their location relative to the user
+    let totalShippingFee = 0;
+
+    for (const [sellerId, sellerData] of ordersBySeller.entries()) {
+        let fee = 0;
+        
+        // Agar User aur Seller dono ki GPS location available hai
+        if (shippingAddress.lat && shippingAddress.lng && sellerData.seller.location && sellerData.seller.location.coordinates) {
+            const uLat = parseFloat(shippingAddress.lat);
+            const uLng = parseFloat(shippingAddress.lng);
+            const sLng = sellerData.seller.location.coordinates[0];
+            const sLat = sellerData.seller.location.coordinates[1];
+
+            const dist = getDistanceFromLatLonInKm(uLat, uLng, sLat, sLng);
+            fee = getDynamicDeliveryFee(dist); // ✅ Helper function use karein (Use helper defined in server.js)
+        } else {
+            // Fallback: Pincode Logic if GPS fails
+            fee = calculateShippingFee(shippingAddress.pincode);
+        }
+
+        sellerData.calculatedShippingFee = fee; // Store specific fee for this seller for later use
+        totalShippingFee += fee;
+    }
+
     const totalCartAmount = calculatedTotalCartAmount; 
     
-    // --- Coupon, Shipping & Tax Calculations ---
+    // --- Coupon & Tax ---
     let discountAmount = 0;
-    const shippingFee = calculateShippingFee(shippingAddress.pincode); 
     const totalTaxAmount = totalCartAmount * GST_RATE;
     
     if (couponCode) {
@@ -2673,13 +2790,16 @@ app.post('/api/orders', protect, async (req, res) => {
       }
     }
     
-    let finalAmountForPayment = Math.max(0, totalCartAmount + shippingFee + totalTaxAmount - discountAmount);
+    // ✅ FINAL AMOUNT (Include Dynamic Total Shipping)
+    let finalAmountForPayment = Math.max(0, totalCartAmount + totalShippingFee + totalTaxAmount - discountAmount);
     
+    // Payment Method Check
     let effectivePaymentMethod = paymentMethod;
     if (paymentMethod === 'razorpay' && finalAmountForPayment <= 0) {
       effectivePaymentMethod = 'cod';
     }
 
+    // Razorpay Order Creation
     let razorpayOrder = null;
     if (effectivePaymentMethod === 'razorpay') {
       razorpayOrder = await razorpay.orders.create({
@@ -2696,13 +2816,13 @@ app.post('/api/orders', protect, async (req, res) => {
     
     const createdOrders = [];
     
-    let remainingDiscount = discountAmount;
-    let remainingShippingFee = shippingFee;
-    let remainingTaxAmount = totalTaxAmount; 
-
-    // ✅ FETCH SETTINGS (Commission Rate)
+    // Commission Setup
     const appSettings = await AppSettings.findOne({ singleton: true });
     const COMMISSION_RATE = appSettings ? appSettings.platformCommissionRate : 0.05; 
+
+    // Coupon Split Variables
+    let remainingDiscount = discountAmount;
+    let remainingTaxAmount = totalTaxAmount;
 
     // --- Create Sub-Orders for Each Seller ---
     for (const [sellerId, sellerData] of ordersBySeller.entries()) {
@@ -2710,34 +2830,32 @@ app.post('/api/orders', protect, async (req, res) => {
       const proportion = (totalCartAmount > 0) ? sellerData.totalAmount / totalCartAmount : 0; 
 
       const sellerDiscount = remainingDiscount * proportion;
-      const sellerShippingFee = remainingShippingFee * proportion;
       const sellerTaxAmount = remainingTaxAmount * proportion;
 
+      // Adjust remaining
       remainingDiscount -= sellerDiscount;
-      remainingShippingFee -= sellerShippingFee;
       remainingTaxAmount -= sellerTaxAmount;
 
       const isCodOrFree = effectivePaymentMethod === 'cod' || finalAmountForPayment === 0;
       
       const totalAmountFloat = parseFloat((sellerData.totalAmount || 0).toFixed(2));
-      const shippingFeeFloat = parseFloat((sellerShippingFee || 0).toFixed(2));
       const taxAmountFloat = parseFloat((sellerTaxAmount || 0).toFixed(2));
       const discountAmountFloat = parseFloat((sellerDiscount || 0).toFixed(2));
       
-      const orderGrandTotal = totalAmountFloat + shippingFeeFloat + taxAmountFloat - discountAmountFloat;
-
-      // ==========================================================
-      // 💰 COMMISSION DEDUCTION LOGIC
-      // ==========================================================
-      const commissionAmount = parseFloat((totalAmountFloat * COMMISSION_RATE).toFixed(2));
+      // 👇👇 NEW: Use the ACTUAL calculated Distance Fee for THIS Seller 👇👇
+      // We stored this earlier in the loop above
+      const sellerShippingFee = sellerData.calculatedShippingFee; 
+      // 👆👆 END NEW LOGIC 👆👆
       
-      // Update Seller Wallet
+      const orderGrandTotal = totalAmountFloat + sellerShippingFee + taxAmountFloat - discountAmountFloat;
+
+      // 💰 COMMISSION DEDUCTION
+      const commissionAmount = parseFloat((totalAmountFloat * COMMISSION_RATE).toFixed(2));
       const sellerUser = await User.findById(sellerId);
       const balanceBefore = sellerUser.walletBalance;
       
-      sellerUser.walletBalance -= commissionAmount; // Deduct commission
+      sellerUser.walletBalance -= commissionAmount; 
       await sellerUser.save();
-      // ==========================================================
 
       const order = new Order({
         user: req.user._id,
@@ -2751,7 +2869,7 @@ app.post('/api/orders', protect, async (req, res) => {
         taxAmount: taxAmountFloat, 
         couponApplied: couponCode,
         discountAmount: discountAmountFloat, 
-        shippingFee: shippingFeeFloat, 
+        shippingFee: sellerShippingFee, // ✅ Saves specific dynamic fee for this seller
         paymentId: razorpayOrder ? razorpayOrder.id : (isCodOrFree ? `cod_${crypto.randomBytes(8).toString('hex')}` : undefined),
         paymentStatus: isCodOrFree ? 'completed' : 'pending',
         deliveryStatus: isCodOrFree ? 'Pending' : 'Payment Pending',
@@ -2760,7 +2878,7 @@ app.post('/api/orders', protect, async (req, res) => {
       await order.save();
       createdOrders.push(order);
 
-      // 💰 LOG WALLET TRANSACTION
+      // Wallet Log
       await WalletTransaction.create({
           seller: sellerId,
           orderId: order._id,
@@ -2773,58 +2891,37 @@ app.post('/api/orders', protect, async (req, res) => {
 
       const orderIdShort = order._id.toString().slice(-6);
 
-      // --- Post-creation actions (stock update, notifications) ---
+      // --- Post-creation actions (stock, notifications) ---
       if (isCodOrFree) {
-        
-        // ==========================================================
-        // 📉 STOCK UPDATE & LOW STOCK ALERT (Integrated Here)
-        // ==========================================================
+        // Stock Update
         for(const item of sellerData.orderItems) {
             const updatedProduct = await Product.findByIdAndUpdate(
                 item.product, 
                 { $inc: { stock: -item.qty } },
-                { new: true } // Return updated document
+                { new: true } 
             ).populate('seller', 'fcmToken phone'); 
 
-            // 🚨 Check for Low Stock
+            // Low Stock Alert
             if (updatedProduct && updatedProduct.stock <= updatedProduct.lowStockThreshold) {
                 const alertMsg = `⚠️ Low Stock Alert: "${updatedProduct.name}" is running low (${updatedProduct.stock} left).`;
-                
-                // 1. Send Push Notification to Seller
                 if (updatedProduct.seller.fcmToken) {
-                    await sendPushNotification(
-                        [updatedProduct.seller.fcmToken],
-                        'Stock Alert 📉',
-                        alertMsg,
-                        { 
-                            type: 'LOW_STOCK', 
-                            productId: updatedProduct._id.toString(),
-                            currentStock: updatedProduct.stock.toString()
-                        }
-                    );
+                    await sendPushNotification([updatedProduct.seller.fcmToken], 'Stock Alert 📉', alertMsg, { type: 'LOW_STOCK' });
                 }
             }
         }
-        // ==========================================================
 
         const userMessage = `✅ Your COD order #${orderIdShort} has been successfully placed! Grand Total: ₹${orderGrandTotal.toFixed(2)}.`;
         const sellerMessage = `🎉 New Order (COD)!\nYou've received a new order #${orderIdShort}. Item Subtotal: ₹${totalAmountFloat.toFixed(2)}. Commission deducted.`;
         
-        // ✅ [UPDATED] Save Notification to Database (For Bell Icon) & Send Push to User
-        await sendAndSavePersonalNotification(
-            req.user._id,
-            'Order Placed Successfully! 🎉',
-            `Your order #${orderIdShort} has been placed. Amount: ₹${orderGrandTotal.toFixed(2)}`,
-            { orderId: order._id.toString(), type: 'ORDER_PLACED' }
-        );
+        await sendAndSavePersonalNotification(req.user._id, 'Order Placed Successfully! 🎉', `Your order #${orderIdShort} has been placed. Amount: ₹${orderGrandTotal.toFixed(2)}`, { orderId: order._id.toString(), type: 'ORDER_PLACED' });
 
         await sendWhatsApp(req.user.phone, userMessage);
         await sendWhatsApp(sellerData.seller.phone, sellerMessage);
         await notifyAdmin(`Admin Alert: New COD order #${orderIdShort} placed.`);
 
+        // Delivery Assignment
         try {
             const orderPincode = shippingAddress.pincode;
-            
             await DeliveryAssignment.create({
               order: order._id,
               deliveryBoy: null,
@@ -2833,21 +2930,14 @@ app.post('/api/orders', protect, async (req, res) => {
               history: [{ status: 'Pending' }]
             });
             
-            const nearbyDeliveryBoys = await User.find({
-              role: 'delivery', approved: true, pincodes: orderPincode
-            }).select('fcmToken');
+            const nearbyDeliveryBoys = await User.find({ role: 'delivery', approved: true, pincodes: orderPincode }).select('fcmToken');
             const deliveryTokens = nearbyDeliveryBoys.map(db => db.fcmToken).filter(Boolean);
             
             if (deliveryTokens.length > 0) {
-              await sendPushNotification(
-                  deliveryTokens,
-                  'New Delivery Available! 🛵',
-                  `A new order (#${orderIdShort}) is available for pickup in your area (Pincode: ${orderPincode}).`,
-                  { orderId: order._id.toString(), type: 'NEW_DELIVERY_AVAILABLE' }
-              );
+              await sendPushNotification(deliveryTokens, 'New Delivery Available! 🛵', `A new order (#${orderIdShort}) is available for pickup in your area (Pincode: ${orderPincode}).`, { orderId: order._id.toString(), type: 'NEW_DELIVERY_AVAILABLE' });
             }
         } catch (deliveryErr) {
-            console.error('Failed to create delivery assignment or notify boys:', deliveryErr.message);
+            console.error('Failed to create delivery assignment:', deliveryErr.message);
         }
         
       } else {
@@ -2868,7 +2958,7 @@ app.post('/api/orders', protect, async (req, res) => {
       paymentMethod: effectivePaymentMethod,
       grandTotal: finalAmountForPayment,
       itemsTotal: totalCartAmount,
-      totalShippingFee: shippingFee,
+      totalShippingFee: totalShippingFee, // Return total dynamic fee
       totalTaxAmount: totalTaxAmount,
       totalDiscount: discountAmount
     });
@@ -5474,6 +5564,7 @@ app.get('/api/admin/settings', protect, authorizeRole('admin'), async (req, res)
 
 // PUT Settings (Update Fee & Theme)
 // PUT Settings (Update Fee, Theme, & Delivery Radius/Blocks)
+// PUT Settings (Update Fee, Theme, & Delivery Radius/Blocks)
 app.put('/api/admin/settings', protect, authorizeRole('admin'), async (req, res) => {
   try {
     const { 
@@ -5482,7 +5573,7 @@ app.put('/api/admin/settings', protect, authorizeRole('admin'), async (req, res)
         theme, 
         deliveryRadius, 
         blockedZones,
-        blockedPincodes // 👈 Receive this from Frontend
+        blockedPincodes 
     } = req.body;
     
     const updateData = {};
@@ -5491,30 +5582,39 @@ app.put('/api/admin/settings', protect, authorizeRole('admin'), async (req, res)
     if (typeof productCreationFee !== 'undefined') updateData.productCreationFee = parseFloat(productCreationFee);
     if (theme) updateData.theme = theme;
 
-    // --- ✅ UPDATE DELIVERY CONFIG ---
-    if (typeof deliveryRadius !== 'undefined' || blockedZones || blockedPincodes) {
+    // --- ✅ FIXED: DELIVERY CONFIG UPDATE ---
+    // Check if variables are defined (even if empty)
+    if (typeof deliveryRadius !== 'undefined' || typeof blockedZones !== 'undefined' || typeof blockedPincodes !== 'undefined') {
         
         // 1. Global Radius
         if (typeof deliveryRadius !== 'undefined') {
             updateData['deliveryConfig.globalRadiusKm'] = parseFloat(deliveryRadius);
         }
         
-        // 2. Blocked Pincodes (comma separated string or array)
-        if (blockedPincodes) {
-            let pins = blockedPincodes;
+        // 2. Blocked Pincodes (FIXED LOGIC FOR UNBLOCKING)
+        if (typeof blockedPincodes !== 'undefined') {
+            let pins = [];
             if (typeof blockedPincodes === 'string') {
-                // If admin sends "800001,800002", convert to array
-                pins = blockedPincodes.split(',').map(p => p.trim());
+                // अगर खाली स्ट्रिंग है तो array खाली रहेगा (सब अनब्लॉक हो जायेंगे)
+                if (blockedPincodes.trim().length > 0) {
+                    pins = blockedPincodes.split(',').map(p => p.trim()).filter(p => p !== "");
+                }
+            } else if (Array.isArray(blockedPincodes)) {
+                pins = blockedPincodes;
             }
             updateData['deliveryConfig.blockedPincodes'] = pins;
         }
 
         // 3. Blocked Zones (Geo-fencing)
-        if (blockedZones) {
-            let zones = blockedZones;
+        if (typeof blockedZones !== 'undefined') {
+            let zones = [];
             if (typeof blockedZones === 'string') {
-                try { zones = JSON.parse(blockedZones); } catch (e) {}
+                try { zones = JSON.parse(blockedZones); } catch (e) { zones = []; }
+            } else if (Array.isArray(blockedZones)) {
+                zones = blockedZones;
             }
+            
+            // Map Valid Zones Only
             if (Array.isArray(zones)) {
                 updateData['deliveryConfig.blockedZones'] = zones.map(z => ({
                     lat: parseFloat(z.lat),
