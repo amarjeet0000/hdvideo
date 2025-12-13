@@ -240,6 +240,42 @@ function generateUniqueSku(categoryId, productName) {
   return `${catPart}-${prodPart}-${randomPart}`;
 }
 
+
+/**
+ * HELPER: Check if a location is blocked (Pincode or Geo-Fence)
+ */
+async function checkLocationBlock(pincode, lat, lng) {
+    try {
+        const settings = await AppSettings.findOne({ singleton: true });
+        if (!settings || !settings.deliveryConfig) return { blocked: false };
+
+        const config = settings.deliveryConfig;
+
+        // 1. Check Pincode Block
+        if (pincode && config.blockedPincodes && config.blockedPincodes.includes(pincode)) {
+            return { blocked: true, reason: `Delivery is currently unavailable in pincode ${pincode}.` };
+        }
+
+        // 2. Check Geo-Zone Block (Flood, Riots, etc.)
+        if (lat && lng && config.blockedZones && config.blockedZones.length > 0) {
+            const userLat = parseFloat(lat);
+            const userLng = parseFloat(lng);
+
+            for (const zone of config.blockedZones) {
+                const distance = getDistanceFromLatLonInKm(userLat, userLng, zone.lat, zone.lng);
+                if (distance <= zone.radiusKm) {
+                    return { blocked: true, reason: `Service paused in your area: ${zone.reason}` };
+                }
+            }
+        }
+
+        return { blocked: false };
+    } catch (err) {
+        console.error('Error checking location block:', err.message);
+        return { blocked: false }; // Fail safe: Allow if error occurs
+    }
+}
+
 /**
  * Calculates shipping fee based on customer's pincode vs. base pincode.
  */
@@ -466,6 +502,9 @@ const serviceBookingSchema = new mongoose.Schema({
   notes: String,
 
   // ✅ FIX: Ye field missing tha, isliye crash ho raha tha
+
+
+  
   history: [{
     status: String,
     timestamp: { type: Date, default: Date.now },
@@ -1021,6 +1060,8 @@ function checkSellerApproved(req, res, next) {
   if (req.user.role === 'seller' && !req.user.approved) return res.status(403).json({ message: 'Seller account not approved yet' });
   next();
 }
+
+
 
 
 // --------------------------------------------------------------------------------
@@ -1864,10 +1905,23 @@ app.delete('/api/admin/subcategories/:id', protect, authorizeRole('admin'), asyn
 
 
 // ✅ UPDATED: Main Products Route with Distance Calculation
+// ✅ UPDATED: Main Products Route (With Block Logic)
 app.get('/api/products', async (req, res) => {
   try {
     const { search, minPrice, maxPrice, categoryId, brand, subcategoryId, sellerId, userPincode, lat, lng } = req.query;
     const { ObjectId } = mongoose.Types;
+
+    // 🚫 --- BLOCK CHECK START --- 
+    // If user provided location/pincode, check if blocked.
+    // If blocked, return EMPTY ARRAY immediately (Products won't show).
+    if (userPincode || (lat && lng)) {
+        const blockStatus = await checkLocationBlock(userPincode, lat, lng);
+        if (blockStatus.blocked) {
+            console.log(`🚫 Products hidden due to block: ${blockStatus.reason}`);
+            return res.json([]); // Return empty list
+        }
+    }
+    // 🚫 --- BLOCK CHECK END ---
 
     // --- 1. Build initial match conditions ---
     const initialMatchStage = {};
@@ -1931,7 +1985,7 @@ app.get('/api/products', async (req, res) => {
         $project: {
           name: 1, price: 1, originalPrice: 1, images: 1, stock: 1, unit: 1, brand: 1, variants: 1, 
           shortDescription: 1, isTrending: 1, 
-          "seller._id": 1, "seller.name": 1, "seller.email": 1, "seller.location": 1, // ✅ Get Seller Location
+          "seller._id": 1, "seller.name": 1, "seller.email": 1, "seller.location": 1,
           "category.name": 1, createdAt: 1
         }
       }
@@ -1939,7 +1993,7 @@ app.get('/api/products', async (req, res) => {
 
     let products = await Product.aggregate(pipeline);
 
-    // ✅ 4. Calculate Distance in Code
+    // ✅ 4. Calculate Distance
     if (lat && lng) {
         const userLat = parseFloat(lat);
         const userLng = parseFloat(lng);
@@ -1949,7 +2003,6 @@ app.get('/api/products', async (req, res) => {
             if (p.seller && p.seller.location && p.seller.location.coordinates) {
                 const sLng = p.seller.location.coordinates[0];
                 const sLat = p.seller.location.coordinates[1];
-                // Reuse existing getDistanceFromLatLonInKm function in server.js
                 dist = parseFloat(getDistanceFromLatLonInKm(userLat, userLng, sLat, sLng).toFixed(1));
             }
             return { ...p, distanceKm: dist };
@@ -1965,7 +2018,6 @@ app.get('/api/products', async (req, res) => {
     res.status(500).json({ message: "Error fetching products" });
   }
 });
-
 
 app.get('/api/products/:id', async (req, res) => {
     try {
@@ -1984,17 +2036,30 @@ app.get('/api/products/:id', async (req, res) => {
 // [NEW] API Endpoint to get products available in a specific pincode
 // [NEW] API Endpoint to get products available in a specific pincode
 // [UPDATED] API Endpoint to get products by pincode + Calculate Distance
+// ✅ UPDATED: Get products by pincode (With Block Check)
 app.get('/api/products/pincode/:pincode', async (req, res) => {
     try {
         const userPincode = req.params.pincode;
         
-        // ✅ 1. Get User Coordinates from Query Params
+        // 1. Get User Coordinates
         const userLat = req.query.lat ? parseFloat(req.query.lat) : null;
         const userLng = req.query.lng ? parseFloat(req.query.lng) : null;
 
         if (!userPincode) {
             return res.status(400).json({ message: 'Pincode is required.' });
         }
+
+        // 🚫 --- BLOCK CHECK START ---
+        // Check if this pincode or lat/lng is blocked
+        const blockStatus = await checkLocationBlock(userPincode, userLat, userLng);
+        if (blockStatus.blocked) {
+            // Return 404 or 403 so the frontend knows to show "Service Unavailable" screen
+            return res.status(403).json({ 
+                message: blockStatus.reason, 
+                blocked: true 
+            });
+        }
+        // 🚫 --- BLOCK CHECK END ---
 
         // --- Aggregation Pipeline ---
         let products = await Product.aggregate([
@@ -2007,7 +2072,7 @@ app.get('/api/products/pincode/:pincode', async (req, res) => {
                 stock: { $gt: 0 } // Only in-stock
             }},
             
-            // Stage 2: Join with Seller (User) details
+            // Stage 2: Join with Seller
             { $lookup: {
                 from: "users",
                 localField: "seller",
@@ -2016,7 +2081,7 @@ app.get('/api/products/pincode/:pincode', async (req, res) => {
             }},
             { $unwind: { path: "$seller", preserveNullAndEmptyArrays: true } },
             
-            // Stage 3: Join with Category details
+            // Stage 3: Join with Category
             { $lookup: {
                 from: "categories",
                 localField: "category",
@@ -2025,7 +2090,7 @@ app.get('/api/products/pincode/:pincode', async (req, res) => {
             }},
             { $unwind: { path: "$category", preserveNullAndEmptyArrays: true } },
             
-            // Stage 4: Project fields (✅ Include Seller Location)
+            // Stage 4: Project fields
             { $project: {
                 name: 1,
                 price: 1,
@@ -2037,7 +2102,7 @@ app.get('/api/products/pincode/:pincode', async (req, res) => {
                 shortDescription: 1,
                 isTrending: 1,
                 "seller.name": 1,
-                "seller.location": 1, // ✅ Seller coordinates (GeoJSON) fetch here
+                "seller.location": 1, 
                 "category.name": 1,
                 createdAt: 1,
                 pincodes: 1,
@@ -2047,30 +2112,22 @@ app.get('/api/products/pincode/:pincode', async (req, res) => {
             { $sort: { createdAt: -1 } }
         ]);
 
-        // ✅ 2. Calculate Distance for each product (If User Location provided)
+        // 2. Calculate Distance
         if (userLat && userLng) {
             products = products.map(product => {
                 let distance = null;
-                
-                // Check if seller has valid coordinates [lng, lat]
                 if (product.seller && product.seller.location && 
                     product.seller.location.coordinates && 
                     product.seller.location.coordinates.length === 2) {
                     
-                    // MongoDB stores as [Longitude, Latitude]
                     const sellerLng = product.seller.location.coordinates[0];
                     const sellerLat = product.seller.location.coordinates[1];
-
-                    // Calculate distance using helper function
-                    // Ensure getDistanceFromLatLonInKm is defined in your server.js
                     const distRaw = getDistanceFromLatLonInKm(userLat, userLng, sellerLat, sellerLng);
-                    distance = parseFloat(distRaw.toFixed(1)); // 1 decimal place (e.g., 2.5 km)
+                    distance = parseFloat(distRaw.toFixed(1));
                 }
-
                 return { ...product, distanceKm: distance };
             });
 
-            // Optional: Sort by distance (Nearest First)
             products.sort((a, b) => {
                 if (a.distanceKm === null) return 1;
                 if (b.distanceKm === null) return -1;
