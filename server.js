@@ -546,6 +546,7 @@ const ServiceBooking = mongoose.model('ServiceBooking', serviceBookingSchema);
 // --------- Models ----------
 
 // --- UPDATED APP SETTINGS SCHEMA (With Dynamic Pricing) ---
+// --- UPDATED APP SETTINGS SCHEMA (Must be defined BEFORE routes) ---
 const appSettingsSchema = new mongoose.Schema({
   singleton: { type: Boolean, default: true, unique: true, index: true },
   
@@ -560,15 +561,14 @@ const appSettingsSchema = new mongoose.Schema({
     categoryLayout: { type: String, enum: ['horizontal', 'grid', 'list'], default: 'horizontal' }
   },
 
-  // ✅ [UPDATED] DELIVERY CONFIGURATION (Admin Controlled)
+  // ✅ DELIVERY CONFIGURATION
   deliveryConfig: {
       globalRadiusKm: { type: Number, default: 50 }, 
       
-      // 👇 NEW FIELDS FOR PRICING 👇
-      baseCharge: { type: Number, default: 20 },       // Admin will set this (e.g. ₹20)
-      baseKm: { type: Number, default: 2 },           // Admin will set this (e.g. first 2 KM)
-      extraPerKmCharge: { type: Number, default: 10 }, // Admin will set this (e.g. ₹10/km)
-      // 👆 END NEW FIELDS 👆
+      // Pricing Fields
+      baseCharge: { type: Number, default: 20 },       
+      baseKm: { type: Number, default: 2 },           
+      extraPerKmCharge: { type: Number, default: 10 }, 
 
       blockedPincodes: [{ type: String }], 
       blockedZones: [{
@@ -579,6 +579,9 @@ const appSettingsSchema = new mongoose.Schema({
       }]
   }
 });
+
+// 👇 THIS LINE IS CRITICAL - DO NOT FORGET IT 👇
+const AppSettings = mongoose.model('AppSettings', appSettingsSchema);
 const categorySchema = new mongoose.Schema({
   name: { type: String, required: true, unique: true, index: true },
   slug: { type: String, required: true, unique: true, index: true },
