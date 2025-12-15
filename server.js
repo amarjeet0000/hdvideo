@@ -285,14 +285,22 @@ async function checkLocationBlock(pincode, lat, lng) {
 /**
  * HELPER: Calculate Fee based on KM
  */
-function getDynamicDeliveryFee(distanceKm) {
-    if (!distanceKm || distanceKm <= 0) return BASE_DELIVERY_PRICE; // अगर दूरी नहीं मिली तो बेस चार्ज
+/**
+ * ✅ UPDATED HELPER: Calculate Fee based on Admin Settings
+ */
+function getDynamicDeliveryFee(distanceKm, config) {
+    // अगर Admin ने कुछ सेट नहीं किया तो Default values (20, 2, 10) यूज़ होंगी
+    const basePrice = config?.baseCharge || 20; 
+    const baseKm = config?.baseKm || 2;
+    const perKmPrice = config?.extraPerKmCharge || 10;
 
-    if (distanceKm <= BASE_DELIVERY_KM) {
-        return BASE_DELIVERY_PRICE; // 2km के अंदर ₹20
+    if (!distanceKm || distanceKm <= 0) return basePrice;
+
+    if (distanceKm <= baseKm) {
+        return basePrice; // Base KM के अंदर
     } else {
-        const extraKm = distanceKm - BASE_DELIVERY_KM;
-        return Math.round(BASE_DELIVERY_PRICE + (extraKm * PER_KM_PRICE)); // ₹20 + (एक्स्ट्रा KM * ₹10)
+        const extraKm = distanceKm - baseKm;
+        return Math.round(basePrice + (extraKm * perKmPrice)); 
     }
 }
 
@@ -537,6 +545,7 @@ const ServiceBooking = mongoose.model('ServiceBooking', serviceBookingSchema);
 
 // --------- Models ----------
 
+// --- UPDATED APP SETTINGS SCHEMA (With Dynamic Pricing) ---
 const appSettingsSchema = new mongoose.Schema({
   singleton: { type: Boolean, default: true, unique: true, index: true },
   
@@ -551,14 +560,17 @@ const appSettingsSchema = new mongoose.Schema({
     categoryLayout: { type: String, enum: ['horizontal', 'grid', 'list'], default: 'horizontal' }
   },
 
-  // ✅ [UPDATED] DELIVERY CONFIGURATION
+  // ✅ [UPDATED] DELIVERY CONFIGURATION (Admin Controlled)
   deliveryConfig: {
-      globalRadiusKm: { type: Number, default: 50 }, // Admin sets this (e.g., 5km, 10km)
+      globalRadiusKm: { type: Number, default: 50 }, 
       
-      // 👇 NEW: List of completely blocked pincodes
-      blockedPincodes: [{ type: String }], 
+      // 👇 NEW FIELDS FOR PRICING 👇
+      baseCharge: { type: Number, default: 20 },       // Admin will set this (e.g. ₹20)
+      baseKm: { type: Number, default: 2 },           // Admin will set this (e.g. first 2 KM)
+      extraPerKmCharge: { type: Number, default: 10 }, // Admin will set this (e.g. ₹10/km)
+      // 👆 END NEW FIELDS 👆
 
-      // Existing Geo-Blocking
+      blockedPincodes: [{ type: String }], 
       blockedZones: [{
           lat: Number,
           lng: Number,
@@ -567,10 +579,6 @@ const appSettingsSchema = new mongoose.Schema({
       }]
   }
 });
-
-// 👇👇👇 THIS WAS MISSING - ADD IT HERE 👇👇👇
-const AppSettings = mongoose.model('AppSettings', appSettingsSchema);
-// 👆👆👆 CRITICAL FIX 👆👆👆
 const categorySchema = new mongoose.Schema({
   name: { type: String, required: true, unique: true, index: true },
   slug: { type: String, required: true, unique: true, index: true },
@@ -2662,13 +2670,12 @@ app.post('/api/orders', protect, async (req, res) => {
   try {
     const { shippingAddressId, paymentMethod, couponCode } = req.body;
 
-    // 1. Cart Fetch करें (Seller की Location भी साथ लाएं)
+    // 1. Cart Fetch (Include Seller Location & Wallet Balance)
     const cart = await Cart.findOne({ user: req.user._id }).populate({
       path: 'items.product',
-      select: 'name price originalPrice variants category seller lowStockThreshold',
+      select: 'name price originalPrice variants category seller lowStockThreshold stock', // ✅ Added 'stock' to select
       populate: {
         path: 'seller',
-        // ✅ Location aur Wallet Balance jaroor select karein
         select: 'pincodes name phone fcmToken walletBalance location' 
       }
     });
@@ -2708,7 +2715,7 @@ app.post('/api/orders', protect, async (req, res) => {
           itemOriginalPrice = selectedVariant.originalPrice;
           
           if (selectedVariant.stock < item.qty) {
-            return res.status(400).json({ message: `Insufficient stock for product: ${product.name} variant.` });
+            return res.status(400).json({ message: `Insufficient stock for product: ${product.name} (Variant).` });
           }
       } else {
           if (product.stock < item.qty) {
@@ -2748,14 +2755,13 @@ app.post('/api/orders', protect, async (req, res) => {
       calculatedTotalCartAmount += itemPrice * item.qty;
     }
     
-    // --- 🚚 NEW: Calculate Shipping Fee (Dynamic per Seller) ---
-    // This loop calculates the specific fee for EACH seller based on their location relative to the user
+    // --- 🚚 Calculate Shipping Fee (Dynamic per Seller) ---
     let totalShippingFee = 0;
 
     for (const [sellerId, sellerData] of ordersBySeller.entries()) {
         let fee = 0;
         
-        // Agar User aur Seller dono ki GPS location available hai
+        // Use GPS logic if available
         if (shippingAddress.lat && shippingAddress.lng && sellerData.seller.location && sellerData.seller.location.coordinates) {
             const uLat = parseFloat(shippingAddress.lat);
             const uLng = parseFloat(shippingAddress.lng);
@@ -2763,13 +2769,15 @@ app.post('/api/orders', protect, async (req, res) => {
             const sLat = sellerData.seller.location.coordinates[1];
 
             const dist = getDistanceFromLatLonInKm(uLat, uLng, sLat, sLng);
-            fee = getDynamicDeliveryFee(dist); // ✅ Helper function use karein (Use helper defined in server.js)
+            const appSettings = await AppSettings.findOne({ singleton: true });
+            const deliveryConfig = appSettings ? appSettings.deliveryConfig : {}; 
+            fee = getDynamicDeliveryFee(dist, deliveryConfig); // Use helper with config
         } else {
-            // Fallback: Pincode Logic if GPS fails
+            // Fallback: Pincode Logic
             fee = calculateShippingFee(shippingAddress.pincode);
         }
 
-        sellerData.calculatedShippingFee = fee; // Store specific fee for this seller for later use
+        sellerData.calculatedShippingFee = fee;
         totalShippingFee += fee;
     }
 
@@ -2799,7 +2807,6 @@ app.post('/api/orders', protect, async (req, res) => {
       }
     }
     
-    // ✅ FINAL AMOUNT (Include Dynamic Total Shipping)
     let finalAmountForPayment = Math.max(0, totalCartAmount + totalShippingFee + totalTaxAmount - discountAmount);
     
     // Payment Method Check
@@ -2825,7 +2832,6 @@ app.post('/api/orders', protect, async (req, res) => {
     
     const createdOrders = [];
     
-    // Commission Setup
     const appSettings = await AppSettings.findOne({ singleton: true });
     const COMMISSION_RATE = appSettings ? appSettings.platformCommissionRate : 0.05; 
 
@@ -2841,7 +2847,6 @@ app.post('/api/orders', protect, async (req, res) => {
       const sellerDiscount = remainingDiscount * proportion;
       const sellerTaxAmount = remainingTaxAmount * proportion;
 
-      // Adjust remaining
       remainingDiscount -= sellerDiscount;
       remainingTaxAmount -= sellerTaxAmount;
 
@@ -2851,10 +2856,7 @@ app.post('/api/orders', protect, async (req, res) => {
       const taxAmountFloat = parseFloat((sellerTaxAmount || 0).toFixed(2));
       const discountAmountFloat = parseFloat((sellerDiscount || 0).toFixed(2));
       
-      // 👇👇 NEW: Use the ACTUAL calculated Distance Fee for THIS Seller 👇👇
-      // We stored this earlier in the loop above
       const sellerShippingFee = sellerData.calculatedShippingFee; 
-      // 👆👆 END NEW LOGIC 👆👆
       
       const orderGrandTotal = totalAmountFloat + sellerShippingFee + taxAmountFloat - discountAmountFloat;
 
@@ -2878,7 +2880,7 @@ app.post('/api/orders', protect, async (req, res) => {
         taxAmount: taxAmountFloat, 
         couponApplied: couponCode,
         discountAmount: discountAmountFloat, 
-        shippingFee: sellerShippingFee, // ✅ Saves specific dynamic fee for this seller
+        shippingFee: sellerShippingFee, 
         paymentId: razorpayOrder ? razorpayOrder.id : (isCodOrFree ? `cod_${crypto.randomBytes(8).toString('hex')}` : undefined),
         paymentStatus: isCodOrFree ? 'completed' : 'pending',
         deliveryStatus: isCodOrFree ? 'Pending' : 'Payment Pending',
@@ -2900,25 +2902,62 @@ app.post('/api/orders', protect, async (req, res) => {
 
       const orderIdShort = order._id.toString().slice(-6);
 
-      // --- Post-creation actions (stock, notifications) ---
+      // --- Post-creation actions (STOCK UPDATE FIX) ---
       if (isCodOrFree) {
-        // Stock Update
+        
         for(const item of sellerData.orderItems) {
-            const updatedProduct = await Product.findByIdAndUpdate(
-                item.product, 
-                { $inc: { stock: -item.qty } },
-                { new: true } 
-            ).populate('seller', 'fcmToken phone'); 
+            // ✅ FIX: Find Product to check if it has variants
+            const productDoc = await Product.findById(item.product);
 
-            // Low Stock Alert
-            if (updatedProduct && updatedProduct.stock <= updatedProduct.lowStockThreshold) {
-                const alertMsg = `⚠️ Low Stock Alert: "${updatedProduct.name}" is running low (${updatedProduct.stock} left).`;
+            if (productDoc && productDoc.variants && productDoc.variants.length > 0) {
+                // 1. If Variants exist: Decrement Variant Stock AND Main Stock
+                await Product.findOneAndUpdate(
+                    {
+                        _id: item.product,
+                        "variants": {
+                            $elemMatch: {
+                                color: item.selectedColor || null,
+                                size: item.selectedSize || null
+                            }
+                        }
+                    },
+                    {
+                        $inc: { 
+                            "variants.$.stock": -item.qty, // 🔻 Decrease Variant Stock
+                            "stock": -item.qty             // 🔻 Decrease Total Stock
+                        }
+                    }
+                );
+            } else {
+                // 2. If No Variants: Decrease only Main Stock
+                await Product.findByIdAndUpdate(
+                    item.product, 
+                    { $inc: { stock: -item.qty } }
+                );
+            }
+
+            // Low Stock Alert (Re-fetch updated product to check new stock)
+            const updatedProduct = await Product.findById(item.product).populate('seller', 'fcmToken phone'); 
+            let currentStock = updatedProduct.stock;
+            
+            // If variant, find the specific variant stock
+            if (updatedProduct.variants && updatedProduct.variants.length > 0) {
+                 const v = updatedProduct.variants.find(v => 
+                    (v.color === item.selectedColor || (!v.color && !item.selectedColor)) && 
+                    (v.size === item.selectedSize || (!v.size && !item.selectedSize))
+                 );
+                 if (v) currentStock = v.stock;
+            }
+
+            if (updatedProduct && currentStock <= updatedProduct.lowStockThreshold) {
+                const alertMsg = `⚠️ Low Stock Alert: "${updatedProduct.name}" is running low (${currentStock} left).`;
                 if (updatedProduct.seller.fcmToken) {
                     await sendPushNotification([updatedProduct.seller.fcmToken], 'Stock Alert 📉', alertMsg, { type: 'LOW_STOCK' });
                 }
             }
         }
 
+        // Notifications
         const userMessage = `✅ Your COD order #${orderIdShort} has been successfully placed! Grand Total: ₹${orderGrandTotal.toFixed(2)}.`;
         const sellerMessage = `🎉 New Order (COD)!\nYou've received a new order #${orderIdShort}. Item Subtotal: ₹${totalAmountFloat.toFixed(2)}. Commission deducted.`;
         
@@ -2967,7 +3006,7 @@ app.post('/api/orders', protect, async (req, res) => {
       paymentMethod: effectivePaymentMethod,
       grandTotal: finalAmountForPayment,
       itemsTotal: totalCartAmount,
-      totalShippingFee: totalShippingFee, // Return total dynamic fee
+      totalShippingFee: totalShippingFee, 
       totalTaxAmount: totalTaxAmount,
       totalDiscount: discountAmount
     });
@@ -3225,10 +3264,27 @@ app.put('/api/orders/:id/cancel', protect, async (req, res) => {
 
     // ---------- Restore stock for cancelled items ----------
     try {
-      for (const item of order.orderItems) {
-        // If product has variants and you store variant-level stock, adjust accordingly.
+     // ✅ FIXED: Increase (Restore) Variant Stock AND Main Stock
+for (const item of order.orderItems) {
+    const productDoc = await Product.findById(item.product);
+
+    if (productDoc && productDoc.variants && productDoc.variants.length > 0) {
+        await Product.findOneAndUpdate(
+            {
+                _id: item.product,
+                "variants": {
+                    $elemMatch: {
+                        color: item.selectedColor || null,
+                        size: item.selectedSize || null
+                    }
+                }
+            },
+            { $inc: { "variants.$.stock": item.qty, "stock": item.qty } } // 🔺 +qty (Increase)
+        );
+    } else {
         await Product.findByIdAndUpdate(item.product, { $inc: { stock: item.qty } });
-      }
+    }
+}
     } catch (stockErr) {
       console.error('Error restoring stock after cancel:', stockErr.message || stockErr);
     }
@@ -3338,10 +3394,27 @@ async function handleSuccessfulPayment(order_id, payment_id) {
       await order.save();
       
       // 2. Deduct Stock
-      for(const item of order.orderItems) {
-        await Product.findByIdAndUpdate(item.product, { $inc: { stock: -item.qty } });
-      }
+     // ✅ FIXED: Decrease Variant Stock AND Main Stock
+for (const item of order.orderItems) {
+    const productDoc = await Product.findById(item.product);
 
+    if (productDoc && productDoc.variants && productDoc.variants.length > 0) {
+        await Product.findOneAndUpdate(
+            {
+                _id: item.product,
+                "variants": {
+                    $elemMatch: {
+                        color: item.selectedColor || null,
+                        size: item.selectedSize || null
+                    }
+                }
+            },
+            { $inc: { "variants.$.stock": -item.qty, "stock": -item.qty } }
+        );
+    } else {
+        await Product.findByIdAndUpdate(item.product, { $inc: { stock: -item.qty } });
+    }
+}
       // 3. Create Delivery Assignment
       try {
         const orderPincode = order.pincode;
@@ -4745,15 +4818,32 @@ app.put('/api/delivery/assignments/:id/status', protect, authorizeRole('delivery
       order.paymentStatus = 'completed';
     }
     
-    // Handle stock restore on return completion
+    // Handle stock restore on return completion (VARIANT AWARE FIX)
     if (newOrderStatus === 'Return Completed') {
         // Find the original item in the return list (refunds array)
         const returnRefundEntry = order.refunds.find(r => r.status === 'requested');
         
         if (returnRefundEntry) {
-            // Restore stock for all items
-            for(const item of order.orderItems) {
-                await Product.findByIdAndUpdate(item.product, { $inc: { stock: item.qty } });
+            // ✅ Restore stock for all items (Variant + Main)
+            for (const item of order.orderItems) {
+                const productDoc = await Product.findById(item.product);
+                
+                if (productDoc && productDoc.variants && productDoc.variants.length > 0) {
+                    await Product.findOneAndUpdate(
+                        {
+                            _id: item.product,
+                            "variants": { 
+                                $elemMatch: { 
+                                    color: item.selectedColor || null, 
+                                    size: item.selectedSize || null 
+                                } 
+                            }
+                        },
+                        { $inc: { "variants.$.stock": item.qty, "stock": item.qty } } // Increase both
+                    );
+                } else {
+                    await Product.findByIdAndUpdate(item.product, { $inc: { stock: item.qty } });
+                }
             }
             
             // Mark the refund request as completed/resolved
@@ -4765,15 +4855,29 @@ app.put('/api/delivery/assignments/:id/status', protect, authorizeRole('delivery
         }
     }
     
-    // Handle cancellations (restore stock, notify admin if prepaid)
+    // Handle cancellations (VARIANT AWARE FIX)
     if (newOrderStatus === 'Cancelled') {
         // Stock only needs restoration if cancelled after pickup, and only for delivery flow.
-        // We will assume Flutter handles the stock for the normal flow based on when cancellation happens.
-        // If status was 'PickedUp' before this cancel, restore stock.
-        
         if (!isReturnFlow && order.paymentStatus !== 'failed' && order.deliveryStatus !== 'Payment Pending') {
-             for(const item of order.orderItems) {
-                await Product.findByIdAndUpdate(item.product, { $inc: { stock: item.qty } });
+             for (const item of order.orderItems) {
+                const productDoc = await Product.findById(item.product);
+                
+                if (productDoc && productDoc.variants && productDoc.variants.length > 0) {
+                    await Product.findOneAndUpdate(
+                        {
+                            _id: item.product,
+                            "variants": { 
+                                $elemMatch: { 
+                                    color: item.selectedColor || null, 
+                                    size: item.selectedSize || null 
+                                } 
+                            }
+                        },
+                        { $inc: { "variants.$.stock": item.qty, "stock": item.qty } }
+                    );
+                } else {
+                    await Product.findByIdAndUpdate(item.product, { $inc: { stock: item.qty } });
+                }
             }
         }
     }
@@ -5219,11 +5323,30 @@ app.put('/api/admin/orders/:id/status', protect, authorizeRole('admin', 'seller'
             }
 
             // Restore Stock (if not failed payment)
-            if (order.paymentStatus !== 'failed' && order.deliveryStatus !== 'Payment Pending') {
-                for(const item of order.orderItems) {
-                    await Product.findByIdAndUpdate(item.product, { $inc: { stock: item.qty } });
-                }
-            }
+            // Restore Stock (if not failed payment)
+if (order.paymentStatus !== 'failed' && order.deliveryStatus !== 'Payment Pending') {
+    for (const item of order.orderItems) {
+        const productDoc = await Product.findById(item.product);
+        if (productDoc && productDoc.variants && productDoc.variants.length > 0) {
+            // Restore Variant Stock + Main Stock
+            await Product.findOneAndUpdate(
+                {
+                    _id: item.product,
+                    "variants": { 
+                        $elemMatch: { 
+                            color: item.selectedColor || null, 
+                            size: item.selectedSize || null 
+                        } 
+                    }
+                },
+                { $inc: { "variants.$.stock": item.qty, "stock": item.qty } }
+            );
+        } else {
+            // Restore Main Stock Only
+            await Product.findByIdAndUpdate(item.product, { $inc: { stock: item.qty } });
+        }
+    }
+}
 
         } catch(assignErr) {
             console.error("Error updating assignment on admin cancel:", assignErr.message);
@@ -5574,13 +5697,20 @@ app.get('/api/admin/settings', protect, authorizeRole('admin'), async (req, res)
 // PUT Settings (Update Fee & Theme)
 // PUT Settings (Update Fee, Theme, & Delivery Radius/Blocks)
 // PUT Settings (Update Fee, Theme, & Delivery Radius/Blocks)
+// ✅ UPDATED: PUT Settings (Includes Delivery Pricing)
 app.put('/api/admin/settings', protect, authorizeRole('admin'), async (req, res) => {
   try {
     const { 
         platformCommissionRate, 
         productCreationFee, 
         theme, 
-        deliveryRadius, 
+        deliveryRadius, // Global Radius
+        
+        // 👇 New Inputs from Admin Panel 👇
+        deliveryBaseCharge,  // e.g. 30
+        deliveryBaseKm,      // e.g. 3
+        deliveryPerKmCharge, // e.g. 15
+        
         blockedZones,
         blockedPincodes 
     } = req.body;
@@ -5591,47 +5721,44 @@ app.put('/api/admin/settings', protect, authorizeRole('admin'), async (req, res)
     if (typeof productCreationFee !== 'undefined') updateData.productCreationFee = parseFloat(productCreationFee);
     if (theme) updateData.theme = theme;
 
-    // --- ✅ FIXED: DELIVERY CONFIG UPDATE ---
-    // Check if variables are defined (even if empty)
-    if (typeof deliveryRadius !== 'undefined' || typeof blockedZones !== 'undefined' || typeof blockedPincodes !== 'undefined') {
-        
-        // 1. Global Radius
-        if (typeof deliveryRadius !== 'undefined') {
-            updateData['deliveryConfig.globalRadiusKm'] = parseFloat(deliveryRadius);
-        }
-        
-        // 2. Blocked Pincodes (FIXED LOGIC FOR UNBLOCKING)
-        if (typeof blockedPincodes !== 'undefined') {
-            let pins = [];
-            if (typeof blockedPincodes === 'string') {
-                // अगर खाली स्ट्रिंग है तो array खाली रहेगा (सब अनब्लॉक हो जायेंगे)
-                if (blockedPincodes.trim().length > 0) {
-                    pins = blockedPincodes.split(',').map(p => p.trim()).filter(p => p !== "");
-                }
-            } else if (Array.isArray(blockedPincodes)) {
-                pins = blockedPincodes;
-            }
-            updateData['deliveryConfig.blockedPincodes'] = pins;
-        }
+    // --- DELIVERY CONFIG UPDATE ---
+    
+    // 1. Global Radius
+    if (typeof deliveryRadius !== 'undefined') updateData['deliveryConfig.globalRadiusKm'] = parseFloat(deliveryRadius);
 
-        // 3. Blocked Zones (Geo-fencing)
-        if (typeof blockedZones !== 'undefined') {
-            let zones = [];
-            if (typeof blockedZones === 'string') {
-                try { zones = JSON.parse(blockedZones); } catch (e) { zones = []; }
-            } else if (Array.isArray(blockedZones)) {
-                zones = blockedZones;
+    // 2. ✅ Delivery Pricing (Admin Controlled)
+    if (typeof deliveryBaseCharge !== 'undefined') updateData['deliveryConfig.baseCharge'] = parseFloat(deliveryBaseCharge);
+    if (typeof deliveryBaseKm !== 'undefined') updateData['deliveryConfig.baseKm'] = parseFloat(deliveryBaseKm);
+    if (typeof deliveryPerKmCharge !== 'undefined') updateData['deliveryConfig.extraPerKmCharge'] = parseFloat(deliveryPerKmCharge);
+
+    // 3. Blocked Pincodes
+    if (typeof blockedPincodes !== 'undefined') {
+        let pins = [];
+        if (typeof blockedPincodes === 'string') {
+            if (blockedPincodes.trim().length > 0) {
+                pins = blockedPincodes.split(',').map(p => p.trim()).filter(p => p !== "");
             }
-            
-            // Map Valid Zones Only
-            if (Array.isArray(zones)) {
-                updateData['deliveryConfig.blockedZones'] = zones.map(z => ({
-                    lat: parseFloat(z.lat),
-                    lng: parseFloat(z.lng),
-                    radiusKm: parseFloat(z.radiusKm || 1),
-                    reason: z.reason || 'Restricted Area'
-                }));
-            }
+        } else if (Array.isArray(blockedPincodes)) {
+            pins = blockedPincodes;
+        }
+        updateData['deliveryConfig.blockedPincodes'] = pins;
+    }
+
+    // 4. Blocked Zones
+    if (typeof blockedZones !== 'undefined') {
+        let zones = [];
+        if (typeof blockedZones === 'string') {
+            try { zones = JSON.parse(blockedZones); } catch (e) { zones = []; }
+        } else if (Array.isArray(blockedZones)) {
+            zones = blockedZones;
+        }
+        if (Array.isArray(zones)) {
+            updateData['deliveryConfig.blockedZones'] = zones.map(z => ({
+                lat: parseFloat(z.lat),
+                lng: parseFloat(z.lng),
+                radiusKm: parseFloat(z.radiusKm || 1),
+                reason: z.reason || 'Restricted Area'
+            }));
         }
     }
 
