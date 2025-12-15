@@ -2538,17 +2538,18 @@ app.get('/api/orders/checkout-summary', protect, async (req, res) => {
 });
 
 // ✅ UPDATED: Calculate Summary with Distance Logic & Multi-Seller Support
+// ✅ UPDATED: Calculate Summary with Distance Logic & Admin Pricing Support
 app.post('/api/orders/calculate-summary', protect, async (req, res) => {
   try {
     const { shippingAddressId, couponCode } = req.body; 
 
-    // 1. Populate cart items with Product AND Seller Location data
+    // 1. Populate cart with Product AND Seller Location
     const cart = await Cart.findOne({ user: req.user._id }).populate({
       path: 'items.product',
       select: 'name variants shortDescription unit price originalPrice', 
       populate: { 
           path: 'seller', 
-          select: 'pincodes location' // ✅ FETCH LOCATION FOR DISTANCE CALC
+          select: 'pincodes location' // Fetch Seller GPS
       } 
     });
 
@@ -2557,7 +2558,7 @@ app.post('/api/orders/calculate-summary', protect, async (req, res) => {
     const shippingAddress = await Address.findById(shippingAddressId);
     if (!shippingAddress) return res.status(404).json({ message: 'Shipping address not found' });
     
-    // --- 🚚 DYNAMIC DISTANCE CALCULATION LOGIC ---
+    // --- 🚚 DYNAMIC DISTANCE CALCULATION ---
     let totalShippingFee = 0;
     
     // Group items by Seller ID
@@ -2571,29 +2572,35 @@ app.post('/api/orders/calculate-summary', protect, async (req, res) => {
         }
     }
 
+    // Fetch Admin Settings for Radius & Pricing
     const appSettings = await AppSettings.findOne({ singleton: true });
-    const maxRadius = (appSettings && appSettings.deliveryConfig) ? (appSettings.deliveryConfig.globalRadiusKm || 50) : 50;
+    const deliveryConfig = appSettings ? appSettings.deliveryConfig : {}; 
+    const maxRadius = deliveryConfig.globalRadiusKm || 50;
 
     // Calculate fee for each seller
     for (const seller of sellersInCart.values()) {
         let distanceCalculated = false;
         let sellerFee = 0;
 
+        // Check if both User and Seller have GPS coordinates
         if (shippingAddress.lat && shippingAddress.lng && seller.location && seller.location.coordinates) {
             const userLat = parseFloat(shippingAddress.lat);
             const userLng = parseFloat(shippingAddress.lng);
             const sLng = seller.location.coordinates[0];
             const sLat = seller.location.coordinates[1];
             
+            // Calculate Distance
             const distKm = getDistanceFromLatLonInKm(userLat, userLng, sLat, sLng);
 
+            // Check Max Radius
             if (distKm > maxRadius) {
                 return res.status(400).json({
                     message: `Seller is too far (${distKm.toFixed(1)}km). We only deliver within ${maxRadius}km.`
                 });
             }
 
-            sellerFee = getDynamicDeliveryFee(distKm);
+            // ✅ Pass 'deliveryConfig' so Admin rates are applied
+            sellerFee = getDynamicDeliveryFee(distKm, deliveryConfig);
             distanceCalculated = true;
         }
 
@@ -2610,7 +2617,6 @@ app.post('/api/orders/calculate-summary', protect, async (req, res) => {
     for (const item of cart.items) {
       const product = item.product;
       
-      // Basic Validation
       if (!product || !product.seller) continue; 
 
       // Variant Logic
@@ -2623,12 +2629,26 @@ app.post('/api/orders/calculate-summary', protect, async (req, res) => {
       }
       
       let price = (selectedVariant) ? selectedVariant.price : product.price;
+      const stock = (selectedVariant) ? selectedVariant.stock : product.stock;
+
+      // Check Stock
+      if (stock < item.qty) {
+        return res.status(400).json({ message: `Insufficient stock for product: ${product.name}` });
+      }
+      
+      // Check Pincode Availability (Basic)
+      if (!product.seller.pincodes.includes(shippingAddress.pincode)) {
+         return res.status(400).json({ message: `Delivery not available for ${product.name} at your location.` });
+      }
+
       totalCartAmount += price * item.qty;
     }
 
     // --- FINANCIALS ---
     let discountAmount = 0;
-    const totalTaxAmount = totalCartAmount * GST_RATE || 0;
+    // Handle case where GST_RATE might be undefined
+    const taxRate = (typeof GST_RATE !== 'undefined') ? GST_RATE : 0; 
+    const totalTaxAmount = totalCartAmount * taxRate;
 
     if (couponCode) {
       const coupon = await Coupon.findOne({
