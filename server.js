@@ -8577,6 +8577,47 @@ app.get('/api/products/recommendations/area-popular', protect, async (req, res) 
     }
 });
 
+// ✅ NEW: Approve or Reject a Product
+app.put('/api/admin/products/:id/approval', protect, authorizeRole('admin'), async (req, res) => {
+  try {
+    const { isApproved } = req.body; // Expects boolean true/false
+    const productId = req.params.id;
+
+    const product = await Product.findByIdAndUpdate(
+        productId, 
+        { isApproved: isApproved }, 
+        { new: true }
+    ).populate('seller', 'phone fcmToken name');
+
+    if (!product) return res.status(404).json({ message: 'Product not found' });
+
+    // Notify Seller
+    if (product.seller) {
+        const statusMsg = isApproved ? 'Approved ✅' : 'Rejected ❌';
+        const msg = `Your product "${product.name}" has been ${statusMsg} by the admin.`;
+        
+        // Send WhatsApp
+        if (product.seller.phone) {
+            await sendWhatsApp(product.seller.phone, msg);
+        }
+        // Send Push
+        if (product.seller.fcmToken) {
+            await sendPushNotification(
+                [product.seller.fcmToken],
+                `Product ${statusMsg}`,
+                msg,
+                { type: 'PRODUCT_STATUS' }
+            );
+        }
+    }
+
+    res.json({ message: `Product marked as ${isApproved ? 'Approved' : 'Pending/Rejected'}`, product });
+
+  } catch (err) {
+    res.status(500).json({ message: 'Error updating product approval status', error: err.message });
+  }
+});
+
 
 
 const IP = '0.0.0.0';
