@@ -290,7 +290,7 @@ async function checkLocationBlock(pincode, lat, lng) {
  */
 function getDynamicDeliveryFee(distanceKm, config) {
     // अगर Admin ने कुछ सेट नहीं किया तो Default values (20, 2, 10) यूज़ होंगी
-    const basePrice = config?.baseCharge || 20; 
+    const basePrice = config?.baseCharge || 10; 
     const baseKm = config?.baseKm || 2;
     const perKmPrice = config?.extraPerKmCharge || 10;
 
@@ -723,6 +723,10 @@ const productSchema = new mongoose.Schema({
   dailyPriceUpdate: { type: Boolean, default: false }, // Agar true hai, to roj subah notification jayega
   lowStockThreshold: { type: Number, default: 5 },     // Isse kam stock hone par alert jayega
   // -------------------------------------------------------------
+
+  // ✅ NEW FIELD: Product Approval Status
+  // Default is false so sellers' products are hidden until approved.
+  isApproved: { type: Boolean, default: false, index: true }, 
 
   seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
   isTrending: { type: Boolean, default: false, index: true }
@@ -1936,7 +1940,7 @@ app.delete('/api/admin/subcategories/:id', protect, authorizeRole('admin'), asyn
 
 
 // ✅ UPDATED: Main Products Route with Distance Calculation
-// ✅ UPDATED: Main Products Route (With Block Logic)
+// ✅ UPDATED: Main Products Route (With Block Logic & Approval Check)
 app.get('/api/products', async (req, res) => {
   try {
     const { search, minPrice, maxPrice, categoryId, brand, subcategoryId, sellerId, userPincode, lat, lng } = req.query;
@@ -1956,6 +1960,10 @@ app.get('/api/products', async (req, res) => {
 
     // --- 1. Build initial match conditions ---
     const initialMatchStage = {};
+    
+    // ✅ ONLY SHOW APPROVED PRODUCTS
+    initialMatchStage.isApproved = true; 
+    
     initialMatchStage['variants.0'] = { $exists: true };
     
     if (search) {
@@ -2068,6 +2076,7 @@ app.get('/api/products/:id', async (req, res) => {
 // [NEW] API Endpoint to get products available in a specific pincode
 // [UPDATED] API Endpoint to get products by pincode + Calculate Distance
 // ✅ UPDATED: Get products by pincode (With Block Check)
+// ✅ UPDATED: Get products by pincode (With Block Check & Admin Approval Filter)
 app.get('/api/products/pincode/:pincode', async (req, res) => {
     try {
         const userPincode = req.params.pincode;
@@ -2096,6 +2105,7 @@ app.get('/api/products/pincode/:pincode', async (req, res) => {
         let products = await Product.aggregate([
             // Stage 1: Filter products by Pincode OR isGlobal
             { $match: { 
+                isApproved: true, // ✅ NEW: Only show Approved Products
                 $or: [
                     { isGlobal: true },
                     { pincodes: userPincode }
@@ -2132,6 +2142,7 @@ app.get('/api/products/pincode/:pincode', async (req, res) => {
                 brand: 1,
                 shortDescription: 1,
                 isTrending: 1,
+                isApproved: 1, // Optional: return status if needed by frontend logic
                 "seller.name": 1,
                 "seller.location": 1, 
                 "category.name": 1,
@@ -4110,6 +4121,10 @@ app.post('/api/seller/products',
       }
       const isProductGlobal = isGlobal === 'true';
 
+      // ✅ NEW: Determine Approval Status based on Role
+      // Admin = Approved (true), Seller = Pending (false)
+      const isApprovedStatus = req.user.role === 'admin' ? true : false;
+
       // --- 7. Prepare Data ---
       const finalSubcategory = childCategory || subcategory;
       const productData = {
@@ -4131,6 +4146,9 @@ app.post('/api/seller/products',
         seller: req.user._id,
         pincodes: finalPincodes, 
         isGlobal: isProductGlobal,
+        
+        // ✅ SAVE APPROVAL STATUS
+        isApproved: isApprovedStatus, 
         
         // ✅ [ADDED BACK] Daily Update & Low Stock Logic
         dailyPriceUpdate: dailyPriceUpdate === 'true', 
@@ -8466,6 +8484,97 @@ app.get('/api/home/layout', async (req, res) => {
     console.error(err);
     res.status(500).json({ message: 'Error fetching home layout' });
   }
+});
+
+// ---------------------------------------------------------
+// 🤖 AI RECOMMENDATION: Popular Items in User's Area
+// ---------------------------------------------------------
+app.get('/api/products/recommendations/area-popular', protect, async (req, res) => {
+    try {
+        // 1. Pincode निकालें (Query से या User Profile से)
+        const userPincode = req.query.pincode || (req.user.pincodes && req.user.pincodes.length > 0 ? req.user.pincodes[0] : null);
+
+        if (!userPincode) {
+            // अगर पिनकोड नहीं है, तो सिर्फ Trending प्रोडक्ट्स भेजें
+            const globalTrending = await Product.find({ isTrending: true, stock: { $gt: 0 } }).limit(10);
+            return res.json(globalTrending);
+        }
+
+        // 2. Aggregation: उस Pincode के Orders को स्कैन करें
+        const popularProducts = await Order.aggregate([
+            {
+                $match: {
+                    pincode: userPincode,           // 1. सिर्फ इस एरिया के आर्डर
+                    paymentStatus: 'completed',     // 2. सिर्फ कन्फर्म आर्डर
+                    deliveryStatus: { $ne: 'Cancelled' }
+                }
+            },
+            { $unwind: "$orderItems" }, // 3. आर्डर के हर आइटम को अलग करें
+            {
+                $group: {
+                    _id: "$orderItems.product", // 4. प्रोडक्ट वाइज ग्रुप करें
+                    totalSold: { $sum: "$orderItems.qty" } // 5. टोटल क्वांटिटी गिनें
+                }
+            },
+            { $sort: { totalSold: -1 } }, // 6. सबसे ज्यादा बिकने वाला ऊपर
+            { $limit: 10 }, // 7. टॉप 10 आइटम निकालें
+            {
+                $lookup: { // 8. प्रोडक्ट की डिटेल्स जोड़ें (Name, Image, Price)
+                    from: "products",
+                    localField: "_id",
+                    foreignField: "_id",
+                    as: "productInfo"
+                }
+            },
+            { $unwind: "$productInfo" },
+            {
+                $project: { // 9. डेटा को सही फॉर्मेट में भेजें
+                    _id: "$productInfo._id",
+                    name: "$productInfo.name",
+                    images: "$productInfo.images",
+                    // पहला वेरिएंट प्राइस दिखाने के लिए
+                    price: { $arrayElemAt: ["$productInfo.variants.price", 0] }, 
+                    originalPrice: { $arrayElemAt: ["$productInfo.variants.originalPrice", 0] },
+                    unit: "$productInfo.unit",
+                    totalSold: 1
+                }
+            }
+        ]);
+
+        // 3. Fallback Logic:
+        // अगर एरिया नया है और वहां < 5 पॉपुलर आइटम हैं, तो Global Trending प्रोडक्ट्स मिक्स करें
+        if (popularProducts.length < 5) {
+            const idsToExclude = popularProducts.map(p => p._id);
+            
+            const globalTrending = await Product.find({ 
+                isTrending: true, 
+                stock: { $gt: 0 },
+                _id: { $nin: idsToExclude } // जो पहले से लिस्ट में हैं उन्हें दोबारा न जोड़ें
+            })
+            .limit(10 - popularProducts.length)
+            .select('name images variants unit');
+
+            // ग्लोबल डाटा को फॉर्मेट करें ताकि वह ऊपर वाले डाटा जैसा दिखे
+            const formattedGlobal = globalTrending.map(p => ({
+                _id: p._id,
+                name: p.name,
+                images: p.images,
+                price: p.variants[0]?.price,
+                originalPrice: p.variants[0]?.originalPrice,
+                unit: p.unit,
+                tag: 'Trending' // इसे हम UI में दिखा सकते हैं
+            }));
+
+            // दोनों लिस्ट को मिला दें
+            return res.json([...popularProducts, ...formattedGlobal]);
+        }
+
+        res.json(popularProducts);
+
+    } catch (err) {
+        console.error("AI Recommendation Error:", err.message);
+        res.status(500).json({ message: "Error fetching recommendations" });
+    }
 });
 
 
