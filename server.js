@@ -1611,7 +1611,7 @@ app.get('/api/categories', async (req, res) => {
         // 1. Extract 'type' along with active and userPincode
         const { active, userPincode, type } = req.query;
 
-        // 2. Basic Filter for the non-aggregation path
+        // 2. Basic Filter for the non-aggregation path (Default)
         const categoryFilter = {};
         if (typeof active !== 'undefined') categoryFilter.isActive = active === 'true';
         if (type) categoryFilter.type = type;
@@ -1631,14 +1631,17 @@ app.get('/api/categories', async (req, res) => {
             }
 
             categories = await Product.aggregate([
-                // Stage 1: Find Products available in this Pincode
+                // Stage 1: Find Products available in this Pincode OR Global
                 { $match: {
-                    isActive: true, 
-                    pincodes: userPincode 
+                    isApproved: true, // ✅ FIX: Use isApproved (not isActive)
+                    $or: [
+                        { isGlobal: true },       // Include Global products
+                        { pincodes: userPincode } // Include Pincode specific products
+                    ]
                 }},
-                // Stage 2: Group by Category to remove duplicates
+                // Stage 2: Group by Category to get unique categories available
                 { $group: { _id: '$category', count: { $sum: 1 } } },
-                // Stage 3: Join with Categories table
+                // Stage 3: Join with Categories table to get details
                 { $lookup: {
                     from: 'categories', 
                     localField: '_id',
@@ -1648,7 +1651,7 @@ app.get('/api/categories', async (req, res) => {
                 { $unwind: '$categoryDetails' },
                 // Stage 4: Filter the actual Category details (Active + Type)
                 { $match: categoryMatchStage },
-                // Stage 5: Format output (✅ Added Design Fields Here)
+                // Stage 5: Format output
                 { $project: {
                     _id: '$categoryDetails._id',
                     name: '$categoryDetails.name',
@@ -1657,13 +1660,13 @@ app.get('/api/categories', async (req, res) => {
                     image: '$categoryDetails.image',
                     type: '$categoryDetails.type',
                     sortOrder: '$categoryDetails.sortOrder',
-                    // ✅ Dynamic Design Fields
+                    // Design Fields
                     bgColor: '$categoryDetails.bgColor',
                     textColor: '$categoryDetails.textColor',
                     shape: '$categoryDetails.shape',
                     borderColor: '$categoryDetails.borderColor'
                 }},
-                // Stage 6: Sort
+                // Stage 6: Sort by SortOrder
                 { $sort: { sortOrder: 1, name: 1 } }
             ]);
 
@@ -1671,7 +1674,6 @@ app.get('/api/categories', async (req, res) => {
             // 4. Default (No Pincode): Simple Find
             categories = await Category.find(categoryFilter)
                 .sort({ sortOrder: 1, name: 1 })
-                // ✅ Added Design Fields to Select
                 .select('name slug isActive image type sortOrder bgColor textColor shape borderColor');
         }
 
@@ -8616,6 +8618,217 @@ app.put('/api/admin/products/:id/approval', protect, authorizeRole('admin'), asy
   } catch (err) {
     res.status(500).json({ message: 'Error updating product approval status', error: err.message });
   }
+});
+
+// ✅ GET: Peak Order Time Analysis (For Sellers)
+app.get('/api/seller/analytics/peak-time', protect, authorizeRole('seller'), async (req, res) => {
+    try {
+        const peakTimes = await Order.aggregate([
+            { $match: { seller: req.user._id, paymentStatus: 'completed' } },
+            {
+                $project: {
+                    hour: { $hour: "$createdAt" }, // Extract hour (0-23)
+                    dayOfWeek: { $dayOfWeek: "$createdAt" } // 1 (Sun) - 7 (Sat)
+                }
+            },
+            {
+                $group: {
+                    _id: "$hour",
+                    count: { $sum: 1 }
+                }
+            },
+            { $sort: { count: -1 } }, // Highest orders first
+            { $limit: 5 }
+        ]);
+
+        // Map hours to readable format (e.g., 14 -> "2 PM")
+        const formatted = peakTimes.map(pt => ({
+            hour: pt._id,
+            label: new Date(0, 0, 0, pt._id).toLocaleTimeString('en-US', { hour: 'numeric', hour12: true }),
+            orders: pt.count
+        }));
+
+        res.json({ peakTimes: formatted });
+    } catch (err) {
+        res.status(500).json({ message: 'Error analyzing peak times', error: err.message });
+    }
+});
+
+// ✅ GET: High Demand Products Alert (Velocity Check)
+app.get('/api/seller/alerts/high-demand', protect, authorizeRole('seller'), async (req, res) => {
+    try {
+        const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+        const highDemandProducts = await Order.aggregate([
+            { 
+                $match: { 
+                    seller: req.user._id, 
+                    createdAt: { $gte: twentyFourHoursAgo },
+                    paymentStatus: 'completed'
+                } 
+            },
+            { $unwind: "$orderItems" },
+            {
+                $group: {
+                    _id: "$orderItems.product",
+                    salesLast24h: { $sum: "$orderItems.qty" }
+                }
+            },
+            { $match: { salesLast24h: { $gte: 5 } } }, // Threshold: 5+ sales in 24h = High Demand
+            {
+                $lookup: {
+                    from: 'products',
+                    localField: '_id',
+                    foreignField: '_id',
+                    as: 'product'
+                }
+            },
+            { $unwind: "$product" },
+            {
+                $project: {
+                    name: "$product.name",
+                    salesLast24h: 1,
+                    image: { $arrayElemAt: ["$product.images.url", 0] }
+                }
+            }
+        ]);
+
+        res.json(highDemandProducts);
+    } catch (err) {
+        res.status(500).json({ message: 'Error checking demand', error: err.message });
+    }
+});
+
+// ✅ POST: Boost Product (Paid Feature)
+// Seller pays ₹50 to mark product as "Trending" for 7 days
+app.post('/api/seller/products/:id/boost', protect, authorizeRole('seller'), async (req, res) => {
+    const BOOST_COST = 50; 
+    const DURATION_DAYS = 7;
+
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+        const seller = await User.findById(req.user._id).session(session);
+        if (seller.walletBalance < BOOST_COST) {
+            await session.abortTransaction();
+            return res.status(400).json({ message: `Insufficient wallet balance. Recharge ₹${BOOST_COST} to boost.` });
+        }
+
+        // 1. Deduct Money
+        seller.walletBalance -= BOOST_COST;
+        await seller.save({ session });
+
+        // 2. Update Product
+        const product = await Product.findOneAndUpdate(
+            { _id: req.params.id, seller: seller._id },
+            { isTrending: true }, // Mark as Trending/Featured
+            { new: true, session }
+        );
+
+        if (!product) {
+            await session.abortTransaction();
+            return res.status(404).json({ message: 'Product not found.' });
+        }
+
+        // 3. Log Transaction
+        await WalletTransaction.create([{
+            seller: seller._id,
+            type: 'Debit',
+            amount: BOOST_COST,
+            balanceBefore: seller.walletBalance + BOOST_COST,
+            balanceAfter: seller.walletBalance,
+            description: `Product Boost: ${product.name} (7 Days)`
+        }], { session });
+
+        await session.commitTransaction();
+
+        // 4. Schedule auto-removal of boost (Optional: Use cron for persistence)
+        // For simplicity, we assume a nightly cron job will uncheck 'isTrending' after 7 days
+        // based on a 'boostExpiresAt' field (add this to schema if strict tracking needed).
+
+        res.json({ message: `Product boosted successfully! ₹${BOOST_COST} deducted.`, newBalance: seller.walletBalance });
+
+    } catch (err) {
+        await session.abortTransaction();
+        res.status(500).json({ message: 'Error boosting product', error: err.message });
+    } finally {
+        session.endSession();
+    }
+});
+
+// ✅ POST: Create Seller Coupon
+app.post('/api/seller/coupons', protect, authorizeRole('seller'), async (req, res) => {
+    try {
+        const { code, discountType, discountValue, minPurchaseAmount, expiryDate } = req.body;
+        
+        const newCoupon = await Coupon.create({
+            code: code.toUpperCase(),
+            discountType,
+            discountValue,
+            minPurchaseAmount: minPurchaseAmount || 0,
+            expiryDate,
+            seller: req.user._id, // Locked to this seller
+            isActive: true
+        });
+
+        res.status(201).json(newCoupon);
+    } catch (err) {
+        res.status(500).json({ message: 'Error creating coupon', error: err.message });
+    }
+});
+
+// ✅ GET: Check & Update Trust Score
+app.get('/api/seller/trust-score', protect, authorizeRole('seller'), async (req, res) => {
+    try {
+        const sellerId = req.user._id;
+
+        // 1. Calculate Average Rating from Reviews
+        // (Assuming Review model has product reference, we look up products by seller)
+        const sellerProducts = await Product.find({ seller: sellerId }).select('_id');
+        const productIds = sellerProducts.map(p => p._id);
+
+        const ratingStats = await Review.aggregate([
+            { $match: { product: { $in: productIds } } },
+            { $group: { _id: null, avgRating: { $avg: "$rating" }, totalReviews: { $sum: 1 } } }
+        ]);
+
+        const avgRating = ratingStats[0]?.avgRating || 0;
+        const totalReviews = ratingStats[0]?.totalReviews || 0;
+
+        // 2. Calculate Order Completion Rate
+        const totalOrders = await Order.countDocuments({ seller: sellerId });
+        const cancelledOrders = await Order.countDocuments({ seller: sellerId, deliveryStatus: 'Cancelled' });
+        
+        let completionRate = 100;
+        if (totalOrders > 0) {
+            completionRate = ((totalOrders - cancelledOrders) / totalOrders) * 100;
+        }
+
+        // 3. Determine Trust Badge
+        // Criteria: 4.0+ Rating, 10+ Reviews, 90%+ Completion Rate
+        let isTrusted = false;
+        if (avgRating >= 4.0 && totalReviews >= 10 && completionRate >= 90) {
+            isTrusted = true;
+        }
+
+        // Update User Profile
+        const seller = await User.findById(sellerId);
+        seller.sellerScore = Math.round((avgRating * 20) + (completionRate * 0.5)); // Simple score logic
+        seller.isTrustedSeller = isTrusted;
+        await seller.save();
+
+        res.json({
+            avgRating: avgRating.toFixed(1),
+            totalReviews,
+            completionRate: completionRate.toFixed(1) + '%',
+            isTrusted,
+            score: seller.sellerScore
+        });
+
+    } catch (err) {
+        res.status(500).json({ message: 'Error calculating trust score', error: err.message });
+    }
 });
 
 
