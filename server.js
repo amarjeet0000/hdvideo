@@ -1608,82 +1608,84 @@ app.post('/api/auth/save-fcm-token', protect, async (req, res) => {
 
 app.get('/api/categories', async (req, res) => {
     try {
-        // 1. Extract 'type' along with active and userPincode
         const { active, userPincode, type } = req.query;
 
-        // 2. Basic Filter for the non-aggregation path (Default)
-        const categoryFilter = {};
-        if (typeof active !== 'undefined') categoryFilter.isActive = active === 'true';
-        if (type) categoryFilter.type = type;
+        // 1. Product Match Condition
+        // हम पहले प्रोडक्ट्स ढूंढ़ेंगे। अगर प्रोडक्ट मिलेगा, तभी उसकी कैटेगरी लिस्ट में आएगी।
+        const productMatch = { 
+            isApproved: true, // ✅ सिर्फ Approved प्रोडक्ट्स वाली कैटेगरी दिखेगी
+            // stock: { $gt: 0 } // (Optional) अगर आप चाहते हैं कि Out of stock वाले प्रोडक्ट्स की कैटेगरी भी न दिखे तो इस लाइन को uncomment करें
+        };
 
-        let categories;
-
+        // अगर यूजर ने पिनकोड दिया है, तो लोकेशन फिल्टर लगाएं
         if (userPincode) {
-            // 3. Aggregation for Pincode Logic
-            
-            // Build the match object for Stage 4 dynamically
-            const categoryMatchStage = {
-                'categoryDetails.isActive': categoryFilter.isActive !== undefined ? categoryFilter.isActive : { $exists: true }
-            };
-
-            if (type) {
-                categoryMatchStage['categoryDetails.type'] = type;
-            }
-
-            categories = await Product.aggregate([
-                // Stage 1: Find Products available in this Pincode OR Global
-                { $match: {
-                    isApproved: true, // ✅ FIX: Use isApproved (not isActive)
-                    $or: [
-                        { isGlobal: true },       // Include Global products
-                        { pincodes: userPincode } // Include Pincode specific products
-                    ]
-                }},
-                // Stage 2: Group by Category to get unique categories available
-                { $group: { _id: '$category', count: { $sum: 1 } } },
-                // Stage 3: Join with Categories table to get details
-                { $lookup: {
-                    from: 'categories', 
-                    localField: '_id',
-                    foreignField: '_id',
-                    as: 'categoryDetails'
-                }},
-                { $unwind: '$categoryDetails' },
-                // Stage 4: Filter the actual Category details (Active + Type)
-                { $match: categoryMatchStage },
-                // Stage 5: Format output
-                { $project: {
-                    _id: '$categoryDetails._id',
-                    name: '$categoryDetails.name',
-                    slug: '$categoryDetails.slug',
-                    isActive: '$categoryDetails.isActive',
-                    image: '$categoryDetails.image',
-                    type: '$categoryDetails.type',
-                    sortOrder: '$categoryDetails.sortOrder',
-                    // Design Fields
-                    bgColor: '$categoryDetails.bgColor',
-                    textColor: '$categoryDetails.textColor',
-                    shape: '$categoryDetails.shape',
-                    borderColor: '$categoryDetails.borderColor'
-                }},
-                // Stage 6: Sort by SortOrder
-                { $sort: { sortOrder: 1, name: 1 } }
-            ]);
-
-        } else {
-            // 4. Default (No Pincode): Simple Find
-            categories = await Category.find(categoryFilter)
-                .sort({ sortOrder: 1, name: 1 })
-                .select('name slug isActive image type sortOrder bgColor textColor shape borderColor');
+            productMatch.$or = [
+                { isGlobal: true },
+                { pincodes: userPincode }
+            ];
         }
 
+        // 2. Category Match Condition (Active & Type)
+        const categoryMatchStage = {};
+        
+        // अगर active पैरामीटर आया है तो चेक करें, वरना Default true मानें (Users को सिर्फ Active दिखें)
+        if (typeof active !== 'undefined') {
+            categoryMatchStage['categoryDetails.isActive'] = active === 'true';
+        } else {
+            categoryMatchStage['categoryDetails.isActive'] = true; 
+        }
+
+        if (type) {
+            categoryMatchStage['categoryDetails.type'] = type;
+        }
+
+        // 3. Unified Aggregation Pipeline
+        const categories = await Product.aggregate([
+            // Stage 1: Find valid Products first (Isse empty categories filter ho jayengi)
+            { $match: productMatch },
+
+            // Stage 2: Group by Category (Duplicates hatane ke liye)
+            { $group: { _id: '$category' } },
+
+            // Stage 3: Fetch full Category Details
+            { $lookup: {
+                from: 'categories', 
+                localField: '_id',
+                foreignField: '_id',
+                as: 'categoryDetails'
+            }},
+            { $unwind: '$categoryDetails' },
+
+            // Stage 4: Apply Category Filters (Active/Type)
+            { $match: categoryMatchStage },
+
+            // Stage 5: Format Output with Design Fields
+            { $project: {
+                _id: '$categoryDetails._id',
+                name: '$categoryDetails.name',
+                slug: '$categoryDetails.slug',
+                isActive: '$categoryDetails.isActive',
+                image: '$categoryDetails.image',
+                type: '$categoryDetails.type',
+                sortOrder: '$categoryDetails.sortOrder',
+                // Design Fields
+                bgColor: '$categoryDetails.bgColor',
+                textColor: '$categoryDetails.textColor',
+                shape: '$categoryDetails.shape',
+                borderColor: '$categoryDetails.borderColor'
+            }},
+
+            // Stage 6: Sort by SortOrder (Order Fast)
+            { $sort: { sortOrder: 1, name: 1 } }
+        ]);
+
         res.json(categories);
+
     } catch (err) {
         console.error('Error fetching categories:', err); 
         res.status(500).json({ message: 'Error fetching categories', error: err.message });
     }
 });
-
 app.get('/api/categories/:id', async (req, res) => {
     // This route does not need modification as it fetches a single category by ID.
     try {
