@@ -2891,6 +2891,9 @@ app.post('/api/orders', protect, async (req, res) => {
       // ============================================================
       // 🖨️ SCENARIO 1: PRINT JOB LOGIC
       // ============================================================
+     // ============================================================
+      // 🖨️ SCENARIO 1: PRINT JOB LOGIC (Updated & Safe)
+      // ============================================================
       if (item.isPrintJob && item.printMeta) {
           const sellerId = product.seller._id.toString();
           
@@ -2905,15 +2908,19 @@ app.post('/api/orders', protect, async (req, res) => {
 
           const sellerOrder = ordersBySeller.get(sellerId);
           
+          // Ensure cost is a Number to prevent math errors
+          const jobCost = Number(item.printMeta.totalCost) || 0; 
+
           // Add Print Item to Order
           sellerOrder.orderItems.push({
             product: product._id,
             name: item.printMeta.originalName || "Print Document", // Use Filename
             qty: item.qty, // Usually 1 (copies defined in meta)
-            originalPrice: item.printMeta.totalCost,
-            price: item.printMeta.totalCost, // Direct Cost calculated in Cart
+            originalPrice: jobCost,
+            price: jobCost, // Direct Cost calculated in Cart
             
             // ✅ IMPORTANT: Pass Print Meta to Order Schema
+            // This allows the Seller App to show the "Download PDF" button
             isPrintJob: true,
             printMeta: item.printMeta,
             
@@ -2922,8 +2929,9 @@ app.post('/api/orders', protect, async (req, res) => {
             selectedSize: null,
           });
 
-          sellerOrder.totalAmount += item.printMeta.totalCost;
-          calculatedTotalCartAmount += item.printMeta.totalCost;
+          // ✅ FIX: Use Number() to ensure correct math (50 + 50 = 100, not "5050")
+          sellerOrder.totalAmount += jobCost;
+          calculatedTotalCartAmount += jobCost;
           
           // ⚠️ Skip the rest (Stock/Variant checks) for Print Jobs
           continue; 
@@ -9558,6 +9566,27 @@ app.get('/api/admin/print-requests', protect, authorizeRole('admin'), async (req
     } catch (err) {
         res.status(500).json({ message: 'Error fetching requests' });
     }
+});
+// ============================================================
+// 📥 PROXY DOWNLOAD ROUTE (Fixes CORS Error)
+// ============================================================
+const https = require('https'); // यह Node.js में built-in होता है
+
+app.get('/api/print/download-proxy', (req, res) => {
+    const { url, filename } = req.query;
+
+    if (!url) return res.status(400).send("Missing URL");
+
+    // ब्राउज़र को बताएं कि यह एक डाउनलोड करने वाली फाइल है
+    res.setHeader('Content-Disposition', `attachment; filename="${filename || 'document.pdf'}"`);
+    
+    // फाइल को बाहरी URL से लाएं और सीधे यूजर को भेजें
+    https.get(url, (stream) => {
+        stream.pipe(res);
+    }).on('error', (err) => {
+        console.error("Download Proxy Error:", err);
+        res.status(500).send("Error downloading file");
+    });
 });
 
 const IP = '0.0.0.0';
