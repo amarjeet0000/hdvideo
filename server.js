@@ -9054,6 +9054,7 @@ app.get('/api/seller/trust-score', protect, authorizeRole('seller'), async (req,
     }
 });
 
+// ✅ Corrected Route: /api/print/upload
 app.post('/api/print/upload', protect, uploadPrint.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
@@ -9066,15 +9067,16 @@ app.post('/api/print/upload', protect, uploadPrint.single('file'), async (req, r
     });
 
     res.status(201).json({
-      message: 'File converted to PDF and uploaded successfully. Valid for 24h.',
+      message: 'File converted to PDF and uploaded successfully.',
       
-      // 👇👇👇 यह लाइन सबसे जरूरी है (Flutter इसे ही ढूंढ रहा है) 👇👇👇
+      // 👇👇👇 यह लाइन सबसे ज्यादा जरूरी है 👇👇👇
       fileUrl: newPrintJob.fileUrl, 
-      // 👆👆👆 इसे जरूर जोड़ें 👆👆👆
+      // 👆👆👆 Flutter इसे ही ढूंढ रहा है 👆👆👆
       
       printJob: newPrintJob
     });
   } catch (err) {
+    console.error("Upload Error:", err);
     res.status(500).json({ message: 'Error uploading print job', error: err.message });
   }
 });
