@@ -9338,6 +9338,35 @@ app.patch('/api/print/jobs/:id/status', protect, authorizeRole('seller', 'admin'
     res.status(500).json({ message: 'Error updating status', error: err.message });
   }
 });
+// ✅ GET: Find Print/Xerox Shops by Pincode (For Auto-Selection)
+app.get('/api/sellers/print-shops/:pincode', async (req, res) => {
+  try {
+    const { pincode } = req.params;
+    
+    // ऐसे Sellers ढूंढें जो:
+    // 1. 'seller' रोल वाले हों
+    // 2. Approved हों
+    // 3. उनका Pincode मैच करता हो (या वो Global सेलर हों)
+    // 4. (Optional) उनके पास प्रिंटिंग की सुविधा हो
+    
+    const shops = await User.find({
+        role: 'seller',
+        approved: true,
+        $or: [
+            { pincodes: pincode },
+            { pincodes: { $size: 0 } } // Global Sellers (Empty pincodes list)
+        ]
+        // Note: अगर आपने isPrintServiceApproved फ्लैग डेटाबेस में डाला है, तो इसे Uncomment करें:
+        // isPrintServiceApproved: true 
+    }).select('name phone pickupAddress pincodes');
+
+    res.json(shops);
+
+  } catch (err) {
+    console.error('Error finding shops:', err.message);
+    res.status(500).json({ message: 'Error finding shops', error: err.message });
+  }
+});
 
 const IP = '0.0.0.0';
 const PORT = process.env.PORT || 5001;
