@@ -322,7 +322,7 @@ const userSchema = new mongoose.Schema({
     password: { type: String, required: true },
     phone: { type: String, unique: true, sparse: true, index: true },
     
-    // ✅ UPDATE: Added 'driver' to the allowed roles
+    // ✅ ROLE: 'driver' is already included
     role: { 
         type: String, 
         enum: ['user', 'seller', 'admin', 'delivery', 'provider', 'driver'], 
@@ -331,7 +331,22 @@ const userSchema = new mongoose.Schema({
     },
     
     pincodes: { type: [String], default: [] },
+    
+    // General Account Approval (Login enable/disable)
     approved: { type: Boolean, default: true, index: true },
+
+    // 🖨️ ✅ NEW: PRINT SERVICE PERMISSION STATUS
+    // None = अभी तक अप्लाई नहीं किया
+    // Pending = अप्लाई किया है, एडमिन का वेट कर रहा है
+    // Approved = एडमिन ने परमिशन दे दी (User को दिखेगा)
+    // Rejected = एडमिन ने मना कर दिया
+    printServiceStatus: { 
+        type: String, 
+        enum: ['None', 'Pending', 'Approved', 'Rejected'], 
+        default: 'None',
+        index: true 
+    },
+
     passwordResetOTP: String,
     passwordResetOTPExpire: Date,
     
@@ -344,8 +359,9 @@ const userSchema = new mongoose.Schema({
         pincode: String,
         isSet: { type: Boolean, default: false }
     },
-    lockExpiresAt: { type: Date, default: null }, // Kab tak block rahega (48 hours logic)
-    blockReason: { type: String, default: null }, // "Abuse", "Low Balance", "Permanent"
+    
+    lockExpiresAt: { type: Date, default: null }, 
+    blockReason: { type: String, default: null }, 
     
     // ======== ✨ EXISTING PAYOUT DETAILS ✨ ========
     payoutDetails: {
@@ -357,17 +373,16 @@ const userSchema = new mongoose.Schema({
         vpa: { type: String, default: null } 
     },
     
-    // ======== 🚖 NEW DRIVER / RIDE BOOKING FIELDS 🚖 ========
+    // ======== 🚖 DRIVER / RIDE BOOKING FIELDS 🚖 ========
     vehicleType: { 
         type: String, 
         enum: ['Bike', 'Auto', 'Car', 'Tempo', 'E-Rickshaw'],
         default: null 
-        
     },
     
-    walletBalance: { type: Number, default: 0 }, // Driver's wallet (can go negative)
-    isLocked: { type: Boolean, default: false }, // Locks driver if balance < 50
-    isOnline: { type: Boolean, default: false }, // Driver on/off duty status
+    walletBalance: { type: Number, default: 0 }, 
+    isLocked: { type: Boolean, default: false }, 
+    isOnline: { type: Boolean, default: false }, 
     
     // GeoJSON for finding nearest driver
     location: {
@@ -376,13 +391,13 @@ const userSchema = new mongoose.Schema({
     },
     // ========================================================
 
-    // ✅ Track last active time for auto-deletion logic
+    // Track last active time
     lastActiveAt: { type: Date, default: Date.now, index: true },
 
     fcmToken: { type: String, default: null }
 }, { timestamps: true });
 
-// ✅ IMPORTANT: Create Index for Geospatial Queries (Finding nearest driver)
+// ✅ IMPORTANT: Create Index for Geospatial Queries
 userSchema.index({ location: '2dsphere' });
 
 const User = mongoose.model('User', userSchema);
@@ -9339,26 +9354,23 @@ app.patch('/api/print/jobs/:id/status', protect, authorizeRole('seller', 'admin'
   }
 });
 // ✅ GET: Find Print/Xerox Shops by Pincode (For Auto-Selection)
+// ✅ GET: Find APPROVED Print/Xerox Shops by Pincode (Updated Logic)
 app.get('/api/sellers/print-shops/:pincode', async (req, res) => {
   try {
     const { pincode } = req.params;
     
-    // ऐसे Sellers ढूंढें जो:
-    // 1. 'seller' रोल वाले हों
-    // 2. Approved हों
-    // 3. उनका Pincode मैच करता हो (या वो Global सेलर हों)
-    // 4. (Optional) उनके पास प्रिंटिंग की सुविधा हो
-    
     const shops = await User.find({
         role: 'seller',
-        approved: true,
+        approved: true, // सेलर का अकाउंट एक्टिव होना चाहिए
+        
+        // 🔒 IMPORTANT: सिर्फ वही दिखेंगे जिसे एडमिन ने 'Approved' किया है
+        printServiceStatus: 'Approved', 
+
         $or: [
-            { pincodes: pincode },
-            { pincodes: { $size: 0 } } // Global Sellers (Empty pincodes list)
+            { pincodes: pincode },        // या तो पिनकोड मैच हो
+            { pincodes: { $size: 0 } }    // या वो ग्लोबल सेलर हो (जो हर जगह डिलीवर करता है)
         ]
-        // Note: अगर आपने isPrintServiceApproved फ्लैग डेटाबेस में डाला है, तो इसे Uncomment करें:
-        // isPrintServiceApproved: true 
-    }).select('name phone pickupAddress pincodes');
+    }).select('name phone pickupAddress pincodes printServiceStatus');
 
     res.json(shops);
 
@@ -9366,6 +9378,135 @@ app.get('/api/sellers/print-shops/:pincode', async (req, res) => {
     console.error('Error finding shops:', err.message);
     res.status(500).json({ message: 'Error finding shops', error: err.message });
   }
+});
+// ==========================================
+// 🖨️ PRINT SERVICE HELPER ROUTE (AUTO-SETUP)
+// ==========================================
+
+// ✅ Get or Create "Print Service" Product ID for a Seller
+app.get('/api/print/config/:sellerId', async (req, res) => {
+  try {
+    const { sellerId } = req.params;
+    
+    // 1. चेक करें कि क्या प्रोडक्ट पहले से मौजूद है?
+    let product = await Product.findOne({ seller: sellerId, name: 'Print Service' });
+    if (product) return res.json({ productId: product._id });
+
+    // 2. अगर नहीं, तो हमें एक 'Category' चाहिए
+    // 'Services' या 'Others' नाम की कैटेगरी ढूंढें, या कोई भी पहली कैटेगरी ले लें
+    let category = await Category.findOne({ $or: [{ name: 'Services' }, { type: 'service' }] });
+    
+    // अगर कोई कैटेगरी नहीं मिली, तो एक नई 'Services' कैटेगरी बना दें
+    if (!category) {
+        category = await Category.create({ 
+            name: 'Services', 
+            type: 'service', 
+            image: { url: 'https://cdn-icons-png.flaticon.com/512/1067/1067566.png' } 
+        });
+    }
+
+    // 3. अब 'Print Service' प्रोडक्ट अपने आप बनाएं
+    product = await Product.create({
+        seller: sellerId,
+        name: 'Print Service',
+        shortDescription: 'Xerox / Document Printing',
+        fullDescription: 'High quality document printing service.',
+        price: 1, // बेस प्राइस (असली कीमत printMeta से तय होगी)
+        originalPrice: 1,
+        unit: 'page',
+        category: category._id,
+        stock: 100000, // कभी खत्म न हो
+        images: [{ 
+            url: "https://cdn-icons-png.flaticon.com/512/2983/2983794.png", // प्रिंटर का आइकॉन
+            publicId: "print_service_default" 
+        }],
+        isGlobal: true // ताकि यह यूजर को दिखे
+    });
+
+    console.log(`✅ Auto-created Print Product for Seller ${sellerId}`);
+    res.json({ productId: product._id });
+
+  } catch (err) {
+    console.error("Print Config Error:", err);
+    res.status(500).json({ message: "Failed to setup print service", error: err.message });
+  }
+});
+// ==========================================
+// 🛡️ PRINT PERMISSION ROUTES
+// ==========================================
+
+// 1. Seller: Request Permission (सेलर रिक्वेस्ट भेजेगा)
+app.post('/api/seller/print-request', protect, authorizeRole('seller'), async (req, res) => {
+    try {
+        const user = await User.findById(req.user._id);
+        
+        if (user.printServiceStatus === 'Approved') {
+            return res.status(400).json({ message: 'You are already approved for printing!' });
+        }
+        
+        if (user.printServiceStatus === 'Pending') {
+            return res.status(400).json({ message: 'Request already sent. Please wait for admin.' });
+        }
+
+        user.printServiceStatus = 'Pending'; // रिक्वेस्ट पेंडिंग में डालें
+        await user.save();
+
+        res.json({ message: 'Print service permission requested. Wait for admin approval.', status: 'Pending' });
+
+    } catch (err) {
+        res.status(500).json({ message: 'Error requesting permission', error: err.message });
+    }
+});
+
+// 2. Admin: Approve/Reject Seller (एडमिन अप्रूव करेगा)
+app.patch('/api/admin/seller-print-status', protect, authorizeRole('admin'), async (req, res) => {
+    try {
+        const { sellerId, status } = req.body; // status = 'Approved' or 'Rejected'
+
+        if (!['Approved', 'Rejected', 'None'].includes(status)) {
+            return res.status(400).json({ message: 'Invalid status' });
+        }
+
+        const seller = await User.findById(sellerId);
+        if (!seller) return res.status(404).json({ message: 'Seller not found' });
+
+        seller.printServiceStatus = status;
+        
+        // अगर अप्रूव हुआ, तो 'Print Service' प्रोडक्ट चेक करें या बना दें (Auto-Setup Logic)
+        if (status === 'Approved') {
+             // (वही लॉजिक जो हमने पिछले स्टेप में auto-create के लिए लिखा था, उसे एक फंक्शन बनाकर यहाँ कॉल कर सकते हैं)
+             // फ़िलहाल बस स्टेटस अपडेट करते हैं
+        }
+
+        await seller.save();
+
+        // सेलर को नोटिफिकेशन भेजें
+        if (seller.fcmToken) {
+            const msg = status === 'Approved' 
+                ? '🎉 Congratulations! Your Print Service is approved by Admin.' 
+                : '❌ Your Print Service request was rejected.';
+            await sendPushNotification([seller.fcmToken], 'Print Service Update', msg);
+        }
+
+        res.json({ message: `Seller print status updated to ${status}`, seller });
+
+    } catch (err) {
+        res.status(500).json({ message: 'Error updating status', error: err.message });
+    }
+});
+
+// 3. Admin: Get List of Pending Requests (एडमिन को लिस्ट दिखाने के लिए)
+app.get('/api/admin/print-requests', protect, authorizeRole('admin'), async (req, res) => {
+    try {
+        const sellers = await User.find({ 
+            role: 'seller', 
+            printServiceStatus: 'Pending' 
+        }).select('name email phone printServiceStatus');
+        
+        res.json(sellers);
+    } catch (err) {
+        res.status(500).json({ message: 'Error fetching requests' });
+    }
 });
 
 const IP = '0.0.0.0';
