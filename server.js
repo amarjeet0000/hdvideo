@@ -9061,19 +9061,23 @@ app.post('/api/print/upload', protect, uploadPrint.single('file'), async (req, r
     const newPrintJob = await PrintJob.create({
       user: req.user._id,
       originalName: req.file.originalname,
-      fileUrl: req.file.path, // यह Cloudinary द्वारा जनरेटेड PDF लिंक होगा
+      fileUrl: req.file.path, // Cloudinary URL
       publicId: req.file.filename
     });
 
     res.status(201).json({
       message: 'File converted to PDF and uploaded successfully. Valid for 24h.',
+      
+      // 👇👇👇 यह लाइन सबसे जरूरी है (Flutter इसे ही ढूंढ रहा है) 👇👇👇
+      fileUrl: newPrintJob.fileUrl, 
+      // 👆👆👆 इसे जरूर जोड़ें 👆👆👆
+      
       printJob: newPrintJob
     });
   } catch (err) {
     res.status(500).json({ message: 'Error uploading print job', error: err.message });
   }
 });
-
 app.get('/api/admin/print/queue', protect, authorizeRole('admin'), async (req, res) => {
   try {
     const jobs = await PrintJob.find().populate('user', 'name phone').sort({ createdAt: -1 });
