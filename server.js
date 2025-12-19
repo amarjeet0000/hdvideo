@@ -387,6 +387,43 @@ userSchema.index({ location: '2dsphere' });
 
 const User = mongoose.model('User', userSchema);
 
+const printJobSchema = new mongoose.Schema({
+  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  originalName: String,
+  fileUrl: String,      // Cloudinary PDF URL
+  publicId: String,
+  
+  // पेमेंट और कोस्ट डिटेल्स
+  printCost: Number,    // एडमिन रेट के हिसाब से कुल प्रिंटिंग चार्ज
+  sellerEarnings: Number, // कमीशन काटकर सेलर का हिस्सा (जो एडमिन को भेजना है)
+  paymentStatus: { type: String, enum: ['pending', 'completed', 'failed'], default: 'pending' },
+  
+  // सेटलमेंट डिटेल्स (Manual Payout के लिए)
+  payoutStatus: { type: String, enum: ['Pending', 'Settled'], default: 'Pending' },
+  transactionId: String, // एडमिन यहाँ GPay/PhonePe का UTR नंबर डालेगा
+  settledAt: Date,
+
+  status: { type: String, enum: ['Pending', 'Printed'], default: 'Pending' },
+  createdAt: { type: Date, default: Date.now, expires: 86400 } // 24h में डिलीट
+}, { timestamps: true });
+
+const PrintJob = mongoose.model('PrintJob', printJobSchema);
+
+const printableFormSchema = new mongoose.Schema({
+  seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  title: { type: String, required: true }, // उदा: "बिहार आय प्रमाण पत्र फॉर्म"
+  description: String,
+  fileUrl: String,      // PDF फाइल का लिंक
+  publicId: String,
+  pricePerCopyBW: Number,    // B/W प्रिंट का फिक्स रेट
+  pricePerCopyColor: Number, // Color प्रिंट का फिक्स रेट
+  category: String,          // उदा: "Government Form", "Booklet", "Exam Paper"
+  isActive: { type: Boolean, default: true }
+}, { timestamps: true });
+
+const PrintableForm = mongoose.model('PrintableForm', printableFormSchema);
+
 
 // --- COMPLAINT MODEL (For Village Admin Control) ---
 const complaintSchema = new mongoose.Schema({
@@ -549,7 +586,6 @@ const ServiceBooking = mongoose.model('ServiceBooking', serviceBookingSchema);
 // --- UPDATED APP SETTINGS SCHEMA (Must be defined BEFORE routes) ---
 const appSettingsSchema = new mongoose.Schema({
   singleton: { type: Boolean, default: true, unique: true, index: true },
-  
   platformCommissionRate: { type: Number, default: 0.05, min: 0, max: 1 },
   productCreationFee: { type: Number, default: 10 }, 
   
@@ -561,15 +597,19 @@ const appSettingsSchema = new mongoose.Schema({
     categoryLayout: { type: String, enum: ['horizontal', 'grid', 'list'], default: 'horizontal' }
   },
 
+  // ✅ PRINTING CONFIGURATION (New)
+  printConfig: {
+      bwRatePerPage: { type: Number, default: 2 },      // एडमिन द्वारा तय B/W रेट
+      colorRatePerPage: { type: Number, default: 10 },   // एडमिन द्वारा तय कलर रेट
+      adminPrintCommission: { type: Number, default: 0.10 } // प्रिंट पर एडमिन का कमीशन (e.g. 10%)
+  },
+
   // ✅ DELIVERY CONFIGURATION
   deliveryConfig: {
       globalRadiusKm: { type: Number, default: 50 }, 
-      
-      // Pricing Fields
       baseCharge: { type: Number, default: 20 },       
       baseKm: { type: Number, default: 2 },           
       extraPerKmCharge: { type: Number, default: 10 }, 
-
       blockedPincodes: [{ type: String }], 
       blockedZones: [{
           lat: Number,
@@ -579,6 +619,7 @@ const appSettingsSchema = new mongoose.Schema({
       }]
   }
 });
+
 
 // 👇 THIS LINE IS CRITICAL - DO NOT FORGET IT 👇
 const AppSettings = mongoose.model('AppSettings', appSettingsSchema);
@@ -1059,6 +1100,16 @@ if (serviceCategoryCount === 0) {
     console.error('Error creating default data:', err.message);
   }
 }
+
+const printStorage = new CloudinaryStorage({
+  cloudinary: cloudinary,
+  params: {
+    folder: 'ecommerce/print_jobs',
+    format: 'pdf', // यह हर फ़ाइल को PDF में बदल देगा
+    resource_type: 'auto'
+  },
+});
+const uploadPrint = multer({ storage: printStorage });
 
 
 // --------- Middleware ----------
@@ -3540,14 +3591,33 @@ async function handleFailedPayment(order_id) {
 
 app.post('/api/payment/verify', async (req, res) => {
   try {
-    const { order_id, payment_id, signature } = req.body;
+    const { order_id, payment_id, signature, printJobId } = req.body; // printJobId यहाँ ज़रूरी है
     const shasum = crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET);
     shasum.update(`${order_id}|${payment_id}`);
     const digest = shasum.digest('hex');
 
     if (digest === signature) {
+      
+      // 1. अगर यह "प्रिंट सर्विस" का पेमेंट है
+      if (printJobId) {
+        const printJob = await PrintJob.findByIdAndUpdate(
+          printJobId, 
+          { paymentStatus: 'completed' }, 
+          { new: true }
+        );
+
+        if (printJob) {
+          // सेलर के वॉलेट में कमीशन काटकर पैसा जमा करें
+          await sellerCreditForPrint(printJob); 
+        }
+        
+        return res.json({ status: 'success', message: 'Print payment verified and seller credited' });
+      }
+
+      // 2. अगर यह सामान्य "Product Order" का पेमेंट है
       await handleSuccessfulPayment(order_id, payment_id);
       return res.json({ status: 'success', message: 'Payment verified successfully' });
+
     } else {
       await handleFailedPayment(order_id);
       return res.status(400).json({ status: 'failure', message: 'Payment verification failed' });
@@ -8833,7 +8903,180 @@ app.get('/api/seller/trust-score', protect, authorizeRole('seller'), async (req,
     }
 });
 
+app.post('/api/print/upload', protect, uploadPrint.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
 
+    const newPrintJob = await PrintJob.create({
+      user: req.user._id,
+      originalName: req.file.originalname,
+      fileUrl: req.file.path, // यह Cloudinary द्वारा जनरेटेड PDF लिंक होगा
+      publicId: req.file.filename
+    });
+
+    res.status(201).json({
+      message: 'File converted to PDF and uploaded successfully. Valid for 24h.',
+      printJob: newPrintJob
+    });
+  } catch (err) {
+    res.status(500).json({ message: 'Error uploading print job', error: err.message });
+  }
+});
+
+app.get('/api/admin/print/queue', protect, authorizeRole('admin'), async (req, res) => {
+  try {
+    const jobs = await PrintJob.find().populate('user', 'name phone').sort({ createdAt: -1 });
+    res.json(jobs);
+  } catch (err) {
+    res.status(500).json({ message: 'Error fetching queue' });
+  }
+});
+
+app.post('/api/seller/printable-forms', protect, authorizeRole('seller', 'admin'), uploadPrint.single('file'), async (req, res) => {
+  try {
+    const { title, description, priceBW, priceColor, category } = req.body;
+    
+    const newForm = await PrintableForm.create({
+      seller: req.user._id,
+      title,
+      description,
+      pricePerCopyBW: parseFloat(priceBW),
+      pricePerCopyColor: parseFloat(priceColor),
+      category,
+      fileUrl: req.file.path,
+      publicId: req.file.filename
+    });
+
+    res.status(201).json({ message: 'Form/Book uploaded successfully', newForm });
+  } catch (err) {
+    res.status(500).json({ message: 'Error uploading form', error: err.message });
+  }
+});
+
+app.post('/api/print/order-form', protect, async (req, res) => {
+  try {
+    const { formId, printType, quantity } = req.body;
+
+    const form = await PrintableForm.findById(formId);
+    if (!form) return res.status(404).json({ message: 'Form not found' });
+
+    // रेट कैलकुलेशन
+    const rate = (printType === 'Color') ? form.pricePerCopyColor : form.pricePerCopyBW;
+    const totalAmount = rate * parseInt(quantity);
+
+    // 1. Razorpay Order बनाएँ
+    const razorpayOrder = await razorpay.orders.create({
+      amount: Math.round(totalAmount * 100),
+      currency: "INR",
+      receipt: `form_print_${Date.now()}`
+    });
+
+    // 2. Print Job बनाएँ (सेलर के पहले से अपलोडेड फाइल का उपयोग करके)
+    const printJob = await PrintJob.create({
+      user: req.user._id,
+      fileUrl: form.fileUrl, // सेलर की फाइल का लिंक यहाँ कॉपी होगा
+      pages: quantity,      // यहाँ क्वांटिटी का मतलब पेज या कॉपी से है
+      printType,
+      amount: totalAmount,
+      razorpayOrderId: razorpayOrder.id,
+      paymentStatus: 'pending'
+    });
+
+    res.json({ printJob, razorpayOrder });
+  } catch (err) {
+    res.status(500).json({ message: 'Error ordering form print', error: err.message });
+  }
+});
+
+app.post('/api/print/order-request', protect, async (req, res) => {
+  try {
+    const { sellerId, pages, printType, addressId } = req.body;
+
+    const settings = await AppSettings.findOne({ singleton: true });
+    const seller = await User.findById(sellerId);
+
+    // 1. चेक करें कि सेलर अप्रूव्ड है या नहीं
+    if (!seller || !seller.isPrintServiceApproved) {
+      return res.status(403).json({ message: "Seller not approved for print services." });
+    }
+
+    // 2. एडमिन रेट के हिसाब से प्रिंटिंग कॉस्ट
+    const rate = (printType === 'Color') ? settings.printConfig.colorRatePerPage : settings.printConfig.bwRatePerPage;
+    const printCost = rate * pages;
+
+    // 3. डिलीवरी चार्ज कैलकुलेशन (Distance Based)
+    const address = await Address.findById(addressId);
+    const dist = getDistanceFromLatLonInKm(address.lat, address.lng, seller.location.coordinates[1], seller.location.coordinates[0]);
+    const deliveryFee = getDynamicDeliveryFee(dist, settings.deliveryConfig);
+
+    const grandTotal = printCost + deliveryFee;
+
+    // 4. कमीशन और सेलर का हिस्सा (Calculation only)
+    const adminPart = printCost * settings.printConfig.adminPrintCommission;
+    const sellerPart = printCost - adminPart;
+
+    // 5. Razorpay Order
+    const razorpayOrder = await razorpay.orders.create({
+      amount: Math.round(grandTotal * 100),
+      currency: "INR",
+      receipt: `prnt_${Date.now()}`
+    });
+
+    res.json({ razorpayOrder, grandTotal, sellerPart });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+app.put('/api/admin/print/settle-payout/:jobId', protect, authorizeRole('admin'), async (req, res) => {
+  try {
+    const { transactionId } = req.body; 
+    
+    const printJob = await PrintJob.findById(req.params.jobId).populate('seller');
+
+    if (!printJob) return res.status(404).json({ message: "Job not found" });
+
+    // 1. सुरक्षा जांच: कहीं पैसा पहले ही तो नहीं भेजा जा चुका?
+    if (printJob.payoutStatus === 'Settled') {
+      return res.status(400).json({ message: "This payout is already settled." });
+    }
+
+    if (printJob.paymentStatus !== 'completed') {
+      return res.status(400).json({ message: "User hasn't paid yet" });
+    }
+
+    // 2. डेटा अपडेट करें
+    printJob.payoutStatus = 'Settled';
+    printJob.transactionId = transactionId;
+    printJob.settledAt = Date.now();
+    await printJob.save();
+
+    // 3. सेलर की ट्रांजैक्शन हिस्ट्री में रिकॉर्ड जोड़ें (Future reference के लिए)
+    await WalletTransaction.create({
+      seller: printJob.seller._id,
+      type: 'Direct_Credit', // टैग ताकि पता चले कि यह सीधा बैंक में गया है
+      amount: printJob.sellerEarnings,
+      description: `Manual Payout for Print #${printJob._id.toString().slice(-6)}. Ref: ${transactionId}`
+    });
+
+    // 4. सेलर को नोटिफिकेशन भेजें
+    if (printJob.seller.fcmToken) {
+      await sendPushNotification(
+        printJob.seller.fcmToken, 
+        "💰 Payment Received", 
+        `Admin sent ₹${printJob.sellerEarnings} to your Bank/UPI. Ref: ${transactionId}`
+      );
+    }
+
+    res.json({ 
+      success: true, 
+      message: "Payout marked as settled successfully", 
+      utr: transactionId 
+    });
+
+  } catch (err) {
+    res.status(500).json({ message: 'Settlement Error', error: err.message });
+  }
+});
 
 const IP = '0.0.0.0';
 const PORT = process.env.PORT || 5001;
