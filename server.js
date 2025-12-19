@@ -9055,26 +9055,41 @@ app.get('/api/seller/trust-score', protect, authorizeRole('seller'), async (req,
 });
 
 // ✅ Corrected Route: /api/print/upload
+// ✅ FIXED ROUTE: /api/print/upload
+// Now accepts 'sellerId' to prevent the crash
 app.post('/api/print/upload', protect, uploadPrint.single('file'), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
+    // 1. Extract Seller ID (Check both keys to be safe)
+    const sellerId = req.body.sellerId || req.body.seller;
 
+    // 2. Validation
+    if (!req.file) {
+      return res.status(400).json({ message: 'No file uploaded' });
+    }
+    
+    // CRITICAL FIX: Ensure sellerId is present
+    if (!sellerId) {
+      console.error("❌ Upload Error: Missing Seller ID in request body.");
+      return res.status(400).json({ message: 'Seller ID is required for upload.' });
+    }
+
+    // 3. Create PrintJob
     const newPrintJob = await PrintJob.create({
       user: req.user._id,
+      seller: sellerId, // ✅ THIS LINE FIXES YOUR CRASH
       originalName: req.file.originalname,
       fileUrl: req.file.path, // Cloudinary URL
-      publicId: req.file.filename
+      publicId: req.file.filename,
+      status: 'Pending',      // Add default status
+      paymentStatus: 'pending'
     });
 
     res.status(201).json({
       message: 'File converted to PDF and uploaded successfully.',
-      
-      // 👇👇👇 यह लाइन सबसे ज्यादा जरूरी है 👇👇👇
       fileUrl: newPrintJob.fileUrl, 
-      // 👆👆👆 Flutter इसे ही ढूंढ रहा है 👆👆👆
-      
       printJob: newPrintJob
     });
+
   } catch (err) {
     console.error("Upload Error:", err);
     res.status(500).json({ message: 'Error uploading print job', error: err.message });
