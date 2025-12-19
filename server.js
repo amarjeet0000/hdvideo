@@ -394,18 +394,25 @@ const printJobSchema = new mongoose.Schema({
   fileUrl: String,      // Cloudinary PDF URL
   publicId: String,
   
-  // पेमेंट और कोस्ट डिटेल्स
-  printCost: Number,    // एडमिन रेट के हिसाब से कुल प्रिंटिंग चार्ज
-  sellerEarnings: Number, // कमीशन काटकर सेलर का हिस्सा (जो एडमिन को भेजना है)
+  // ✅ NEW FIELDS ADDED (Required for App to work)
+  copies: { type: Number, default: 1 },
+  printType: { type: String, enum: ['bw', 'color'], default: 'bw' },
+  sideType: { type: String, enum: ['single', 'double'], default: 'single' },
+  paperSize: { type: String, default: 'A4' },
+  instructions: String,
+  
+  // Payment & Cost Details
+  printCost: Number,
+  sellerEarnings: Number,
   paymentStatus: { type: String, enum: ['pending', 'completed', 'failed'], default: 'pending' },
   
-  // सेटलमेंट डिटेल्स (Manual Payout के लिए)
+  // Settlement Details
   payoutStatus: { type: String, enum: ['Pending', 'Settled'], default: 'Pending' },
-  transactionId: String, // एडमिन यहाँ GPay/PhonePe का UTR नंबर डालेगा
+  transactionId: String,
   settledAt: Date,
 
-  status: { type: String, enum: ['Pending', 'Printed'], default: 'Pending' },
-  createdAt: { type: Date, default: Date.now, expires: 86400 } // 24h में डिलीट
+  status: { type: String, enum: ['Pending', 'Printed', 'Rejected'], default: 'Pending' },
+  createdAt: { type: Date, default: Date.now, expires: 86400 } // 24h Expiry
 }, { timestamps: true });
 
 const PrintJob = mongoose.model('PrintJob', printJobSchema);
@@ -824,70 +831,88 @@ const splashSchema = new mongoose.Schema({
 const Splash = mongoose.model('Splash', splashSchema);
 
 const orderSchema = new mongoose.Schema({
-  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
-  seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
-  orderItems: [{
-    product: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' },
-    name: String,
-    qty: Number,
-    originalPrice: Number,
-    price: Number,
-    category: String,
-    // ⭐️ FIX: REMOVING required: true ⭐️
-    selectedColor: { type: String, required: false }, // Allow null/undefined for non-variant items
-    selectedSize: { type: String, required: false }   // Allow null/undefined for non-variant items
+  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
+  seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
+  
+  orderItems: [{
+    product: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' },
+    name: String,
+    qty: Number,
+    originalPrice: Number,
+    price: Number,
+    category: String,
+    
+    // ⭐️ EXISTING VARIANT FIELDS ⭐️
+    selectedColor: { type: String, required: false }, 
+    selectedSize: { type: String, required: false },
 
-    // --------------------------------------------------
-  }],
-  shippingAddress: { type: String, required: true },
-  deliveryStatus: { 
-    type: String, 
-    enum: [
-        'Pending', 
-        'Processing', 
-        'Shipped', 
-        'Delivered', 
-        'Cancelled', 
-        'Payment Pending', 
-        'Return Requested',
-        // --- ADDED RETURN FLOW STATUSES ---
-        'Return Accepted by Admin', 
-        'Return In Transit',        
-        'Return Completed'
-        // ----------------------------------
-    ], 
-    default: 'Pending', 
-    index: true 
-  }, 
-  paymentMethod: { type: String, enum: ['cod', 'razorpay', 'razorpay_cod'], required: true, index: true },
-  paymentId: String,
-  paymentStatus: { type: String, enum: ['pending', 'completed', 'failed', 'refunded'], default: 'pending', index: true },
-  pincode: String,
-  totalAmount: Number, // Items Total (Subtotal)
-  taxRate: { type: Number, default: GST_RATE },
-  taxAmount: { type: Number, default: 0 },
-  couponApplied: String,
-  discountAmount: { type: Number, default: 0 },
-  shippingFee: { type: Number, default: 0 }, 
-  refunds: [{
-    amount: Number,
-    reason: String,
-    status: { type: String, enum: ['requested', 'approved', 'processing', 'completed', 'rejected'], default: 'requested' },
-    razorpayRefundId: String,
-    processedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-    
-    // 🚨 NEW MANUAL REFUND FIELDS ADDED 🚨
-    upiId: String, 
-    bankAccountNumber: String, 
-    ifsc: String, 
-    // ------------------------------------
-    
-    createdAt: Date,
-    updatedAt: Date
-  }],
-  totalRefunded: { type: Number, default: 0 },
-  history: [{ status: String, timestamp: { type: Date, default: Date.now } }],
-  razorpayPaymentLinkId: { type: String, default: null }
+    // ✅ CRITICAL FIX: PRINT JOB DETAILS ADDED HERE ✅
+    // These fields are required for the "Print Service" to work
+    isPrintJob: { type: Boolean, default: false },
+    printMeta: {
+        fileUrl: String,      // PDF Link from Cloudinary
+        originalName: String, // Original File Name
+        copies: Number,       // Number of copies
+        printType: String,    // 'bw' or 'color'
+        sideType: String,     // 'single' or 'double'
+        paperSize: String,    // 'A4'
+        totalCost: Number     // Calculated Print Cost
+    }
+    // --------------------------------------------------
+  }],
+
+  shippingAddress: { type: String, required: true },
+  
+  deliveryStatus: { 
+    type: String, 
+    enum: [
+        'Pending', 
+        'Processing', 
+        'Shipped', 
+        'Delivered', 
+        'Cancelled', 
+        'Payment Pending', 
+        'Return Requested',
+        'Return Accepted by Admin', 
+        'Return In Transit',        
+        'Return Completed'
+    ], 
+    default: 'Pending', 
+    index: true 
+  }, 
+  
+  paymentMethod: { type: String, enum: ['cod', 'razorpay', 'razorpay_cod'], required: true, index: true },
+  paymentId: String,
+  paymentStatus: { type: String, enum: ['pending', 'completed', 'failed', 'refunded'], default: 'pending', index: true },
+  
+  pincode: String,
+  totalAmount: Number, 
+  taxRate: { type: Number, default: (typeof GST_RATE !== 'undefined' ? GST_RATE : 0) },
+  taxAmount: { type: Number, default: 0 },
+  couponApplied: String,
+  discountAmount: { type: Number, default: 0 },
+  shippingFee: { type: Number, default: 0 }, 
+  
+  refunds: [{
+    amount: Number,
+    reason: String,
+    status: { type: String, enum: ['requested', 'approved', 'processing', 'completed', 'rejected'], default: 'requested' },
+    razorpayRefundId: String,
+    processedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    
+    // 🚨 MANUAL REFUND FIELDS 🚨
+    upiId: String, 
+    bankAccountNumber: String, 
+    ifsc: String, 
+    // -------------------------
+    
+    createdAt: Date,
+    updatedAt: Date
+  }],
+  
+  totalRefunded: { type: Number, default: 0 },
+  history: [{ status: String, timestamp: { type: Date, default: Date.now } }],
+  razorpayPaymentLinkId: { type: String, default: null }
 }, { timestamps: true });
 
 const Order = mongoose.model('Order', orderSchema);
@@ -910,19 +935,33 @@ const cartSchema = new mongoose.Schema({
       required: true, 
       default: 1 
     },
-    // ⭐️ FIX: ADDED FIELDS TO STORE SELECTED VARIANTS ⭐️
+    // ⭐️ EXISTING VARIANT FIELDS ⭐️
     selectedColor: { 
       type: String 
     },
     selectedSize: { 
       type: String 
     },
-    // ----------------------------------------------------
+    
+    // ✅ NEW: PRINT JOB FIELDS ADDED HERE ✅
+    // This allows the cart to tell if an item is a file for printing or a regular product
+    isPrintJob: { 
+      type: Boolean, 
+      default: false 
+    },
+    printMeta: {
+        fileUrl: String,      // Link to the PDF file on Cloudinary
+        originalName: String, // The name of the file user uploaded
+        copies: Number,       // How many sets
+        printType: String,    // 'bw' or 'color'
+        sideType: String,     // 'single' or 'double'
+        paperSize: String,    // 'A4', etc.
+        totalCost: Number     // Price calculated by Flutter app (e.g., ₹50)
+    }
   }]
 }, { timestamps: true });
 
 const Cart = mongoose.model('Cart', cartSchema);
-
 const wishlistSchema = new mongoose.Schema({
   user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
   products: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Product' }]
@@ -2263,78 +2302,116 @@ app.post('/api/cart', protect, async (req, res) => {
         const { 
             productId, 
             qty = 1, 
-            selectedVariant 
+            selectedVariant,
+            // ✅ NEW: Print Parameters
+            isPrintJob,
+            printMeta 
         } = req.body;
         
         // ✅ --- DEBUGGING LOGS START --- ✅
         console.log("--- ADD TO CART REQUEST RECEIVED ---");
+        console.log("Type:", isPrintJob ? "PRINT JOB" : "PRODUCT");
         console.log("Request Body:", JSON.stringify(req.body, null, 2));
-        console.log("User ID:", req.user._id);
         // ✅ --- DEBUGGING LOGS END --- ✅
-
-        const selectedColor = selectedVariant ? selectedVariant.color : undefined;
-        const selectedSize = selectedVariant ? selectedVariant.size : undefined;
-        
-        const product = await Product.findById(productId);
-        if (!product) {
-            console.log(`❌ FAILED: Product with ID ${productId} not found.`);
-            return res.status(404).json({ message: 'Product not found' });
-        }
 
         let cart = await Cart.findOne({ user: req.user._id });
         if (!cart) {
             cart = await Cart.create({ user: req.user._id, items: [] });
         }
 
-        const itemIndex = cart.items.findIndex(item => 
-            item.product.toString() === productId &&
-            (item.selectedColor === selectedColor || (!item.selectedColor && !selectedColor)) &&
-            (item.selectedSize === selectedSize || (!item.selectedSize && !selectedSize))
-        );
-
-        if (itemIndex > -1) {
-            cart.items[itemIndex].qty += qty;
-        } else {
-            const hasColorOptions = product.variants.some(v => v.color && v.color.length > 0);
-            const hasSizeOptions = product.variants.some(v => v.size && v.size.length > 0);
-
-            if ((hasColorOptions && !selectedColor) || (hasSizeOptions && !selectedSize)) {
-                let missing = [];
-                if (hasColorOptions && !selectedColor) missing.push('Color');
-                if (hasSizeOptions && !selectedSize) missing.push('Size');
-                console.log(`❌ FAILED: Missing required variants: ${missing.join(' & ')}`);
-                return res.status(400).json({ message: `Please select ${missing.join(' and ')}.` });
-            }
-            
-            if (product.variants.length > 0) {
-                const targetVariant = product.variants.find(v => 
-                    (v.color === selectedColor || (!v.color && !selectedColor)) &&
-                    (v.size === selectedSize || (!v.size && !selectedSize))
-                );
-
-                if (!targetVariant) {
-                    console.log(`❌ FAILED: Variant combination not found.`);
-                    console.log(`   - Received: color='${selectedColor}', size='${selectedSize}'`);
-                    console.log(`   - Available Variants in DB:`, product.variants.map(v => ({color: v.color, size: v.size})));
-                    return res.status(400).json({ message: 'The selected variant combination is not available.' });
+        // ============================================================
+        // 🖨️ SCENARIO 1: PRINT JOB LOGIC
+        // ============================================================
+        if (isPrintJob && printMeta) {
+            // Print jobs are always added as new items (we don't merge them because files might be different)
+            cart.items.push({
+                product: productId, // This should be the ID of your "Document Printing" service product
+                qty: 1, // Usually 1 job entry (copies are inside printMeta)
+                isPrintJob: true,
+                printMeta: {
+                    fileUrl: printMeta.fileUrl,
+                    originalName: printMeta.originalName,
+                    copies: printMeta.copies,
+                    printType: printMeta.printType,
+                    sideType: printMeta.sideType,
+                    paperSize: printMeta.paperSize,
+                    totalCost: printMeta.totalCost
                 }
-
-                if (targetVariant.stock < qty) {
-                    console.log(`❌ FAILED: Insufficient stock for variant. Stock: ${targetVariant.stock}, Qty: ${qty}`);
-                    return res.status(400).json({ message: `Insufficient stock for selected variant.` });
-                }
-            }
-
-            cart.items.push({ 
-                product: productId, 
-                qty,
-                selectedColor: selectedColor,
-                selectedSize: selectedSize
             });
+
+            console.log("✅ SUCCESS: Print Job added to cart.");
+        } 
+        
+        // ============================================================
+        // 🛒 SCENARIO 2: STANDARD PRODUCT LOGIC (Vegetables, Clothes, etc.)
+        // ============================================================
+        else {
+            const selectedColor = selectedVariant ? selectedVariant.color : undefined;
+            const selectedSize = selectedVariant ? selectedVariant.size : undefined;
+
+            const product = await Product.findById(productId);
+            if (!product) {
+                console.log(`❌ FAILED: Product with ID ${productId} not found.`);
+                return res.status(404).json({ message: 'Product not found' });
+            }
+
+            // Check if item exists (Excluding Print Jobs)
+            const itemIndex = cart.items.findIndex(item => 
+                item.product.toString() === productId &&
+                !item.isPrintJob && // Important: Don't merge with print jobs
+                (item.selectedColor === selectedColor || (!item.selectedColor && !selectedColor)) &&
+                (item.selectedSize === selectedSize || (!item.selectedSize && !selectedSize))
+            );
+
+            if (itemIndex > -1) {
+                cart.items[itemIndex].qty += qty;
+            } else {
+                // --- Variant Validation ---
+                const hasColorOptions = product.variants.some(v => v.color && v.color.length > 0);
+                const hasSizeOptions = product.variants.some(v => v.size && v.size.length > 0);
+
+                if ((hasColorOptions && !selectedColor) || (hasSizeOptions && !selectedSize)) {
+                    let missing = [];
+                    if (hasColorOptions && !selectedColor) missing.push('Color');
+                    if (hasSizeOptions && !selectedSize) missing.push('Size');
+                    console.log(`❌ FAILED: Missing required variants: ${missing.join(' & ')}`);
+                    return res.status(400).json({ message: `Please select ${missing.join(' and ')}.` });
+                }
+                
+                // --- Stock Check ---
+                if (product.variants.length > 0) {
+                    const targetVariant = product.variants.find(v => 
+                        (v.color === selectedColor || (!v.color && !selectedColor)) &&
+                        (v.size === selectedSize || (!v.size && !selectedSize))
+                    );
+
+                    if (!targetVariant) {
+                        return res.status(400).json({ message: 'The selected variant combination is not available.' });
+                    }
+
+                    if (targetVariant.stock < qty) {
+                        return res.status(400).json({ message: `Insufficient stock for selected variant.` });
+                    }
+                } else {
+                    // No variants, check main stock
+                    if (product.stock < qty) {
+                        return res.status(400).json({ message: `Insufficient stock.` });
+                    }
+                }
+
+                // Push new item
+                cart.items.push({ 
+                    product: productId, 
+                    qty,
+                    selectedColor: selectedColor,
+                    selectedSize: selectedSize,
+                    isPrintJob: false // Explicitly set false for normal items
+                });
+            }
         }
 
         await cart.save();
-        console.log("✅ SUCCESS: Cart updated successfully.");
+        console.log("✅ SUCCESS: Cart saved.");
         res.status(200).json(cart);
         
     } catch (err) {
@@ -2684,6 +2761,14 @@ app.post('/api/orders/calculate-summary', protect, async (req, res) => {
     // --- CART TOTAL CALCULATION ---
     let totalCartAmount = 0;
     for (const item of cart.items) {
+      
+      // ✅ NEW: HANDLE PRINT JOBS
+      if (item.isPrintJob && item.printMeta && item.printMeta.totalCost) {
+          totalCartAmount += item.printMeta.totalCost;
+          continue; // Skip standard product checks for print jobs
+      }
+
+      // --- STANDARD PRODUCT LOGIC ---
       const product = item.product;
       
       if (!product || !product.seller) continue; 
@@ -2762,7 +2847,7 @@ app.post('/api/orders', protect, async (req, res) => {
     // 1. Cart Fetch (Include Seller Location & Wallet Balance)
     const cart = await Cart.findOne({ user: req.user._id }).populate({
       path: 'items.product',
-      select: 'name price originalPrice variants category seller lowStockThreshold stock', // ✅ Added 'stock' to select
+      select: 'name price originalPrice variants category seller lowStockThreshold stock', 
       populate: {
         path: 'seller',
         select: 'pincodes name phone fcmToken walletBalance location' 
@@ -2787,6 +2872,51 @@ app.post('/api/orders', protect, async (req, res) => {
       if (!product || !product.seller) {
         return res.status(400).json({ message: `An item in your cart is invalid or its seller is inactive.` });
       }
+
+      // ============================================================
+      // 🖨️ SCENARIO 1: PRINT JOB LOGIC
+      // ============================================================
+      if (item.isPrintJob && item.printMeta) {
+          const sellerId = product.seller._id.toString();
+          
+          if (!ordersBySeller.has(sellerId)) {
+            ordersBySeller.set(sellerId, {
+              seller: product.seller,
+              orderItems: [],
+              totalAmount: 0,
+              calculatedShippingFee: 0 
+            });
+          }
+
+          const sellerOrder = ordersBySeller.get(sellerId);
+          
+          // Add Print Item to Order
+          sellerOrder.orderItems.push({
+            product: product._id,
+            name: item.printMeta.originalName || "Print Document", // Use Filename
+            qty: item.qty, // Usually 1 (copies defined in meta)
+            originalPrice: item.printMeta.totalCost,
+            price: item.printMeta.totalCost, // Direct Cost calculated in Cart
+            
+            // ✅ IMPORTANT: Pass Print Meta to Order Schema
+            isPrintJob: true,
+            printMeta: item.printMeta,
+            
+            category: product.category,
+            selectedColor: null,
+            selectedSize: null,
+          });
+
+          sellerOrder.totalAmount += item.printMeta.totalCost;
+          calculatedTotalCartAmount += item.printMeta.totalCost;
+          
+          // ⚠️ Skip the rest (Stock/Variant checks) for Print Jobs
+          continue; 
+      }
+
+      // ============================================================
+      // 🛒 SCENARIO 2: STANDARD PRODUCT LOGIC
+      // ============================================================
 
       // Price/Variant Validation
       let itemPrice = product.price; 
@@ -2838,6 +2968,7 @@ app.post('/api/orders', protect, async (req, res) => {
         category: product.category,
         selectedColor: item.selectedColor,
         selectedSize: item.selectedSize,
+        isPrintJob: false // Explicitly set false
       });
 
       sellerOrder.totalAmount += itemPrice * item.qty;
@@ -2874,7 +3005,8 @@ app.post('/api/orders', protect, async (req, res) => {
     
     // --- Coupon & Tax ---
     let discountAmount = 0;
-    const totalTaxAmount = totalCartAmount * GST_RATE;
+    const GST_RATE_VAL = (typeof GST_RATE !== 'undefined') ? GST_RATE : 0; // Safe Tax check
+    const totalTaxAmount = totalCartAmount * GST_RATE_VAL;
     
     if (couponCode) {
       const coupon = await Coupon.findOne({
@@ -2960,12 +3092,12 @@ app.post('/api/orders', protect, async (req, res) => {
       const order = new Order({
         user: req.user._id,
         seller: sellerData.seller,
-        orderItems: sellerData.orderItems, 
+        orderItems: sellerData.orderItems, // Contains products AND print jobs
         shippingAddress: fullAddress,
         pincode: shippingAddress.pincode,
         paymentMethod: effectivePaymentMethod,
         totalAmount: totalAmountFloat, 
-        taxRate: GST_RATE,
+        taxRate: GST_RATE_VAL,
         taxAmount: taxAmountFloat, 
         couponApplied: couponCode,
         discountAmount: discountAmountFloat, 
@@ -2995,6 +3127,10 @@ app.post('/api/orders', protect, async (req, res) => {
       if (isCodOrFree) {
         
         for(const item of sellerData.orderItems) {
+            
+            // ✅ SKIP STOCK UPDATE FOR PRINT JOBS
+            if (item.isPrintJob) continue;
+
             // ✅ FIX: Find Product to check if it has variants
             const productDoc = await Product.findById(item.product);
 
@@ -9075,6 +9211,131 @@ app.put('/api/admin/print/settle-payout/:jobId', protect, authorizeRole('admin')
 
   } catch (err) {
     res.status(500).json({ message: 'Settlement Error', error: err.message });
+  }
+});
+
+// ✅ NEW ROUTE: Submit Print Job (Matches Flutter App)
+app.post('/api/print/jobs', protect, uploadPrint.single('document'), async (req, res) => {
+  try {
+    const { sellerId, copies, printType, sideType, paperSize, instructions } = req.body;
+
+    if (!req.file) {
+      return res.status(400).json({ message: 'No document file uploaded' });
+    }
+
+    // 1. Fetch App Settings for Pricing
+    const settings = await AppSettings.findOne({ singleton: true });
+    // Default rates if settings missing
+    const bwRate = settings?.printConfig?.bwRatePerPage || 2;
+    const colorRate = settings?.printConfig?.colorRatePerPage || 10;
+    const adminCommissionRate = settings?.printConfig?.adminPrintCommission || 0.10;
+
+    // 2. Calculate Cost
+    const rate = (printType === 'color') ? colorRate : bwRate;
+    const totalCost = rate * parseInt(copies || 1); 
+
+    const adminShare = totalCost * adminCommissionRate;
+    const sellerShare = totalCost - adminShare;
+
+    // 3. Create Job in DB
+    const newJob = await PrintJob.create({
+      user: req.user._id,
+      seller: sellerId,
+      originalName: req.file.originalname,
+      fileUrl: req.file.path,
+      publicId: req.file.filename,
+      copies: parseInt(copies),
+      printType,
+      sideType,
+      paperSize,
+      instructions,
+      printCost: totalCost,
+      sellerEarnings: sellerShare
+    });
+
+    // 4. Notify Seller
+    const sellerUser = await User.findById(sellerId).select('fcmToken');
+    if (sellerUser && sellerUser.fcmToken) {
+        await sendPushNotification(
+            [sellerUser.fcmToken], 
+            'New Print Job! 🖨️', 
+            `New document received for printing. Earn ₹${sellerShare}`, 
+            { type: 'NEW_PRINT_JOB' }
+        );
+    }
+
+    res.status(201).json({
+      message: 'Print job submitted successfully',
+      job: newJob
+    });
+
+  } catch (err) {
+    console.error('Print Job Error:', err);
+    res.status(500).json({ message: 'Error submitting print job', error: err.message });
+  }
+});
+
+// ✅ GET: Get Incoming Print Jobs for Seller (Missing Route)
+app.get('/api/print/seller-jobs', protect, authorizeRole('seller', 'admin'), async (req, res) => {
+  try {
+    const jobs = await PrintJob.find({ seller: req.user._id })
+      .populate('user', 'name phone') // ग्राहक का नाम और फोन नंबर दिखाएं
+      .sort({ createdAt: -1 }); // सबसे नए जॉब्स पहले
+    res.json(jobs);
+  } catch (err) {
+    console.error('Error fetching seller print jobs:', err.message);
+    res.status(500).json({ message: 'Error fetching print jobs', error: err.message });
+  }
+});
+
+// ✅ GET: Get My Print Jobs (For Customer App - Optional but Recommended)
+app.get('/api/print/my-jobs', protect, async (req, res) => {
+  try {
+    const jobs = await PrintJob.find({ user: req.user._id })
+      .populate('seller', 'name phone')
+      .sort({ createdAt: -1 });
+    res.json(jobs);
+  } catch (err) {
+    res.status(500).json({ message: 'Error fetching my print jobs', error: err.message });
+  }
+});
+
+// ✅ PATCH: Update Print Job Status (For Seller to Mark as Printed/Rejected)
+app.patch('/api/print/jobs/:id/status', protect, authorizeRole('seller', 'admin'), async (req, res) => {
+  try {
+    const { status } = req.body; // 'Printed', 'Rejected'
+    const jobId = req.params.id;
+
+    const job = await PrintJob.findOne({ _id: jobId, seller: req.user._id });
+    
+    if (!job) {
+      return res.status(404).json({ message: 'Print job not found or unauthorized.' });
+    }
+
+    job.status = status;
+    
+    // अगर पेमेंट हो चुका है और जॉब कम्पलीट हो गई, तो इसे 'settled' के लिए तैयार मान सकते हैं 
+    // (हालांकि payoutStatus अलग है, यह सिर्फ ट्रैकिंग के लिए है)
+    
+    await job.save();
+
+    // ग्राहक को नोटिफिकेशन भेजें
+    const customer = await User.findById(job.user).select('fcmToken phone');
+    if (customer) {
+        const msg = status === 'Printed' 
+            ? `✅ Your document is printed and ready!` 
+            : `❌ Your print job was rejected by the seller.`;
+            
+        if (customer.fcmToken) {
+            await sendPushNotification([customer.fcmToken], 'Print Update 🖨️', msg, { type: 'PRINT_UPDATE' });
+        }
+    }
+
+    res.json({ message: `Job status updated to ${status}`, job });
+
+  } catch (err) {
+    console.error('Error updating print job status:', err.message);
+    res.status(500).json({ message: 'Error updating status', error: err.message });
   }
 });
 
