@@ -9259,20 +9259,138 @@ app.post('/api/print/jobs', protect, uploadPrint.single('document'), async (req,
     const sellerShare = totalCost - adminShare;
 
     // 3. Create Job in DB
+    // Ensure you have your PrintJob model imported
+const PrintJob = require('../models/PrintJob'); 
+// Import your User/Seller models if you need to validate they exist
+
+exports.createPrintJob = async (req, res) => {
+  try {
+    // 1. CHECK IF FILE EXISTS
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded" });
+    }
+
+    // 2. EXTRACT DATA FROM BODY (This fixes your 'sellerId is undefined' error)
+    // We assume these come as strings from the frontend (Multipart/form-data)
+    const { 
+      sellerId, 
+      copies, 
+      printType, 
+      sideType, 
+      paperSize, 
+      instructions 
+    } = req.body;
+
+    // 3. VALIDATE REQUIRED FIELDS
+    if (!sellerId) {
+      return res.status(400).json({ error: "Seller ID is required" });
+    }
+
+    // 4. CALCULATE COSTS (Example Logic)
+    // You likely have your own logic here. Ensure 'totalCost' and 'sellerShare' are defined.
+    // Ideally, don't trust the frontend for price; calculate it here based on page count/type.
+    
+    // Example parsing (ensure they are numbers):
+    const numCopies = parseInt(copies) || 1;
+    
+    // -- REPLACE THIS WITH YOUR ACTUAL PRICING LOGIC --
+    // For now, I'm mocking these variables so the code below doesn't crash
+    const ratePerSheet = printType === 'Color' ? 10 : 2; 
+    const totalCost = numCopies * ratePerSheet; 
+    const sellerShare = totalCost * 0.9; // Example: Seller gets 90%
+    // ------------------------------------------------
+
+    // 5. CREATE THE DB ENTRY
+   // ✅ NEW ROUTE: Submit Print Job (Corrected)
+app.post('/api/print/jobs', protect, uploadPrint.single('document'), async (req, res) => {
+  try {
+    // 1. Extract Data from Request
+    const { sellerId, copies, printType, sideType, paperSize, instructions } = req.body;
+
+    // 2. Validation
+    if (!req.file) {
+      return res.status(400).json({ message: 'No document file uploaded' });
+    }
+    if (!sellerId) {
+      return res.status(400).json({ message: "Seller ID is required" });
+    }
+
+    // 3. Fetch App Settings for Pricing
+    const settings = await AppSettings.findOne({ singleton: true });
+    
+    // Default rates if settings missing
+    const bwRate = settings?.printConfig?.bwRatePerPage || 2;
+    const colorRate = settings?.printConfig?.colorRatePerPage || 10;
+    const adminCommissionRate = settings?.printConfig?.adminPrintCommission || 0.10;
+
+    // 4. Calculate Cost
+    const numCopies = parseInt(copies) || 1;
+    // Handle case sensitivity for 'Color' vs 'color'
+    const isColor = printType && printType.toLowerCase() === 'color';
+    const rate = isColor ? colorRate : bwRate;
+    
+    const totalCost = rate * numCopies; 
+    const adminShare = totalCost * adminCommissionRate;
+    const sellerShare = totalCost - adminShare;
+
+    // 5. Create Job in DB
     const newJob = await PrintJob.create({
       user: req.user._id,
       seller: sellerId,
       originalName: req.file.originalname,
       fileUrl: req.file.path,
       publicId: req.file.filename,
-      copies: parseInt(copies),
+      copies: numCopies,
       printType,
       sideType,
       paperSize,
       instructions,
       printCost: totalCost,
-      sellerEarnings: sellerShare
+      sellerEarnings: sellerShare,
+      status: 'Pending',
+      paymentStatus: 'pending' // Usually pending until paid
     });
+
+    console.log("Print Job Created Successfully:", newJob._id);
+
+    // 6. Notify Seller
+    const sellerUser = await User.findById(sellerId).select('fcmToken');
+    if (sellerUser && sellerUser.fcmToken) {
+        await sendPushNotification(
+            [sellerUser.fcmToken], 
+            'New Print Job! 🖨️', 
+            `New document received for printing. Earn ₹${sellerShare}`, 
+            { type: 'NEW_PRINT_JOB' }
+        );
+    }
+
+    // 7. Send Response
+    res.status(201).json({
+      message: 'Print job submitted successfully',
+      job: newJob
+    });
+
+  } catch (err) {
+    console.error('Print Job Error:', err);
+    res.status(500).json({ message: 'Error submitting print job', error: err.message });
+  }
+});
+
+    // 6. SEND RESPONSE
+    return res.status(201).json({
+      success: true,
+      message: "Print job submitted successfully",
+      job: newJob
+    });
+
+  } catch (error) {
+    console.error("Upload Error:", error);
+    return res.status(500).json({ 
+      error: "Failed to process print job", 
+      details: error.message 
+    });
+  }
+};
 
     // 4. Notify Seller
     const sellerUser = await User.findById(sellerId).select('fcmToken');
