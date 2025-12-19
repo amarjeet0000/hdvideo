@@ -9384,6 +9384,10 @@ app.get('/api/sellers/print-shops/:pincode', async (req, res) => {
 // ==========================================
 
 // ✅ Get or Create "Print Service" Product ID for a Seller
+// ==========================================
+// 🖨️ PRINT SERVICE HELPER ROUTE (AUTO-SETUP - FIXED)
+// ==========================================
+
 app.get('/api/print/config/:sellerId', async (req, res) => {
   try {
     const { sellerId } = req.params;
@@ -9392,35 +9396,39 @@ app.get('/api/print/config/:sellerId', async (req, res) => {
     let product = await Product.findOne({ seller: sellerId, name: 'Print Service' });
     if (product) return res.json({ productId: product._id });
 
-    // 2. अगर नहीं, तो हमें एक 'Category' चाहिए
-    // 'Services' या 'Others' नाम की कैटेगरी ढूंढें, या कोई भी पहली कैटेगरी ले लें
+    // 2. कैटेगरी चेक करें या बनाएं
     let category = await Category.findOne({ $or: [{ name: 'Services' }, { type: 'service' }] });
     
-    // अगर कोई कैटेगरी नहीं मिली, तो एक नई 'Services' कैटेगरी बना दें
     if (!category) {
         category = await Category.create({ 
             name: 'Services', 
+            slug: 'services', // ✅ FIXED: Slug जरूरी है
             type: 'service', 
+            isActive: true,
             image: { url: 'https://cdn-icons-png.flaticon.com/512/1067/1067566.png' } 
         });
     }
 
-    // 3. अब 'Print Service' प्रोडक्ट अपने आप बनाएं
+    // 3. अब 'Print Service' प्रोडक्ट बनाएं (सही Schema Format के साथ)
     product = await Product.create({
         seller: sellerId,
         name: 'Print Service',
+        sku: `PRINT-${sellerId.slice(-4)}-${Date.now()}`, // Unique SKU
+        brand: 'QuickSauda',
         shortDescription: 'Xerox / Document Printing',
         fullDescription: 'High quality document printing service.',
-        price: 1, // बेस प्राइस (असली कीमत printMeta से तय होगी)
-        originalPrice: 1,
-        unit: 'page',
+        unit: 'pcs', // Valid Unit from Enum
         category: category._id,
-        stock: 100000, // कभी खत्म न हो
-        images: [{ 
-            url: "https://cdn-icons-png.flaticon.com/512/2983/2983794.png", // प्रिंटर का आइकॉन
-            publicId: "print_service_default" 
-        }],
-        isGlobal: true // ताकि यह यूजर को दिखे
+        isGlobal: true,
+        isApproved: true, // Auto Approve
+        
+        // ✅ FIXED: Variants array जोड़ना जरूरी है क्योंकि price/stock अब इसके अंदर है
+        variants: [{
+            price: 1,      // Dummy price (असली price printMeta से आएगा)
+            stock: 999999, // कभी खत्म न हो
+            color: 'Default',
+            size: 'A4'
+        }]
     });
 
     console.log(`✅ Auto-created Print Product for Seller ${sellerId}`);
