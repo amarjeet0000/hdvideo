@@ -2884,12 +2884,7 @@ app.post('/api/orders/calculate-summary', protect, async (req, res) => {
 // ============================================================
 // 📦 CREATE ORDER ENDPOINT (Full Logic)
 // ============================================================
-// ============================================================
-// 📦 CREATE ORDER ENDPOINT (Full Logic)
-// ============================================================
-// ============================================================
-// 📦 CREATE ORDER ENDPOINT (Updated with Admin Control)
-// ============================================================
+
 app.post('/api/orders', protect, async (req, res) => {
   try {
     const { shippingAddressId, paymentMethod, couponCode } = req.body;
@@ -2908,11 +2903,12 @@ app.post('/api/orders', protect, async (req, res) => {
       return res.status(400).json({ message: 'Cart is empty' });
     }
 
-    // 2. Fetch Admin Settings for COD and Commission control
+    // 2. Fetch Admin Settings
     const appSettings = await AppSettings.findOne({ singleton: true });
     const isPrintCODAllowed = appSettings ? appSettings.allowPrintCOD : false; 
+    const COMMISSION_RATE = appSettings ? appSettings.platformCommissionRate : 0.05; 
 
-    // 3. Prevent COD for Print Jobs if disabled by Admin
+    // 3. Block COD for Print Jobs if disabled by Admin
     const hasPrintJob = cart.items.some(item => item.isPrintJob === true);
     if (hasPrintJob && (paymentMethod === 'cod' || paymentMethod === 'razorpay_cod')) {
         if (!isPrintCODAllowed) {
@@ -2928,11 +2924,11 @@ app.post('/api/orders', protect, async (req, res) => {
     const ordersBySeller = new Map();
     let calculatedTotalCartAmount = 0; 
 
-    // 4. Validate Stock and Group Items by Seller
+    // 4. Group Items by Seller and Validate Stock
     for (const item of cart.items) {
       const product = item.product;
       if (!product || !product.seller) {
-        return res.status(400).json({ message: `An item in your cart is invalid or its seller is inactive.` });
+        return res.status(400).json({ message: `Invalid product or seller in cart.` });
       }
 
       const sellerId = product.seller._id.toString();
@@ -2958,15 +2954,13 @@ app.post('/api/orders', protect, async (req, res) => {
             isPrintJob: true,
             printMeta: item.printMeta,
             category: product.category,
-            selectedColor: null,
-            selectedSize: null,
           });
           sellerOrder.totalAmount += jobCost;
           calculatedTotalCartAmount += jobCost;
           continue; 
       }
 
-      // Scenario B: Standard Product Logic with Variant Check
+      // Scenario B: Standard Product Logic (Variant Aware)
       let itemPrice = product.price; 
       let itemOriginalPrice = product.originalPrice; 
       
@@ -3004,7 +2998,7 @@ app.post('/api/orders', protect, async (req, res) => {
       calculatedTotalCartAmount += itemPrice * item.qty;
     }
     
-    // 5. Calculate Global Totals and Shipping
+    // 5. Calculate Shipping and Coupons
     const deliveryConfig = appSettings ? appSettings.deliveryConfig : {}; 
     let totalShippingFee = 0;
     for (const [sellerId, sellerData] of ordersBySeller.entries()) {
@@ -3018,7 +3012,6 @@ app.post('/api/orders', protect, async (req, res) => {
     const totalCartAmount = calculatedTotalCartAmount; 
     const totalTaxAmount = totalCartAmount * (typeof GST_RATE !== 'undefined' ? GST_RATE : 0);
     
-    // 6. Apply Coupon Logic
     let discountAmount = 0;
     if (couponCode) {
       const coupon = await Coupon.findOne({ code: couponCode, isActive: true, expiryDate: { $gt: new Date() }, minPurchaseAmount: { $lte: totalCartAmount } });
@@ -3032,7 +3025,7 @@ app.post('/api/orders', protect, async (req, res) => {
     const finalAmountForPayment = Math.max(0, totalCartAmount + totalShippingFee + totalTaxAmount - discountAmount);
     const effectivePaymentMethod = (paymentMethod === 'razorpay' && finalAmountForPayment <= 0) ? 'cod' : paymentMethod;
 
-    // 7. Razorpay Integration
+    // 6. Razorpay Order Initiation
     let razorpayOrder = null;
     if (effectivePaymentMethod === 'razorpay') {
       razorpayOrder = await razorpay.orders.create({
@@ -3042,11 +3035,10 @@ app.post('/api/orders', protect, async (req, res) => {
       });
     }
 
-    const fullAddress = `${shippingAddress.street}${shippingAddress.landmark ? ', ' + shippingAddress.landmark : ''}${shippingAddress.village ? ', ' + shippingAddress.village : ''}, ${shippingAddress.city}, ${shippingAddress.state} - ${shippingAddress.pincode}`;
+    const fullAddress = `${shippingAddress.street}, ${shippingAddress.city}, ${shippingAddress.state} - ${shippingAddress.pincode}`;
     const createdOrders = [];
-    const COMMISSION_RATE = appSettings ? appSettings.platformCommissionRate : 0.05; 
 
-    // 8. Create Sub-Orders and Deduct Seller Commission
+    // 7. Create Orders, Notify Sellers, and Deduct Commission
     for (const [sellerId, sellerData] of ordersBySeller.entries()) {
       const proportion = totalCartAmount > 0 ? sellerData.totalAmount / totalCartAmount : 0; 
       const sellerDiscount = discountAmount * proportion;
@@ -3080,17 +3072,19 @@ app.post('/api/orders', protect, async (req, res) => {
       await order.save();
       createdOrders.push(order);
 
+      // Log Commission
       await WalletTransaction.create({
           seller: sellerId, orderId: order._id, type: 'Debit', amount: commissionAmount,
           balanceBefore, balanceAfter: sellerUser.walletBalance,
           description: `Platform Commission (Order #${order._id.toString().slice(-6)})`
       });
 
-      // 9. Handle Post-Creation for COD: Stock, WhatsApp, and Delivery Assignment
+      // 8. Handle Post-Order Logic for COD
       if (isCodOrFree) {
-        const itemsDetail = sellerData.orderItems.map(i => `- ${i.name} (Qty: ${i.qty})`).join('\n');
         const orderIdShort = order._id.toString().slice(-6);
+        const itemsDetail = sellerData.orderItems.map(i => `- ${i.name} (Qty: ${i.qty})`).join('\n');
 
+        // Stock Update (Variant-Aware)
         for(const item of sellerData.orderItems) {
             if (item.isPrintJob) continue;
             await Product.findOneAndUpdate(
@@ -3099,10 +3093,24 @@ app.post('/api/orders', protect, async (req, res) => {
             );
         }
 
-        const sellerMessage = `🎉 *New COD Order!* (#${orderIdShort})\n\n📦 *Items:*\n${itemsDetail}\n\n💰 *Total Amount:* ₹${order.totalAmount.toFixed(2)}\n\nKripya dashboard mein order process karein.`;
-        await sendWhatsApp(sellerData.seller.phone, sellerMessage);
+        // --- DETAILED SELLER NOTIFICATIONS ---
+        const sellerPushMsg = `New Order #${orderIdShort} received for ₹${order.totalAmount.toFixed(2)}`;
+        const sellerWhatsAppMsg = `🎉 *New COD Order!* (#${orderIdShort})\n\n📦 *Items:*\n${itemsDetail}\n\n💰 *Amount to Collect:* ₹${order.totalAmount.toFixed(2)}\n\nKripya dashboard mein process karein.`;
+
+        await sendWhatsApp(sellerData.seller.phone, sellerWhatsAppMsg);
+        
+        if (sellerData.seller.fcmToken) {
+            await sendPushNotification(
+                [sellerData.seller.fcmToken], // ✅ Token in array
+                'New COD Order! 🛍️',
+                sellerPushMsg,
+                { orderId: order._id.toString(), type: 'NEW_ORDER' }
+            );
+        }
+
         await sendAndSavePersonalNotification(req.user._id, 'Order Placed! 🎉', `Order #${orderIdShort} placed.`, { orderId: order._id.toString(), type: 'ORDER_PLACED' });
 
+        // Auto-assign for delivery
         try {
             await DeliveryAssignment.create({ order: order._id, status: 'Pending', pincode: shippingAddress.pincode });
             const nearbyDeliveryBoys = await User.find({ role: 'delivery', approved: true, pincodes: shippingAddress.pincode }).select('fcmToken');
@@ -3110,7 +3118,7 @@ app.post('/api/orders', protect, async (req, res) => {
             if (deliveryTokens.length > 0) {
               await sendPushNotification(deliveryTokens, 'New Delivery Available! 🛵', `New order #${orderIdShort} in ${shippingAddress.pincode}.`, { orderId: order._id.toString(), type: 'NEW_DELIVERY_AVAILABLE' });
             }
-        } catch (e) { console.error(e.message); }
+        } catch (e) { console.error("Delivery Error:", e.message); }
       }
     }
 
@@ -6681,65 +6689,46 @@ app.post('/api/orders/buy-now-summary', protect, async (req, res) => {
 
 
 // ✅ NEW: Endpoint to place an order for a single "Buy Now" item
+// ✅ FULL UPDATED: Buy Now logic with Notifications, Commission, and Stock logic
 app.post('/api/orders/buy-now', protect, async (req, res) => {
-    // 1. Change the input from productId to variantId
-    const { variantId, qty = 1, shippingAddressId, paymentMethod, couponCode } = req.body;
+    const { productId, variantId, qty = 1, shippingAddressId, paymentMethod, couponCode } = req.body;
 
-    // We'll use a transaction for atomicity, which is crucial for stock management
     const session = await mongoose.startSession();
     session.startTransaction();
 
     try {
-        // 2. Lookup the Variant and populate its parent Product and Seller
-        const variant = await Variant.findById(variantId)
-            .populate('product') // Populate the parent product
-            .session(session); // Use session for consistent reads
-
-        if (!variant || !variant.product) {
-            await session.abortTransaction();
-            return res.status(404).json({ message: 'Product variant not found.' });
-        }
-
-        // Assign to product/seller for cleaner code, consistent with original logic
-        const product = variant.product;
-        // Since we need seller info (pincodes), we need another lookup or to populate deeper
-        const seller = await User.findById(product.seller).select('pincodes name phone fcmToken').session(session);
-
+        // 1. Fetch Product and Shipping Address
+        const product = await Product.findById(productId).populate('seller').session(session);
         const shippingAddress = await Address.findById(shippingAddressId).session(session);
 
-        // Validations
-        if (!shippingAddress) {
-            await session.abortTransaction();
-            return res.status(404).json({ message: 'Shipping address not found.' });
-        }
+        if (!product) throw new Error('Product not found');
+        if (!shippingAddress) throw new Error('Shipping address not found');
+
+        // 2. Find the specific variant from the array
+        const variant = product.variants.id(variantId);
+        if (!variant) throw new Error('Selected variant not found');
+
+        // 3. Validations
+        if (variant.stock < qty) throw new Error(`Insufficient stock for ${product.name}`);
         
-        // Stock check now uses variant.stock
-        if (variant.stock < qty) {
-            await session.abortTransaction();
-            return res.status(400).json({ message: `Insufficient stock for ${product.name} (Variant: ${variant.color}, ${variant.size})` });
+        if (!product.seller.pincodes.includes(shippingAddress.pincode)) {
+            throw new Error(`Delivery not available for your location.`);
         }
-        
-        // Pincode check uses the fetched seller object
-        if (!seller.pincodes.includes(shippingAddress.pincode)) {
-             await session.abortTransaction();
-             return res.status(400).json({ message: `Delivery not available for ${product.name} at your location.` });
-        }
-        
-        // Calculations now use variant.price
+
+        // 4. Calculations
         const itemsTotal = variant.price * qty;
+        const appSettings = await AppSettings.findOne({ singleton: true }).session(session);
+        const deliveryFee = calculateShippingFee(shippingAddress.pincode);
+        const GST_RATE_VAL = (typeof GST_RATE !== 'undefined') ? GST_RATE : 0;
+        const taxAmount = itemsTotal * GST_RATE_VAL;
+        
         let discountAmount = 0;
-        const shippingFee = calculateShippingFee(shippingAddress.pincode);
-        const taxAmount = itemsTotal * GST_RATE;
+        // (Coupon logic yahan add karein agar zaroorat ho)
 
-        // ... (Coupon Logic remains here)
-        
-        let finalAmountForPayment = Math.max(0, itemsTotal + shippingFee + taxAmount - discountAmount);
-        
-        let effectivePaymentMethod = paymentMethod;
-        if (paymentMethod === 'razorpay' && finalAmountForPayment <= 0) {
-            effectivePaymentMethod = 'cod';
-        }
+        const finalAmountForPayment = Math.max(0, itemsTotal + deliveryFee + taxAmount - discountAmount);
+        const effectivePaymentMethod = (paymentMethod === 'razorpay' && finalAmountForPayment <= 0) ? 'cod' : paymentMethod;
 
+        // 5. Razorpay Integration
         let razorpayOrder = null;
         if (effectivePaymentMethod === 'razorpay') {
             razorpayOrder = await razorpay.orders.create({
@@ -6748,77 +6737,110 @@ app.post('/api/orders/buy-now', protect, async (req, res) => {
                 receipt: `rcpt_buynow_${crypto.randomBytes(4).toString('hex')}`,
             });
         }
-        
+
         const isCodOrFree = effectivePaymentMethod === 'cod' || finalAmountForPayment === 0;
 
+        // 6. Commission Deduction from Seller Wallet
+        const COMMISSION_RATE = appSettings ? appSettings.platformCommissionRate : 0.05;
+        const commissionAmount = parseFloat((itemsTotal * COMMISSION_RATE).toFixed(2));
+        const sellerUser = await User.findById(product.seller._id).session(session);
+        
+        const balanceBefore = sellerUser.walletBalance;
+        sellerUser.walletBalance -= commissionAmount;
+        await sellerUser.save({ session });
+
+        // 7. Create Order
         const order = new Order({
             user: req.user._id,
-            seller: seller._id, // Use the fetched seller
+            seller: product.seller._id,
             orderItems: [{
                 product: product._id,
                 name: product.name,
                 qty: qty,
-                price: variant.price, // Use variant's price
-                originalPrice: product.originalPrice,
-                category: product.category,
-                // 4. SAVE COLOR AND SIZE ATTRIBUTES HERE!
-                variantId: variant._id, 
-                color: variant.color,
-                size: variant.size,
-                // Assuming variant has a 'sku' field
-                sku: variant.sku, 
+                price: variant.price,
+                originalPrice: variant.originalPrice || product.originalPrice,
+                selectedColor: variant.color,
+                selectedSize: variant.size,
+                isPrintJob: false
             }],
             shippingAddress: `${shippingAddress.street}, ${shippingAddress.city}, ${shippingAddress.state} - ${shippingAddress.pincode}`,
             pincode: shippingAddress.pincode,
             paymentMethod: effectivePaymentMethod,
             totalAmount: itemsTotal,
             taxAmount,
-            couponApplied: couponCode,
             discountAmount,
-            shippingFee,
+            shippingFee: deliveryFee,
             paymentId: razorpayOrder ? razorpayOrder.id : (isCodOrFree ? `cod_${crypto.randomBytes(8).toString('hex')}` : undefined),
             paymentStatus: isCodOrFree ? 'completed' : 'pending',
             deliveryStatus: isCodOrFree ? 'Pending' : 'Payment Pending',
             history: [{ status: isCodOrFree ? 'Pending' : 'Payment Pending' }]
         });
         
-        await order.save({ session }); // Save the order within the transaction
+        await order.save({ session });
 
+        // 8. Log Wallet Transaction
+        await WalletTransaction.create([{
+            seller: product.seller._id,
+            orderId: order._id,
+            type: 'Debit',
+            amount: commissionAmount,
+            balanceBefore,
+            balanceAfter: sellerUser.walletBalance,
+            description: `Platform Commission (Buy Now #${order._id.toString().slice(-6)})`
+        }], { session });
+
+        // 9. Handle COD: Stock & Notifications
         if (isCodOrFree) {
-            // 3. Atomically decrement stock on the Variant model
-            const updatedVariant = await Variant.findOneAndUpdate(
-                { _id: variant._id, stock: { $gte: qty } },
-                { $inc: { stock: -qty } },
-                { new: true, session }
-            );
+            // Decrement Variant Stock
+            variant.stock -= qty;
+            await product.save({ session });
+
+            // Notification to Seller
+            const orderIdShort = order._id.toString().slice(-6);
+            const sellerMessage = `🎉 *New Buy Now Order!* (#${orderIdShort})\n\n📦 *Item:* ${product.name} (${variant.color || ''} ${variant.size || ''})\n🔢 *Qty:* ${qty}\n💰 *Collect:* ₹${order.totalAmount.toFixed(2)}`;
             
-            if (!updatedVariant) {
-                await session.abortTransaction();
-                return res.status(409).json({ message: `Concurrency error: Insufficient stock for ${product.name}. Please try again.` });
+            await sendWhatsApp(sellerUser.phone, sellerMessage);
+            if (sellerUser.fcmToken) {
+                await sendPushNotification(
+                    [sellerUser.fcmToken],
+                    'New Order Received! 🛍️',
+                    `Buy Now: ₹${order.totalAmount.toFixed(2)}`,
+                    { orderId: order._id.toString(), type: 'NEW_ORDER' }
+                );
             }
-            // Send notifications, etc.
+
+            // Create Delivery Assignment
+            await DeliveryAssignment.create([{
+                order: order._id,
+                status: 'Pending',
+                pincode: shippingAddress.pincode
+            }], { session });
+
+            // Notify Delivery Boys
+            const nearbyDeliveryBoys = await User.find({ role: 'delivery', approved: true, pincodes: shippingAddress.pincode }).select('fcmToken');
+            const deliveryTokens = nearbyDeliveryBoys.map(db => db.fcmToken).filter(Boolean);
+            if (deliveryTokens.length > 0) {
+              await sendPushNotification(deliveryTokens, 'New Delivery Available! 🛵', `New order in ${shippingAddress.pincode}.`, { orderId: order._id.toString(), type: 'NEW_DELIVERY_AVAILABLE' });
+            }
         }
 
-        await session.commitTransaction(); // Commit all changes if successful
+        await session.commitTransaction();
         session.endSession();
 
         res.status(201).json({
-            message: effectivePaymentMethod === 'razorpay' ? 'Order initiated, awaiting payment.' : 'Order created successfully.',
+            message: effectivePaymentMethod === 'razorpay' ? 'Order initiated.' : 'Order placed successfully.',
             orders: [order._id],
             razorpayOrder: razorpayOrder ? { id: razorpayOrder.id, amount: razorpayOrder.amount, key_id: process.env.RAZORPAY_KEY_ID } : undefined,
+            grandTotal: finalAmountForPayment
         });
 
     } catch (err) {
-        if (session.inTransaction()) {
-            await session.abortTransaction(); // Rollback on error
-        }
+        await session.abortTransaction();
         session.endSession();
-        res.status(500).json({ message: 'Error placing Buy Now order', error: err.message });
+        console.error("Buy Now Error:", err.message);
+        res.status(500).json({ message: err.message });
     }
 });
-
-// [NEW] API Endpoint for a customer to initiate a return request
-// server.js
 
 // [NEW] API Endpoint for a customer to initiate a return request
 app.post('/api/orders/:id/return-request', protect, async (req, res) => {
@@ -9171,12 +9193,12 @@ app.put('/api/admin/print/settle-payout/:jobId', protect, authorizeRole('admin')
 
 // ✅ NEW ROUTE: Submit Print Job (Matches Flutter App)
 // ✅ NEW ROUTE: Submit Print Job (Fixed & Cleaned)
+// ✅ FULL UPDATED ROUTE: Submit Print Job (With Robust Seller Notifications)
 app.post('/api/print/jobs', protect, uploadPrint.single('document'), async (req, res) => {
   try {
-    console.log("📥 Print Job Request Body:", req.body); // Debug log
+    console.log("📥 Print Job Request Body:", req.body); 
 
     // 1. Extract Data (Robust check for sellerId)
-    // Sometimes Flutter sends 'seller', sometimes 'sellerId'. We check both.
     const sellerId = req.body.sellerId || req.body.seller; 
     const { copies, printType, sideType, paperSize, instructions } = req.body;
 
@@ -9186,21 +9208,18 @@ app.post('/api/print/jobs', protect, uploadPrint.single('document'), async (req,
     }
     
     if (!sellerId) {
-      console.error("❌ FAILURE: Seller ID is missing. Frontend sent:", req.body);
-      return res.status(400).json({ message: "Seller ID is required. Check Flutter request keys." });
+      console.error("❌ FAILURE: Seller ID is missing.");
+      return res.status(400).json({ message: "Seller ID is required." });
     }
 
     // 3. Fetch App Settings for Pricing
     const settings = await AppSettings.findOne({ singleton: true });
-    
-    // Default rates if settings missing
     const bwRate = settings?.printConfig?.bwRatePerPage || 2;
     const colorRate = settings?.printConfig?.colorRatePerPage || 10;
     const adminCommissionRate = settings?.printConfig?.adminPrintCommission || 0.10;
 
     // 4. Calculate Cost
     const numCopies = parseInt(copies) || 1;
-    // Handle case sensitivity for 'Color' vs 'color'
     const isColor = printType && printType.toLowerCase() === 'color';
     const rate = isColor ? colorRate : bwRate;
     
@@ -9211,7 +9230,7 @@ app.post('/api/print/jobs', protect, uploadPrint.single('document'), async (req,
     // 5. Create Job in DB
     const newJob = await PrintJob.create({
       user: req.user._id,
-      seller: sellerId, // valid sellerId from step 1
+      seller: sellerId,
       originalName: req.file.originalname,
       fileUrl: req.file.path,
       publicId: req.file.filename,
@@ -9223,20 +9242,38 @@ app.post('/api/print/jobs', protect, uploadPrint.single('document'), async (req,
       printCost: totalCost,
       sellerEarnings: sellerShare,
       status: 'Pending',
-      paymentStatus: 'pending' // Usually pending until paid
+      paymentStatus: 'pending'
     });
 
     console.log("✅ Print Job Created Successfully:", newJob._id);
 
-    // 6. Notify Seller
-    const sellerUser = await User.findById(sellerId).select('fcmToken');
-    if (sellerUser && sellerUser.fcmToken) {
-        await sendPushNotification(
-            [sellerUser.fcmToken], 
-            'New Print Job! 🖨️', 
-            `New document received for printing. Earn ₹${sellerShare.toFixed(2)}`, 
-            { type: 'NEW_PRINT_JOB' }
-        );
+    // 6. ✅ DETAILED NOTIFICATION LOGIC (Updated for WhatsApp & Push)
+    // Hum seller ka 'phone' aur 'fcmToken' dono fetch karenge
+    const sellerUser = await User.findById(sellerId).select('phone fcmToken name');
+    
+    if (sellerUser) {
+        const sellerPushMsg = `New Print Job! 🖨️ Earn ₹${sellerShare.toFixed(2)}`;
+        const sellerWhatsAppMsg = `🖨️ *New Print Request!*\n\n` +
+                                  `📄 File: ${req.file.originalname}\n` +
+                                  `🔢 Copies: ${numCopies}\n` +
+                                  `🎨 Type: ${printType.toUpperCase()}\n` +
+                                  `💰 Earnings: ₹${sellerShare.toFixed(2)}\n\n` +
+                                  `Check dashboard to process.`;
+
+        // A. Send WhatsApp
+        if (sellerUser.phone) {
+            await sendWhatsApp(sellerUser.phone, sellerWhatsAppMsg);
+        }
+
+        // B. Send Push Notification (Ensure token is in array)
+        if (sellerUser.fcmToken) {
+            await sendPushNotification(
+                [sellerUser.fcmToken], 
+                'New Print Job! 🖨️', 
+                sellerPushMsg, 
+                { jobId: newJob._id.toString(), type: 'NEW_PRINT_JOB' }
+            );
+        }
     }
 
     // 7. Send Response
