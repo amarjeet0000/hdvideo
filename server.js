@@ -460,6 +460,25 @@ const complaintSchema = new mongoose.Schema({
 
 const Complaint = mongoose.model('Complaint', complaintSchema);
 
+// ==========================================
+// 📚 PRINT LIBRARY SCHEMA (Ready-to-Print Files)
+// ==========================================
+const printLibrarySchema = new mongoose.Schema({
+    seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    title: { type: String, required: true }, // e.g. "Class 10 Math Notes"
+    description: String,
+    category: { type: String, default: 'General' }, // e.g. "Education", "Forms"
+    
+    fileUrl: { type: String, required: true }, // Cloudinary Link
+    publicId: String,
+    
+    totalPages: { type: Number, required: true }, // Page Count (Auto or Manual)
+    pricePerCopy: { type: Number, default: 0 }, // Optional: Extra fee for content
+    
+    isActive: { type: Boolean, default: true }
+}, { timestamps: true });
+
+const PrintLibrary = mongoose.model('PrintLibrary', printLibrarySchema);
 
 
 
@@ -9637,6 +9656,75 @@ app.get('/api/print/download-proxy', (req, res) => {
 
     fetchFile(url);
 });
+
+// ==========================================
+// 📚 PRINT LIBRARY ROUTES
+// ==========================================
+
+// 1. [SELLER] Upload a File to Library
+app.post('/api/seller/print-library', protect, authorizeRole('seller', 'admin'), uploadPrint.single('file'), async (req, res) => {
+    try {
+        const { title, description, category, totalPages, pricePerCopy } = req.body;
+        
+        if (!req.file) return res.status(400).json({ message: "PDF file is required" });
+
+        const newFile = await PrintLibrary.create({
+            seller: req.user._id,
+            title,
+            description,
+            category,
+            totalPages: Number(totalPages) || 1,
+            pricePerCopy: Number(pricePerCopy) || 0,
+            fileUrl: req.file.path,
+            publicId: req.file.filename
+        });
+
+        res.status(201).json({ message: "File added to library", file: newFile });
+    } catch (err) {
+        res.status(500).json({ message: "Error uploading file", error: err.message });
+    }
+});
+
+// 2. [SELLER] Get My Library Files
+app.get('/api/seller/print-library', protect, authorizeRole('seller', 'admin'), async (req, res) => {
+    try {
+        const files = await PrintLibrary.find({ seller: req.user._id }).sort({ createdAt: -1 });
+        res.json(files);
+    } catch (err) {
+        res.status(500).json({ message: "Error fetching library" });
+    }
+});
+
+// 3. [SELLER] Delete File
+app.delete('/api/seller/print-library/:id', protect, authorizeRole('seller', 'admin'), async (req, res) => {
+    try {
+        const file = await PrintLibrary.findOne({ _id: req.params.id, seller: req.user._id });
+        if (!file) return res.status(404).json({ message: "File not found" });
+
+        if (file.publicId) await cloudinary.uploader.destroy(file.publicId);
+        await file.deleteOne();
+        
+        res.json({ message: "File deleted" });
+    } catch (err) {
+        res.status(500).json({ message: "Error deleting file" });
+    }
+});
+
+// 4. [USER] Get Library Files of a Specific Seller (For App)
+app.get('/api/print/library/:sellerId', async (req, res) => {
+    try {
+        const files = await PrintLibrary.find({ 
+            seller: req.params.sellerId, 
+            isActive: true 
+        }).select('-publicId'); // Hide internal ID
+        
+        res.json(files);
+    } catch (err) {
+        res.status(500).json({ message: "Error fetching seller library" });
+    }
+});
+
+
 
 const IP = '0.0.0.0';
 const PORT = process.env.PORT || 5001;
