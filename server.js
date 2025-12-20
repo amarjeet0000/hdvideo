@@ -2885,6 +2885,12 @@ app.post('/api/orders/calculate-summary', protect, async (req, res) => {
 // 📦 CREATE ORDER ENDPOINT (Full Logic)
 // ============================================================
 
+// ============================================================
+// 📦 CREATE ORDER ENDPOINT (Full Integrated Logic)
+// ============================================================
+// ============================================================
+// 📦 CREATE ORDER ENDPOINT (Full Integrated Logic)
+// ============================================================
 app.post('/api/orders', protect, async (req, res) => {
   try {
     const { shippingAddressId, paymentMethod, couponCode } = req.body;
@@ -2892,7 +2898,7 @@ app.post('/api/orders', protect, async (req, res) => {
     // 1. Fetch Cart with nested Seller and Product details
     const cart = await Cart.findOne({ user: req.user._id }).populate({
       path: 'items.product',
-      select: 'name price originalPrice variants category seller lowStockThreshold stock', 
+      select: 'name price originalPrice variants category seller lowStockThreshold stock unit', 
       populate: {
         path: 'seller',
         select: 'pincodes name phone fcmToken walletBalance location' 
@@ -2991,6 +2997,7 @@ app.post('/api/orders', protect, async (req, res) => {
         category: product.category,
         selectedColor: item.selectedColor,
         selectedSize: item.selectedSize,
+        unit: product.unit || 'pcs',
         isPrintJob: false 
       });
 
@@ -2998,7 +3005,7 @@ app.post('/api/orders', protect, async (req, res) => {
       calculatedTotalCartAmount += itemPrice * item.qty;
     }
     
-    // 5. Calculate Shipping and Coupons
+    // 5. Calculate Totals and Shipping
     const deliveryConfig = appSettings ? appSettings.deliveryConfig : {}; 
     let totalShippingFee = 0;
     for (const [sellerId, sellerData] of ordersBySeller.entries()) {
@@ -3010,8 +3017,10 @@ app.post('/api/orders', protect, async (req, res) => {
     }
 
     const totalCartAmount = calculatedTotalCartAmount; 
-    const totalTaxAmount = totalCartAmount * (typeof GST_RATE !== 'undefined' ? GST_RATE : 0);
+    const GST_RATE_VAL = (typeof GST_RATE !== 'undefined') ? GST_RATE : 0;
+    const totalTaxAmount = totalCartAmount * GST_RATE_VAL;
     
+    // 6. Apply Coupon
     let discountAmount = 0;
     if (couponCode) {
       const coupon = await Coupon.findOne({ code: couponCode, isActive: true, expiryDate: { $gt: new Date() }, minPurchaseAmount: { $lte: totalCartAmount } });
@@ -3025,7 +3034,7 @@ app.post('/api/orders', protect, async (req, res) => {
     const finalAmountForPayment = Math.max(0, totalCartAmount + totalShippingFee + totalTaxAmount - discountAmount);
     const effectivePaymentMethod = (paymentMethod === 'razorpay' && finalAmountForPayment <= 0) ? 'cod' : paymentMethod;
 
-    // 6. Razorpay Order Initiation
+    // 7. Razorpay Order Initiation
     let razorpayOrder = null;
     if (effectivePaymentMethod === 'razorpay') {
       razorpayOrder = await razorpay.orders.create({
@@ -3038,7 +3047,7 @@ app.post('/api/orders', protect, async (req, res) => {
     const fullAddress = `${shippingAddress.street}, ${shippingAddress.city}, ${shippingAddress.state} - ${shippingAddress.pincode}`;
     const createdOrders = [];
 
-    // 7. Create Orders, Notify Sellers, and Deduct Commission
+    // 8. Create Seller Sub-Orders & Commission Logic
     for (const [sellerId, sellerData] of ordersBySeller.entries()) {
       const proportion = totalCartAmount > 0 ? sellerData.totalAmount / totalCartAmount : 0; 
       const sellerDiscount = discountAmount * proportion;
@@ -3072,19 +3081,23 @@ app.post('/api/orders', protect, async (req, res) => {
       await order.save();
       createdOrders.push(order);
 
-      // Log Commission
+      // Wallet log
       await WalletTransaction.create({
           seller: sellerId, orderId: order._id, type: 'Debit', amount: commissionAmount,
           balanceBefore, balanceAfter: sellerUser.walletBalance,
           description: `Platform Commission (Order #${order._id.toString().slice(-6)})`
       });
 
-      // 8. Handle Post-Order Logic for COD
+      // 9. Handle Post-Order Logic for COD (Stock & Notifications)
       if (isCodOrFree) {
         const orderIdShort = order._id.toString().slice(-6);
-        const itemsDetail = sellerData.orderItems.map(i => `- ${i.name} (Qty: ${i.qty})`).join('\n');
+        
+        // Detailed Item List (Name | Rate/Unit | Qty)
+        const itemsDetail = sellerData.orderItems.map(i => 
+            `- ${i.name} | ₹${i.price}/${i.unit || 'pcs'} (Qty: ${i.qty})`
+        ).join('\n');
 
-        // Stock Update (Variant-Aware)
+        // Variant-Aware Stock Update
         for(const item of sellerData.orderItems) {
             if (item.isPrintJob) continue;
             await Product.findOneAndUpdate(
@@ -3093,24 +3106,29 @@ app.post('/api/orders', protect, async (req, res) => {
             );
         }
 
-        // --- DETAILED SELLER NOTIFICATIONS ---
-        const sellerPushMsg = `New Order #${orderIdShort} received for ₹${order.totalAmount.toFixed(2)}`;
-        const sellerWhatsAppMsg = `🎉 *New COD Order!* (#${orderIdShort})\n\n📦 *Items:*\n${itemsDetail}\n\n💰 *Amount to Collect:* ₹${order.totalAmount.toFixed(2)}\n\nKripya dashboard mein process karein.`;
+        // --- SELLER NOTIFICATIONS (With Customer Details) ---
+        const sellerPushMsg = `New Order #${orderIdShort} from ${req.user.name}: ₹${order.totalAmount.toFixed(2)}`;
+        const sellerWhatsAppMsg = `📦 *New COD Order!* (#${orderIdShort})\n\n` +
+                                  `👤 *Customer:* ${req.user.name}\n` +
+                                  `📞 *Contact:* ${req.user.phone}\n\n` +
+                                  `🛍️ *Items:*\n${itemsDetail}\n\n` +
+                                  `💵 *Collect Amount:* ₹${order.totalAmount.toFixed(2)}\n\n` +
+                                  `📍 *Address:* ${fullAddress}`;
 
         await sendWhatsApp(sellerData.seller.phone, sellerWhatsAppMsg);
         
         if (sellerData.seller.fcmToken) {
             await sendPushNotification(
-                [sellerData.seller.fcmToken], // ✅ Token in array
-                'New COD Order! 🛍️',
+                [sellerData.seller.fcmToken],
+                'New COD Order! 🚚',
                 sellerPushMsg,
                 { orderId: order._id.toString(), type: 'NEW_ORDER' }
             );
         }
 
-        await sendAndSavePersonalNotification(req.user._id, 'Order Placed! 🎉', `Order #${orderIdShort} placed.`, { orderId: order._id.toString(), type: 'ORDER_PLACED' });
+        await sendAndSavePersonalNotification(req.user._id, 'Order Placed! 🎉', `Order #${orderIdShort} placed successfully.`, { orderId: order._id.toString(), type: 'ORDER_PLACED' });
 
-        // Auto-assign for delivery
+        // Delivery Assignment
         try {
             await DeliveryAssignment.create({ order: order._id, status: 'Pending', pincode: shippingAddress.pincode });
             const nearbyDeliveryBoys = await User.find({ role: 'delivery', approved: true, pincodes: shippingAddress.pincode }).select('fcmToken');
@@ -3118,7 +3136,7 @@ app.post('/api/orders', protect, async (req, res) => {
             if (deliveryTokens.length > 0) {
               await sendPushNotification(deliveryTokens, 'New Delivery Available! 🛵', `New order #${orderIdShort} in ${shippingAddress.pincode}.`, { orderId: order._id.toString(), type: 'NEW_DELIVERY_AVAILABLE' });
             }
-        } catch (e) { console.error("Delivery Error:", e.message); }
+        } catch (e) { console.error("Delivery Assignment Error:", e.message); }
       }
     }
 
@@ -3488,11 +3506,11 @@ app.put('/api/orders/:id/submit-upi', protect, async (req, res) => {
  * @param {string} order_id - The Razorpay Order ID.
  * @param {string} payment_id - The Razorpay Payment ID.
  */
-// ✅ FULL UPDATED FUNCTION: Payment Success + Detailed Seller Notifications
+// ✅ FINAL UPDATED: handleSuccessfulPayment (With populate and unit details)
 async function handleSuccessfulPayment(order_id, payment_id) {
     console.log(`Handling successful payment for Razorpay Order ID: ${order_id}`);
     
-    // 1. Un sabhi orders ko dhundein jo is payment ID se jude hain
+    // Sabhi pending orders fetch karein (Populate orderItems for better details)
     const orders = await Order.find({ paymentId: order_id, paymentStatus: 'pending' });
 
     if (!orders || orders.length === 0) {
@@ -3503,6 +3521,9 @@ async function handleSuccessfulPayment(order_id, payment_id) {
     const paymentHistoryEntries = [];
     let customerId = orders[0].user;
     
+    // Customer details pehle hi fetch kar lein seller notification mein naam dikhane ke liye
+    const customerInfo = await User.findById(customerId).select('name phone fcmToken');
+
     for (const order of orders) {
         // --- STEP 1: Update Order Status ---
         order.paymentStatus = 'completed';
@@ -3515,27 +3536,29 @@ async function handleSuccessfulPayment(order_id, payment_id) {
         await order.save();
 
         // --- STEP 2: Detailed Seller Notification ---
-        // Items ki list taiyaar karein
+        // Items detail with Rate and Unit (agar available ho)
         const itemsDetail = order.orderItems.map(item => 
-            `- ${item.name} (Qty: ${item.qty})`
+            `- ${item.name} | ₹${item.price}/${item.unit || 'pcs'} (Qty: ${item.qty})`
         ).join('\n');
 
         const seller = await User.findById(order.seller).select('phone fcmToken name');
         
         const sellerMessage = `🎉 *New Paid Order!* (#${order._id.toString().slice(-6)})\n\n` +
+                              `👤 *Customer:* ${customerInfo?.name || 'Customer'}\n` +
+                              `📞 *Contact:* ${customerInfo?.phone || 'N/A'}\n\n` +
                               `📦 *Items:*\n${itemsDetail}\n\n` +
                               `💰 *Total Amount:* ₹${order.totalAmount.toFixed(2)}\n` +
                               `📍 *Pincode:* ${order.pincode}\n\n` +
                               `Kripya dashboard mein order process karein.`;
 
-        // Notification bhejein
+        // Notification to Seller
         if (seller) {
             await sendWhatsApp(seller.phone, sellerMessage);
             if (seller.fcmToken) {
                 await sendPushNotification(
                     [seller.fcmToken],
                     'New Paid Order! 🛍️',
-                    `Order #${order._id.toString().slice(-6)}: ₹${order.totalAmount.toFixed(2)}`,
+                    `Order from ${customerInfo?.name || 'User'} for ₹${order.totalAmount.toFixed(2)}`,
                     { orderId: order._id.toString(), type: 'NEW_ORDER' }
                 );
             }
@@ -3543,6 +3566,8 @@ async function handleSuccessfulPayment(order_id, payment_id) {
 
         // --- STEP 3: Deduct Stock (Variant Aware) ---
         for (const item of order.orderItems) {
+            if (item.isPrintJob) continue; // Print jobs ka stock nahi hota
+
             const productDoc = await Product.findById(item.product);
 
             if (productDoc && productDoc.variants && productDoc.variants.length > 0) {
@@ -3574,7 +3599,7 @@ async function handleSuccessfulPayment(order_id, payment_id) {
                 history: [{ status: 'Pending' }]
             });
 
-            // Delivery boys ko notify karein
+            // Nearby Delivery Boys Notification
             const nearbyDeliveryBoys = await User.find({ 
                 role: 'delivery', 
                 approved: true, 
@@ -3587,17 +3612,17 @@ async function handleSuccessfulPayment(order_id, payment_id) {
                 await sendPushNotification(
                     deliveryTokens,
                     'New Delivery Available! 🛵',
-                    `New paid order (#${order._id.toString().slice(-6)}) in ${orderPincode}.`,
+                    `New paid order in ${orderPincode}. Open app to accept.`,
                     { orderId: order._id.toString(), type: 'NEW_DELIVERY_AVAILABLE' }
                 );
             }
         } catch (deliveryErr) {
-            console.error('Delivery Assignment Error:', deliveryErr.message);
+            console.error('Delivery Error:', deliveryErr.message);
         }
 
-        // --- STEP 5: Add to Payment History ---
+        // --- STEP 5: Payment History ---
         paymentHistoryEntries.push({
-            user: order.user,
+            user: customerId,
             order: order._id,
             razorpayOrderId: order_id,
             razorpayPaymentId: payment_id,
@@ -3606,21 +3631,25 @@ async function handleSuccessfulPayment(order_id, payment_id) {
         });
     }
     
-    // Sabhi payment entries ek sath save karein
     await PaymentHistory.insertMany(paymentHistoryEntries);
     
     // --- STEP 6: Clear Cart ---
     await Cart.deleteOne({ user: customerId });
     
-    // --- STEP 7: Customer Confirmation ---
-    const customerInfo = await User.findById(customerId).select('name phone fcmToken');
+    // --- STEP 7: Final Customer Confirmation ---
     if (customerInfo) {
         const customerMsg = `✅ Your payment has been confirmed and your order is being processed! Thank you, ${customerInfo.name}!`;
         await sendWhatsApp(customerInfo.phone, customerMsg);
-        await sendPushNotification(customerInfo.fcmToken, 'Payment Confirmed! ✅', `Your order is now being processed!`);
+        if (customerInfo.fcmToken) {
+            await sendPushNotification(
+                [customerInfo.fcmToken], 
+                'Payment Confirmed! ✅', 
+                `Your order #${orders[0]._id.toString().slice(-6)} is being processed!`,
+                { type: 'ORDER_UPDATE' }
+            );
+        }
     }
 }
-
 /**
  * Handles all logic for a failed payment.
  * @param {string} order_id - The Razorpay Order ID.
@@ -6690,6 +6719,7 @@ app.post('/api/orders/buy-now-summary', protect, async (req, res) => {
 
 // ✅ NEW: Endpoint to place an order for a single "Buy Now" item
 // ✅ FULL UPDATED: Buy Now logic with Notifications, Commission, and Stock logic
+// ✅ FULL UPDATED: Buy Now logic with detailed Notifications and Commission
 app.post('/api/orders/buy-now', protect, async (req, res) => {
     const { productId, variantId, qty = 1, shippingAddressId, paymentMethod, couponCode } = req.body;
 
@@ -6704,43 +6734,41 @@ app.post('/api/orders/buy-now', protect, async (req, res) => {
         if (!product) throw new Error('Product not found');
         if (!shippingAddress) throw new Error('Shipping address not found');
 
-        // 2. Find the specific variant from the array
+        // 2. Find specific variant from nested array
         const variant = product.variants.id(variantId);
         if (!variant) throw new Error('Selected variant not found');
 
-        // 3. Validations
+        // 3. Stock & Pincode Validations
         if (variant.stock < qty) throw new Error(`Insufficient stock for ${product.name}`);
-        
         if (!product.seller.pincodes.includes(shippingAddress.pincode)) {
-            throw new Error(`Delivery not available for your location.`);
+            throw new Error(`Delivery not available at your location (${shippingAddress.pincode}).`);
         }
 
-        // 4. Calculations
+        // 4. Pricing & App Settings
         const itemsTotal = variant.price * qty;
         const appSettings = await AppSettings.findOne({ singleton: true }).session(session);
         const deliveryFee = calculateShippingFee(shippingAddress.pincode);
         const GST_RATE_VAL = (typeof GST_RATE !== 'undefined') ? GST_RATE : 0;
         const taxAmount = itemsTotal * GST_RATE_VAL;
         
-        let discountAmount = 0;
-        // (Coupon logic yahan add karein agar zaroorat ho)
+        let discountAmount = 0; // Coupon logic yahan merge karein
 
         const finalAmountForPayment = Math.max(0, itemsTotal + deliveryFee + taxAmount - discountAmount);
         const effectivePaymentMethod = (paymentMethod === 'razorpay' && finalAmountForPayment <= 0) ? 'cod' : paymentMethod;
 
-        // 5. Razorpay Integration
+        // 5. Razorpay Initiation
         let razorpayOrder = null;
         if (effectivePaymentMethod === 'razorpay') {
             razorpayOrder = await razorpay.orders.create({
                 amount: Math.round(finalAmountForPayment * 100),
                 currency: 'INR',
-                receipt: `rcpt_buynow_${crypto.randomBytes(4).toString('hex')}`,
+                receipt: `rcpt_bn_${crypto.randomBytes(4).toString('hex')}`,
             });
         }
 
         const isCodOrFree = effectivePaymentMethod === 'cod' || finalAmountForPayment === 0;
 
-        // 6. Commission Deduction from Seller Wallet
+        // 6. Platform Commission (Wallet Deduction)
         const COMMISSION_RATE = appSettings ? appSettings.platformCommissionRate : 0.05;
         const commissionAmount = parseFloat((itemsTotal * COMMISSION_RATE).toFixed(2));
         const sellerUser = await User.findById(product.seller._id).session(session);
@@ -6749,7 +6777,7 @@ app.post('/api/orders/buy-now', protect, async (req, res) => {
         sellerUser.walletBalance -= commissionAmount;
         await sellerUser.save({ session });
 
-        // 7. Create Order
+        // 7. Save Order Document
         const order = new Order({
             user: req.user._id,
             seller: product.seller._id,
@@ -6761,6 +6789,7 @@ app.post('/api/orders/buy-now', protect, async (req, res) => {
                 originalPrice: variant.originalPrice || product.originalPrice,
                 selectedColor: variant.color,
                 selectedSize: variant.size,
+                unit: product.unit || 'pcs', // Important for notification
                 isPrintJob: false
             }],
             shippingAddress: `${shippingAddress.street}, ${shippingAddress.city}, ${shippingAddress.state} - ${shippingAddress.pincode}`,
@@ -6775,10 +6804,9 @@ app.post('/api/orders/buy-now', protect, async (req, res) => {
             deliveryStatus: isCodOrFree ? 'Pending' : 'Payment Pending',
             history: [{ status: isCodOrFree ? 'Pending' : 'Payment Pending' }]
         });
-        
         await order.save({ session });
 
-        // 8. Log Wallet Transaction
+        // 8. Log Commission Transaction
         await WalletTransaction.create([{
             seller: product.seller._id,
             orderId: order._id,
@@ -6786,39 +6814,46 @@ app.post('/api/orders/buy-now', protect, async (req, res) => {
             amount: commissionAmount,
             balanceBefore,
             balanceAfter: sellerUser.walletBalance,
-            description: `Platform Commission (Buy Now #${order._id.toString().slice(-6)})`
+            description: `Commission for Buy Now #${order._id.toString().slice(-6)}`
         }], { session });
 
-        // 9. Handle COD: Stock & Notifications
+        // 9. Post-Order Logic (Stock, WhatsApp, FCM)
         if (isCodOrFree) {
-            // Decrement Variant Stock
+            // Decrement Stock
             variant.stock -= qty;
             await product.save({ session });
 
-            // Notification to Seller
             const orderIdShort = order._id.toString().slice(-6);
-            const sellerMessage = `🎉 *New Buy Now Order!* (#${orderIdShort})\n\n📦 *Item:* ${product.name} (${variant.color || ''} ${variant.size || ''})\n🔢 *Qty:* ${qty}\n💰 *Collect:* ₹${order.totalAmount.toFixed(2)}`;
             
-            await sendWhatsApp(sellerUser.phone, sellerMessage);
+            // --- DETAILED NOTIFICATION MESSAGE ---
+            const itemString = `${product.name} | ₹${variant.price}/${product.unit || 'pcs'} (Qty: ${qty})`;
+            const sellerPushMsg = `New Buy Now Order #${orderIdShort} for ₹${order.totalAmount.toFixed(2)}`;
+            // ✅ UPDATED: Detailed Notifications for Buy Now
+            const sellerWhatsAppMsg = `🎉 *New Buy Now Order!* (#${orderIdShort})\n\n` +
+                          `👤 *Customer:* ${req.user.name}\n` +
+                          `📞 *Contact:* ${req.user.phone}\n\n` +
+                          `📦 *Item:* ${product.name} | ₹${variant.price} (Qty: ${qty})\n` +
+                          `💰 *Collect:* ₹${order.totalAmount.toFixed(2)}`;
+
+             await sendWhatsApp(sellerUser.phone, sellerWhatsAppMsg);
+
+            // Push Notification to Seller
             if (sellerUser.fcmToken) {
                 await sendPushNotification(
                     [sellerUser.fcmToken],
                     'New Order Received! 🛍️',
-                    `Buy Now: ₹${order.totalAmount.toFixed(2)}`,
+                    sellerPushMsg,
                     { orderId: order._id.toString(), type: 'NEW_ORDER' }
                 );
             }
 
-            // Create Delivery Assignment
+            // Create Delivery Assignment & Notify Delivery Boys
             await DeliveryAssignment.create([{
-                order: order._id,
-                status: 'Pending',
-                pincode: shippingAddress.pincode
+                order: order._id, status: 'Pending', pincode: shippingAddress.pincode
             }], { session });
 
-            // Notify Delivery Boys
-            const nearbyDeliveryBoys = await User.find({ role: 'delivery', approved: true, pincodes: shippingAddress.pincode }).select('fcmToken');
-            const deliveryTokens = nearbyDeliveryBoys.map(db => db.fcmToken).filter(Boolean);
+            const deliveryBoys = await User.find({ role: 'delivery', approved: true, pincodes: shippingAddress.pincode }).select('fcmToken');
+            const deliveryTokens = deliveryBoys.map(db => db.fcmToken).filter(Boolean);
             if (deliveryTokens.length > 0) {
               await sendPushNotification(deliveryTokens, 'New Delivery Available! 🛵', `New order in ${shippingAddress.pincode}.`, { orderId: order._id.toString(), type: 'NEW_DELIVERY_AVAILABLE' });
             }
@@ -6835,9 +6870,8 @@ app.post('/api/orders/buy-now', protect, async (req, res) => {
         });
 
     } catch (err) {
-        await session.abortTransaction();
+        if (session.inTransaction()) await session.abortTransaction();
         session.endSession();
-        console.error("Buy Now Error:", err.message);
         res.status(500).json({ message: err.message });
     }
 });
