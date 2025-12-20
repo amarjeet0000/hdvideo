@@ -9575,19 +9575,49 @@ const https = require('https'); // यह Node.js में built-in होत�
 app.get('/api/print/download-proxy', (req, res) => {
     const { url, filename } = req.query;
 
-    if (!url) return res.status(400).send("Missing URL");
+    if (!url) {
+        return res.status(400).send("Missing URL");
+    }
 
-    // ब्राउज़र को बताएं कि यह एक डाउनलोड करने वाली फाइल है
-    res.setHeader('Content-Disposition', `attachment; filename="${filename || 'document.pdf'}"`);
-    
-    // फाइल को बाहरी URL से लाएं और सीधे यूजर को भेजें
-    https.get(url, (stream) => {
-        stream.pipe(res);
-    }).on('error', (err) => {
-        console.error("Download Proxy Error:", err);
-        res.status(500).send("Error downloading file");
-    });
+    const fetchFile = (fileUrl) => {
+        const client = fileUrl.startsWith('https') ? https : http;
+
+        client.get(fileUrl, (response) => {
+
+            if ([301, 302].includes(response.statusCode)) {
+                if (response.headers.location) {
+                    console.log("🔀 Redirect →", response.headers.location);
+                    return fetchFile(response.headers.location);
+                }
+            }
+
+            if (response.statusCode !== 200) {
+                console.error("❌ Upstream error:", response.statusCode);
+                if (!res.headersSent)
+                    return res.status(400).send("Unable to fetch document");
+                return;
+            }
+
+            res.setHeader("Content-Type", "application/pdf");
+            res.setHeader(
+                "Content-Disposition",
+                `inline; filename="${filename || 'document.pdf'}"`
+            );
+            res.setHeader("Accept-Ranges", "bytes");
+
+            response.pipe(res);
+
+        }).on('error', (err) => {
+            console.error("❌ Proxy Internal Error:", err);
+            if (!res.headersSent) {
+                res.status(500).send("Error downloading file");
+            }
+        });
+    };
+
+    fetchFile(url);
 });
+
 
 const IP = '0.0.0.0';
 const PORT = process.env.PORT || 5001;
