@@ -2856,17 +2856,23 @@ app.post('/api/orders/calculate-summary', protect, async (req, res) => {
     res.status(500).json({ message: 'Error calculating order summary', error: err.message });
   }
 });
+// ============================================================
+// 📦 CREATE ORDER ENDPOINT (Full Logic)
+// ============================================================
+// ============================================================
+// 📦 CREATE ORDER ENDPOINT (Full Logic)
+// ============================================================
 app.post('/api/orders', protect, async (req, res) => {
   try {
     const { shippingAddressId, paymentMethod, couponCode } = req.body;
 
-    // 1. Cart Fetch (Include Seller Location & Wallet Balance)
+    // 1. Fetch Cart (Include Seller Location & Wallet Balance)
     const cart = await Cart.findOne({ user: req.user._id }).populate({
       path: 'items.product',
-      select: 'name price originalPrice variants category seller lowStockThreshold stock', 
+      select: 'name price originalPrice variants category seller lowStockThreshold stock',
       populate: {
         path: 'seller',
-        select: 'pincodes name phone fcmToken walletBalance location' 
+        select: 'pincodes name phone fcmToken walletBalance location'
       }
     });
 
@@ -2874,26 +2880,37 @@ app.post('/api/orders', protect, async (req, res) => {
       return res.status(400).json({ message: 'Cart is empty' });
     }
 
+    // ============================================================
+    // 🚫 BLOCK COD FOR PRINT JOBS (VALIDATION CHECK)
+    // ============================================================
+    const hasPrintJob = cart.items.some(item => item.isPrintJob === true);
+    
+    // Check if cart has a print job AND user selected COD (or Razorpay COD fallback)
+    if (hasPrintJob && (paymentMethod === 'cod' || paymentMethod === 'razorpay_cod')) {
+        return res.status(400).json({ 
+            message: 'Cash on Delivery is not available for Print orders. Please pay online.' 
+        });
+    }
+    // ============================================================
+
     const shippingAddress = await Address.findById(shippingAddressId);
     if (!shippingAddress) return res.status(404).json({ message: 'Shipping address not found' });
 
     // --- Pre-order validation and grouping ---
     const ordersBySeller = new Map();
-    let calculatedTotalCartAmount = 0; 
+    let calculatedTotalCartAmount = 0;
 
     // ✅ Group Items by Seller
     for (const item of cart.items) {
       const product = item.product;
-      
+
+      // Handle Invalid Product
       if (!product || !product.seller) {
         return res.status(400).json({ message: `An item in your cart is invalid or its seller is inactive.` });
       }
 
       // ============================================================
       // 🖨️ SCENARIO 1: PRINT JOB LOGIC
-      // ============================================================
-     // ============================================================
-      // 🖨️ SCENARIO 1: PRINT JOB LOGIC (Updated & Safe)
       // ============================================================
       if (item.isPrintJob && item.printMeta) {
           const sellerId = product.seller._id.toString();
@@ -2921,7 +2938,6 @@ app.post('/api/orders', protect, async (req, res) => {
             price: jobCost, // Direct Cost calculated in Cart
             
             // ✅ IMPORTANT: Pass Print Meta to Order Schema
-            // This allows the Seller App to show the "Download PDF" button
             isPrintJob: true,
             printMeta: item.printMeta,
             
@@ -2930,7 +2946,7 @@ app.post('/api/orders', protect, async (req, res) => {
             selectedSize: null,
           });
 
-          // ✅ FIX: Use Number() to ensure correct math (50 + 50 = 100, not "5050")
+          // ✅ FIX: Use Number() to ensure correct math
           sellerOrder.totalAmount += jobCost;
           calculatedTotalCartAmount += jobCost;
           
