@@ -9574,23 +9574,24 @@ app.get('/api/admin/print-requests', protect, authorizeRole('admin'), async (req
 // ============================================================
 // 📥 PROXY DOWNLOAD ROUTE (Fixes PDF Download Issues)
 // ============================================================
-const https = require('https'); 
-const http = require('http'); // ✅ यह लाइन मिसिंग थी, इसे जरूर जोड़ें
+// ============================================================
+// 📥 PROXY DOWNLOAD ROUTE (Enhanced Debugging)
+// ============================================================
+const https = require('https');
+const http = require('http');
 
 app.get('/api/print/download-proxy', (req, res) => {
     const { url, filename } = req.query;
 
-    if (!url) {
-        return res.status(400).send("Missing URL");
-    }
+    if (!url) return res.status(400).send("Missing URL");
+
+    console.log(`📥 Fetching PDF Proxy: ${url}`); // ✅ Check Console Log
 
     const fetchFile = (fileUrl) => {
-        // 1. सही क्लाइंट चुनें (HTTP vs HTTPS)
         const client = fileUrl.startsWith('https') ? https : http;
 
         client.get(fileUrl, (response) => {
-
-            // 2. रिडायरेक्ट (Redirect) हैंडल करें
+            // 🔄 Redirect Handling
             if ([301, 302].includes(response.statusCode)) {
                 if (response.headers.location) {
                     console.log("🔀 Redirecting to:", response.headers.location);
@@ -9598,29 +9599,23 @@ app.get('/api/print/download-proxy', (req, res) => {
                 }
             }
 
-            // 3. अगर फाइल नहीं मिली (Error Handling)
+            // ❌ Error Handling (Main Issue Source)
             if (response.statusCode !== 200) {
-                console.error("❌ Upstream Error:", response.statusCode);
-                if (!res.headersSent)
-                    return res.status(400).send("Unable to fetch document from source.");
+                console.error(`❌ FAILED: ${response.statusCode} - ${fileUrl}`); // ✅ यह बताएगा कि क्यों फेल हुआ
+                if (!res.headersSent) {
+                    return res.status(400).send(`Error: Source returned ${response.statusCode}. File may not exist.`);
+                }
                 return;
             }
 
-            // 4. सही Headers सेट करें (ताकि PDF खुले)
+            // ✅ Success
             res.setHeader("Content-Type", "application/pdf");
-            res.setHeader(
-                "Content-Disposition",
-                `inline; filename="${filename || 'document.pdf'}"`
-            );
-            
-            // डेटा को यूजर तक भेजें
+            res.setHeader("Content-Disposition", `inline; filename="${filename || 'document.pdf'}"`);
             response.pipe(res);
 
         }).on('error', (err) => {
-            console.error("❌ Proxy Internal Error:", err);
-            if (!res.headersSent) {
-                res.status(500).send("Error downloading file");
-            }
+            console.error("❌ Network Error:", err.message);
+            if (!res.headersSent) res.status(500).send("Server Error fetching file");
         });
     };
 
