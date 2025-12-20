@@ -19,6 +19,7 @@ const cloudinary = require('cloudinary').v2;
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const { log } = require('console');
 
+
 // --- NEW LIBRARIES ---
 const cron = require('node-cron');
 const PDFDocument = require('pdfkit');
@@ -9570,7 +9571,11 @@ app.get('/api/admin/print-requests', protect, authorizeRole('admin'), async (req
 // ============================================================
 // 📥 PROXY DOWNLOAD ROUTE (Fixes CORS Error)
 // ============================================================
-const https = require('https'); // यह Node.js में built-in होता है
+// ============================================================
+// 📥 PROXY DOWNLOAD ROUTE (Fixes PDF Download Issues)
+// ============================================================
+const https = require('https'); 
+const http = require('http'); // ✅ यह लाइन मिसिंग थी, इसे जरूर जोड़ें
 
 app.get('/api/print/download-proxy', (req, res) => {
     const { url, filename } = req.query;
@@ -9580,31 +9585,35 @@ app.get('/api/print/download-proxy', (req, res) => {
     }
 
     const fetchFile = (fileUrl) => {
+        // 1. सही क्लाइंट चुनें (HTTP vs HTTPS)
         const client = fileUrl.startsWith('https') ? https : http;
 
         client.get(fileUrl, (response) => {
 
+            // 2. रिडायरेक्ट (Redirect) हैंडल करें
             if ([301, 302].includes(response.statusCode)) {
                 if (response.headers.location) {
-                    console.log("🔀 Redirect →", response.headers.location);
+                    console.log("🔀 Redirecting to:", response.headers.location);
                     return fetchFile(response.headers.location);
                 }
             }
 
+            // 3. अगर फाइल नहीं मिली (Error Handling)
             if (response.statusCode !== 200) {
-                console.error("❌ Upstream error:", response.statusCode);
+                console.error("❌ Upstream Error:", response.statusCode);
                 if (!res.headersSent)
-                    return res.status(400).send("Unable to fetch document");
+                    return res.status(400).send("Unable to fetch document from source.");
                 return;
             }
 
+            // 4. सही Headers सेट करें (ताकि PDF खुले)
             res.setHeader("Content-Type", "application/pdf");
             res.setHeader(
                 "Content-Disposition",
                 `inline; filename="${filename || 'document.pdf'}"`
             );
-            res.setHeader("Accept-Ranges", "bytes");
-
+            
+            // डेटा को यूजर तक भेजें
             response.pipe(res);
 
         }).on('error', (err) => {
@@ -9617,7 +9626,6 @@ app.get('/api/print/download-proxy', (req, res) => {
 
     fetchFile(url);
 });
-
 
 const IP = '0.0.0.0';
 const PORT = process.env.PORT || 5001;
