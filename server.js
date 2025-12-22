@@ -9733,57 +9733,61 @@ app.get('/product-share/:id', async (req, res) => {
 // Product Share API for Meta Tags (WhatsApp Preview)
 app.get('/api/product-share/:id', async (req, res) => {
     try {
-        const productId = req.params.id;
-        const product = await Product.findById(productId); 
+        const product = await Product.findById(req.params.id);
+        if (!product) return res.status(404).send('Product not found');
 
-        if (!product) {
-            return res.status(404).send('Product not found');
-        }
-
-        // Use the same domain as your main site
-        const frontendBaseUrl = "https://desibazaar0.netlify.app"; 
+        const frontendBaseUrl = "https://desibazaar0.netlify.app";
         const productUrl = `${frontendBaseUrl}/#/product?id=${product._id}`;
-        
-        // Handle image structure safely
-        const imageUrl = product.images && product.images.length > 0 
-            ? (typeof product.images[0] === 'object' ? product.images[0].url : product.images[0])
+
+        const imageUrl = product.images?.length
+            ? (typeof product.images[0] === 'object'
+                ? product.images[0].url
+                : product.images[0])
             : `${frontendBaseUrl}/logo.png`;
 
+        const sharePageUrl = `https://hdvideo-1.onrender.com/api/product-share/${product._id}`;
+
+        res.set('Content-Type', 'text/html');
         res.send(`
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="UTF-8">
-                <title>${product.name} | Quick Sauda</title>
-                
-                <meta property="og:title" content="${product.name}" />
-                <meta property="og:description" content="Kharidiye ${product.name} sirf ₹${product.price} mein! Order now on Quick Sauda." />
-                <meta property="og:image" content="${imageUrl}" />
-                <meta property="og:url" content="${productUrl}" />
-                <meta property="og:type" content="product" />
-                <meta property="og:site_name" content="Quick Sauda" />
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>${product.name} | Quick Sauda</title>
 
-                <meta name="twitter:card" content="summary_large_image">
-                <meta name="twitter:title" content="${product.name}">
-                <meta name="twitter:description" content="Great deals on Quick Sauda!">
-                <meta name="twitter:image" content="${imageUrl}">
+<!-- Open Graph (WhatsApp / Facebook) -->
+<meta property="og:title" content="${product.name}" />
+<meta property="og:description" content="Sirf ₹${product.price} mein kharidiye ${product.name} – Quick Sauda par!" />
+<meta property="og:image" content="${imageUrl}" />
+<meta property="og:url" content="${sharePageUrl}" />
+<meta property="og:type" content="product" />
+<meta property="og:site_name" content="Quick Sauda" />
 
-                <meta http-equiv="refresh" content="0;url=${productUrl}">
-                <script>
-                    window.location.replace("${productUrl}");
-                </script>
-            </head>
-            <body style="font-family: sans-serif; text-align: center; padding-top: 50px;">
-                <p>Redirecting to Quick Sauda...</p>
-                <p>If you are not redirected, <a href="${productUrl}">click here</a>.</p>
-            </body>
-            </html>
+<!-- Twitter -->
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="${product.name}" />
+<meta name="twitter:description" content="Best deals on Quick Sauda" />
+<meta name="twitter:image" content="${imageUrl}" />
+
+<!-- Redirect AFTER preview -->
+<script>
+setTimeout(() => {
+    window.location.replace("${productUrl}");
+}, 1500);
+</script>
+</head>
+
+<body style="text-align:center;font-family:sans-serif">
+<p>Redirecting to Quick Sauda...</p>
+</body>
+</html>
         `);
     } catch (err) {
-        console.error("Share Error:", err.message);
-        res.status(500).send('Server Error');
+        console.error("Share Error:", err);
+        res.status(500).send("Server Error");
     }
 });
+
 // ✅ विशेष रूप से Flutter ऐप के लिए JSON डेटा भेजने वाला रूट
 app.get('/api/product-share/json/:id', async (req, res) => {
     try {
