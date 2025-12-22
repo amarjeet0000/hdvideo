@@ -9735,7 +9735,7 @@ app.get('/api/product-share/:id', async (req, res) => {
   try {
     const productId = req.params.id;
     
-    // 1. Input validation
+    // Input validation
     if (!productId || !mongoose.Types.ObjectId.isValid(productId)) {
       return res.status(400).send(`
         <!DOCTYPE html>
@@ -9757,22 +9757,26 @@ app.get('/api/product-share/:id', async (req, res) => {
       `);
     }
 
-    // 2. Environment variables से configuration
+    // Configuration
     const FRONTEND_URL = process.env.FRONTEND_URL || "https://desibazaar0.netlify.app";
     const APP_SCHEME = process.env.APP_SCHEME || "quicksauda://product";
-    const PLAY_STORE = process.env.PLAY_STORE_URL || 
-      "https://play.google.com/store/apps/details?id=com.amarjeet.quicksauda";
+    const ANDROID_PACKAGE = "com.amarjeet.quicksauda";
+    const PLAY_STORE = `https://play.google.com/store/apps/details?id=${ANDROID_PACKAGE}`;
     const APP_STORE = process.env.APP_STORE_URL; // iOS के लिए
-    const FALLBACK_URL = process.env.FALLBACK_URL || PLAY_STORE;
 
     const productWebUrl = `${FRONTEND_URL}/#/product?id=${productId}`;
     const appDeepLink = `${APP_SCHEME}?id=${productId}`;
     
+    // Android Intent URL (Play Store से install है तो direct open करेगा)
+    const androidIntentUrl = `intent://product?id=${productId}#Intent;scheme=${APP_SCHEME.replace('://', '')};package=${ANDROID_PACKAGE};end;`;
+    
+    // Universal Link (iOS के लिए)
+    const universalLink = `https://quicksauda.app/product/${productId}`; // यह आपका configured universal link होना चाहिए
+
     const imageUrl = product.images?.[0]?.url ||
                     product.images?.[0] ||
                     `${FRONTEND_URL}/logo.png`;
 
-    // 3. Twitter Cards और अन्य meta tags जोड़ें
     const html = `
 <!DOCTYPE html>
 <html lang="en" prefix="og: http://ogp.me/ns#">
@@ -9781,38 +9785,25 @@ app.get('/api/product-share/:id', async (req, res) => {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${product.name} - Quick Sauda</title>
   
-  <!-- Primary Meta Tags -->
-  <meta name="title" content="${product.name}">
-  <meta name="description" content="Buy now for ₹${product.price} on Quick Sauda">
-  
-  <!-- Open Graph / Facebook -->
+  <!-- Open Graph Tags -->
   <meta property="og:type" content="website">
   <meta property="og:url" content="${productWebUrl}">
   <meta property="og:title" content="${product.name}">
   <meta property="og:description" content="Price: ₹${product.price} | Order now on Quick Sauda">
   <meta property="og:image" content="${imageUrl}">
-  <meta property="og:image:width" content="1200">
-  <meta property="og:image:height" content="630">
   <meta property="og:site_name" content="Quick Sauda">
-  
-  <!-- Twitter -->
-  <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:url" content="${productWebUrl}">
-  <meta name="twitter:title" content="${product.name}">
-  <meta name="twitter:description" content="Price: ₹${product.price}">
-  <meta name="twitter:image" content="${imageUrl}">
-  
-  <!-- WhatsApp Specific -->
-  <meta property="og:image:type" content="image/jpeg">
-  <meta property="og:image:alt" content="${product.name}">
   
   <!-- App Links -->
   <meta property="al:android:url" content="${appDeepLink}">
   <meta property="al:android:app_name" content="Quick Sauda">
-  <meta property="al:android:package" content="com.amarjeet.quicksauda">
+  <meta property="al:android:package" content="${ANDROID_PACKAGE}">
+  <meta property="al:ios:url" content="${appDeepLink}">
+  <meta property="al:ios:app_store_id" content="YOUR_APP_STORE_ID">
+  <meta property="al:ios:app_name" content="Quick Sauda">
   <meta property="al:web:url" content="${productWebUrl}">
   
-  <link rel="canonical" href="${productWebUrl}">
+  <!-- iOS Smart App Banner -->
+  <meta name="apple-itunes-app" content="app-id=YOUR_APP_STORE_ID, app-argument=${appDeepLink}">
   
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -9835,6 +9826,11 @@ app.get('/api/product-share/:id', async (req, res) => {
       border-radius: 20px;
       padding: 30px;
       box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+      animation: fadeIn 0.5s ease;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(20px); }
+      to { opacity: 1; transform: translateY(0); }
     }
     .loader {
       margin: 20px auto;
@@ -9868,46 +9864,59 @@ app.get('/api/product-share/:id', async (req, res) => {
     .buttons {
       margin-top: 20px;
       display: flex;
+      flex-direction: column;
       gap: 10px;
-      justify-content: center;
-      flex-wrap: wrap;
     }
     .btn {
-      padding: 12px 24px;
+      padding: 15px 30px;
       border-radius: 50px;
       text-decoration: none;
       font-weight: bold;
-      transition: transform 0.3s, box-shadow 0.3s;
-      display: inline-block;
+      font-size: 1.1rem;
+      transition: all 0.3s;
+      border: none;
+      cursor: pointer;
     }
-    .btn-primary {
+    .btn-app {
       background: white;
       color: #667eea;
     }
-    .btn-secondary {
+    .btn-web {
       background: transparent;
       border: 2px solid white;
       color: white;
     }
     .btn:hover {
-      transform: translateY(-2px);
+      transform: translateY(-3px);
       box-shadow: 0 10px 20px rgba(0,0,0,0.2);
     }
     .logo {
       font-size: 2rem;
       font-weight: bold;
+      margin-bottom: 10px;
+    }
+    .tagline {
+      opacity: 0.8;
       margin-bottom: 20px;
+    }
+    .manual-open {
+      margin-top: 20px;
+      padding: 15px;
+      background: rgba(255,255,255,0.1);
+      border-radius: 10px;
+      display: none;
     }
   </style>
 </head>
 <body>
   <div class="container">
     <div class="logo">🛒 Quick Sauda</div>
+    <div class="tagline">Instant Grocery Delivery</div>
     
-    <div class="loader"></div>
+    <div class="loader" id="loader"></div>
     
-    <p style="margin: 20px 0; font-size: 1.2rem;">
-      Opening product in Quick Sauda App...
+    <p id="status" style="margin: 20px 0; font-size: 1.2rem;">
+      Opening product in Quick Sauda...
     </p>
     
     <div class="product-info">
@@ -9916,75 +9925,145 @@ app.get('/api/product-share/:id', async (req, res) => {
       ${product.description ? `<p style="margin-top: 10px; opacity: 0.9;">${product.description.substring(0, 100)}${product.description.length > 100 ? '...' : ''}</p>` : ''}
     </div>
     
-    <div class="buttons">
-      <a href="${appDeepLink}" class="btn btn-primary">
-        Open in App
+    <div class="buttons" id="buttons" style="display: none;">
+      <button onclick="openInApp()" class="btn btn-app" id="appBtn">
+        Open in Quick Sauda App
+      </button>
+      <a href="${productWebUrl}" class="btn btn-web">
+        View on Website
       </a>
-      <a href="${productWebUrl}" class="btn btn-secondary">
-        View on Web
-      </a>
+      <button onclick="downloadApp()" class="btn btn-web" id="downloadBtn">
+        Download App
+      </button>
     </div>
     
-    <p style="margin-top: 20px; font-size: 0.9rem; opacity: 0.8;">
-      If the app doesn't open, 
-      <a href="${FALLBACK_URL}" style="color: #fbbf24; text-decoration: underline;">
-        download it here
+    <div class="manual-open" id="manualOpen">
+      <p>Tap below to manually open in app:</p>
+      <a href="${appDeepLink}" style="color: #fbbf24; font-weight: bold; text-decoration: underline; font-size: 1.1rem;">
+        Tap to Open Product
       </a>
-    </p>
+    </div>
   </div>
 
   <script>
-    // User agent detection for better redirection
-    const userAgent = navigator.userAgent || navigator.vendor || window.opera;
+    // Detect platform
+    const userAgent = navigator.userAgent.toLowerCase();
+    const isAndroid = /android/.test(userAgent);
+    const isIOS = /iphone|ipad|ipod/.test(userAgent);
     
-    // iOS detection
-    const isIOS = /iPad|iPhone|iPod/.test(userAgent) && !window.MSStream;
+    // Timestamps for timeout
+    let startTime = Date.now();
+    const TIMEOUT = 2500; // 2.5 seconds
     
-    // Android detection
-    const isAndroid = /android/i.test(userAgent);
+    // Hide loader after timeout
+    setTimeout(() => {
+      document.getElementById('loader').style.display = 'none';
+      document.getElementById('status').textContent = 'Choose how to open:';
+      document.getElementById('buttons').style.display = 'flex';
+      document.getElementById('manualOpen').style.display = 'block';
+    }, TIMEOUT);
     
-    // Redirect with intelligent fallback
-    (function() {
-      const start = Date.now();
-      const timeout = 2000; // 2 seconds timeout
-      
-      // Try deep linking
-      window.location.href = "${appDeepLink}";
-      
-      // Fallback based on platform
-      setTimeout(() => {
-        if (Date.now() - start < timeout) {
-          if (isIOS && "${APP_STORE}") {
-            window.location.href = "${APP_STORE}";
-          } else {
-            window.location.href = "${FALLBACK_URL}";
+    // Function to open in app
+    function openInApp() {
+      if (isAndroid) {
+        // Android Intent - यदि app install है तो direct खुलेगा, नहीं तो Play Store
+        window.location.href = '${androidIntentUrl}';
+      } else if (isIOS) {
+        // iOS के लिए - universal link या deep link
+        window.location.href = '${appDeepLink}';
+        // Fallback for iOS
+        setTimeout(() => {
+          if (document.hasFocus()) {
+            window.location.href = '${APP_STORE || PLAY_STORE}';
           }
-        }
-      }, 1500);
+        }, 1000);
+      } else {
+        // Web/Desktop के लिए
+        window.location.href = '${productWebUrl}';
+      }
+    }
+    
+    // Function to download app
+    function downloadApp() {
+      if (isAndroid) {
+        window.location.href = '${PLAY_STORE}';
+      } else if (isIOS && '${APP_STORE}') {
+        window.location.href = '${APP_STORE}';
+      } else {
+        window.location.href = '${PLAY_STORE}';
+      }
+    }
+    
+    // Auto-attempt to open app immediately
+    (function autoOpenApp() {
+      // If app is already installed, this will open it directly
+      // If not installed, it will fail and timeout will show buttons
       
-      // Display manual buttons if still on page after 3 seconds
+      if (isAndroid) {
+        // Android Intent approach - best for installed apps
+        window.location.href = '${androidIntentUrl}';
+        
+        // Fallback timer
+        setTimeout(() => {
+          if (Date.now() - startTime < TIMEOUT + 500) {
+            // App not installed or failed to open
+            console.log('App may not be installed');
+          }
+        }, 1000);
+        
+      } else if (isIOS) {
+        // iOS approach
+        window.location.href = '${appDeepLink}';
+        
+        // iOS fallback check
+        setTimeout(() => {
+          if (document.hasFocus()) {
+            // Still on page, app probably not installed
+            console.log('iOS app may not be installed');
+          }
+        }, 1000);
+        
+      } else {
+        // Desktop - just go to web
+        window.location.href = '${productWebUrl}';
+      }
+      
+      // If still here after timeout, show manual buttons
       setTimeout(() => {
-        const manualDiv = document.createElement('div');
-        manualDiv.innerHTML = \`
-          <div style="margin-top: 20px; padding: 15px; background: rgba(255,255,255,0.1); border-radius: 10px;">
-            <p style="margin-bottom: 10px;">Having trouble opening?</p>
-            <div style="display: flex; gap: 10px; justify-content: center;">
-              <a href="${appDeepLink}" style="padding: 10px 20px; background: white; color: #667eea; border-radius: 5px; text-decoration: none;">
-                Tap to Open
-              </a>
-            </div>
-          </div>
-        \`;
-        document.querySelector('.container').appendChild(manualDiv);
-      }, 3000);
+        if (document.hasFocus()) {
+          document.getElementById('loader').style.display = 'none';
+          document.getElementById('status').textContent = 'Choose how to open:';
+          document.getElementById('buttons').style.display = 'flex';
+          document.getElementById('manualOpen').style.display = 'block';
+        }
+      }, TIMEOUT);
+      
     })();
+    
+    // Visibility change detection (for iOS)
+    document.addEventListener('visibilitychange', function() {
+      if (document.hidden) {
+        // Page hidden, app might have opened
+        console.log('App may have opened successfully');
+      }
+    });
+    
+    // Page focus detection
+    window.addEventListener('blur', function() {
+      console.log('Window blurred - app may have opened');
+    });
+    
+    // Prevent going back to this page if app opens
+    if (window.history && window.history.replaceState) {
+      window.history.replaceState(null, null, window.location.href);
+    }
   </script>
 </body>
 </html>`;
 
-    // 4. Cache headers
+    // Set headers
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.setHeader('Cache-Control', 'public, max-age=3600'); // 1 hour cache
+    res.setHeader('Cache-Control', 'public, max-age=3600');
     res.send(html);
 
   } catch (error) {
@@ -10012,14 +10091,15 @@ app.get('/api/product-share/:id', async (req, res) => {
       box-shadow: 0 5px 15px rgba(0,0,0,0.1);
     }
     h1 { color: #e74c3c; }
-    a { 
+    .btn { 
       display: inline-block; 
       margin-top: 20px; 
-      padding: 10px 20px; 
+      padding: 12px 24px; 
       background: #3498db; 
       color: white; 
       text-decoration: none; 
       border-radius: 5px;
+      font-weight: bold;
     }
   </style>
 </head>
@@ -10027,7 +10107,7 @@ app.get('/api/product-share/:id', async (req, res) => {
   <div class="error-container">
     <h1>⚠️ Something went wrong</h1>
     <p>We're unable to load this product at the moment.</p>
-    <a href="https://desibazaar0.netlify.app">Go to Homepage</a>
+    <a href="https://desibazaar0.netlify.app" class="btn">Go to Homepage</a>
   </div>
 </body>
 </html>`;
