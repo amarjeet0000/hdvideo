@@ -9739,10 +9739,9 @@ app.get('/api/product-share/:id', async (req, res) => {
         const frontendBaseUrl = "https://desibazaar0.netlify.app";
         const productUrl = `${frontendBaseUrl}/#/product?id=${product._id}`;
 
-        const imageUrl = product.images?.length
-            ? (typeof product.images[0] === 'object'
-                ? product.images[0].url
-                : product.images[0])
+        // Image extraction logic
+        const imageUrl = (product.images && product.images.length > 0)
+            ? (typeof product.images[0] === 'object' ? product.images[0].url : product.images[0])
             : `${frontendBaseUrl}/logo.png`;
 
         const sharePageUrl = `https://hdvideo-1.onrender.com/api/product-share/${product._id}`;
@@ -9752,38 +9751,24 @@ app.get('/api/product-share/:id', async (req, res) => {
 <!DOCTYPE html>
 <html>
 <head>
-<meta charset="UTF-8">
-<title>${product.name} | Quick Sauda</title>
-
-<!-- Open Graph (WhatsApp / Facebook) -->
-<meta property="og:title" content="${product.name}" />
-<meta property="og:description" content="Sirf ₹${product.price} mein kharidiye ${product.name} – Quick Sauda par!" />
-<meta property="og:image" content="${imageUrl}" />
-<meta property="og:url" content="${sharePageUrl}" />
-<meta property="og:type" content="product" />
-<meta property="og:site_name" content="Quick Sauda" />
-
-<!-- Twitter -->
-<meta name="twitter:card" content="summary_large_image" />
-<meta name="twitter:title" content="${product.name}" />
-<meta name="twitter:description" content="Best deals on Quick Sauda" />
-<meta name="twitter:image" content="${imageUrl}" />
-
-<!-- Redirect AFTER preview -->
-<script>
-setTimeout(() => {
-    window.location.replace("${productUrl}");
-}, 1500);
-</script>
+    <meta charset="UTF-8">
+    <title>${product.name} | Quick Sauda</title>
+    <meta property="og:title" content="${product.name}" />
+    <meta property="og:description" content="Sirf ₹${product.price} mein kharidiye ${product.name} – Quick Sauda par!" />
+    <meta property="og:image" content="${imageUrl}" />
+    <meta property="og:url" content="${sharePageUrl}" />
+    <meta property="og:type" content="product" />
+    <meta property="og:site_name" content="Quick Sauda" />
+    <script>
+        setTimeout(() => { window.location.replace("${productUrl}"); }, 1500);
+    </script>
 </head>
-
-<body style="text-align:center;font-family:sans-serif">
-<p>Redirecting to Quick Sauda...</p>
+<body style="text-align:center;font-family:sans-serif;padding-top:100px;">
+    <h3>Quick Sauda</h3>
+    <p>Redirecting to product details...</p>
 </body>
-</html>
-        `);
+</html>`);
     } catch (err) {
-        console.error("Share Error:", err);
         res.status(500).send("Server Error");
     }
 });
@@ -9809,6 +9794,7 @@ app.get('/api/product-share/json/:id', async (req, res) => {
         res.status(500).json({ message: "Error fetching data" });
     }
 });
+
 const IP = '0.0.0.0';
 const PORT = process.env.PORT || 5001;
 
