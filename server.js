@@ -9670,8 +9670,65 @@ app.get('/api/print/library/:sellerId', async (req, res) => {
     }
 });
 
+// Node.js example to generate shareable metadata
 
+app.get('/product-share/:id', async (req, res) => {
+    try {
+        const product = await Product.findById(req.params.id);
+        if (!product) {
+            return res.status(404).send("Product not found");
+        }
 
+        // Image check: Agar array hai toh pehli image, aur handle object structure
+        const imageUrl = product.images && product.images.length > 0 
+            ? (typeof product.images[0] === 'object' ? product.images[0].url : product.images[0])
+            : 'https://desibazaar0.netlify.app/logo.png'; // Default logo fallback
+
+        res.send(`
+            <!DOCTYPE html>
+            <html lang="en">
+                <head>
+                    <meta charset="UTF-8">
+                    <title>${product.name} | Quick Sauda</title>
+                    
+                    <meta property="og:title" content="${product.name}" />
+                    <meta property="og:description" content="Kharidiye ${product.name} sirf ₹${product.price} mein! Quick Sauda par behtareen deals." />
+                    <meta property="og:image" content="${imageUrl}" />
+                    <meta property="og:url" content="https://desibazaar0.netlify.app/product/${req.params.id}" />
+                    <meta property="og:type" content="product" />
+                    <meta property="og:site_name" content="Quick Sauda">
+                    
+                    <meta name="twitter:card" content="summary_large_image">
+                    <meta name="twitter:title" content="${product.name}">
+                    <meta name="twitter:description" content="Buy on Quick Sauda">
+                    <meta name="twitter:image" content="${imageUrl}">
+
+                    <style>
+                        body { font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; text-align: center; background: #f8f9fa; }
+                        .loader { border: 4px solid #f3f3f3; border-top: 4px solid #004aad; border-radius: 50%; width: 40px; height: 40px; animation: spin 2s linear infinite; margin-bottom: 10px; }
+                        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+                    </style>
+                </head>
+                <body>
+                    <div>
+                        <div class="loader"></div>
+                        <h3>Opening Quick Sauda App...</h3>
+                        <p>If not redirected, <a href="https://desibazaar0.netlify.app/product/${req.params.id}">click here</a>.</p>
+                    </div>
+
+                    <script>
+                        // Deep Link attempt: Yeh user ko seedha app mein le jayega
+                        setTimeout(function() {
+                            window.location.href = "https://desibazaar0.netlify.app/product/${req.params.id}";
+                        }, 500);
+                    </script>
+                </body>
+            </html>
+        `);
+    } catch (err) {
+        res.status(500).send("Error generating share link");
+    }
+});
 const IP = '0.0.0.0';
 const PORT = process.env.PORT || 5001;
 
