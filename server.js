@@ -9734,35 +9734,53 @@ app.get('/product-share/:id', async (req, res) => {
 app.get('/api/product-share/:id', async (req, res) => {
     try {
         const productId = req.params.id;
-        // Apne Database se product fetch karein
         const product = await Product.findById(productId); 
 
         if (!product) {
             return res.status(404).send('Product not found');
         }
 
-        // Ye HTML generate karega taaki WhatsApp preview dikh sake
+        // Use the same domain as your main site
+        const frontendBaseUrl = "https://desibazaar0.netlify.app"; 
+        const productUrl = `${frontendBaseUrl}/#/product?id=${product._id}`;
+        
+        // Handle image structure safely
+        const imageUrl = product.images && product.images.length > 0 
+            ? (typeof product.images[0] === 'object' ? product.images[0].url : product.images[0])
+            : `${frontendBaseUrl}/logo.png`;
+
         res.send(`
             <!DOCTYPE html>
             <html>
             <head>
-                <title>${product.name}</title>
+                <meta charset="UTF-8">
+                <title>${product.name} | Quick Sauda</title>
+                
                 <meta property="og:title" content="${product.name}" />
-                <meta property="og:description" content="Price: ₹${product.price} - Order now on Quick Sauda!" />
-                <meta property="og:image" content="${product.images[0].url}" />
-                <meta property="og:url" content="https://your-netlify-site.netlify.app/#/product?id=${product._id}" />
-                <meta property="og:type" content="website" />
+                <meta property="og:description" content="Kharidiye ${product.name} sirf ₹${product.price} mein! Order now on Quick Sauda." />
+                <meta property="og:image" content="${imageUrl}" />
+                <meta property="og:url" content="${productUrl}" />
+                <meta property="og:type" content="product" />
+                <meta property="og:site_name" content="Quick Sauda" />
+
+                <meta name="twitter:card" content="summary_large_image">
+                <meta name="twitter:title" content="${product.name}">
+                <meta name="twitter:description" content="Great deals on Quick Sauda!">
+                <meta name="twitter:image" content="${imageUrl}">
+
+                <meta http-equiv="refresh" content="0;url=${productUrl}">
                 <script>
-                    // User jab link pe click karega toh asli website pe redirect ho jayega
-                    window.location.href = "https://your-netlify-site.netlify.app/#/product?id=${product._id}";
+                    window.location.replace("${productUrl}");
                 </script>
             </head>
-            <body>
-                Redirecting to Quick Sauda...
+            <body style="font-family: sans-serif; text-align: center; padding-top: 50px;">
+                <p>Redirecting to Quick Sauda...</p>
+                <p>If you are not redirected, <a href="${productUrl}">click here</a>.</p>
             </body>
             </html>
         `);
     } catch (err) {
+        console.error("Share Error:", err.message);
         res.status(500).send('Server Error');
     }
 });
