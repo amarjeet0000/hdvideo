@@ -9784,7 +9784,27 @@ app.get('/api/product-share/:id', async (req, res) => {
         res.status(500).send('Server Error');
     }
 });
+// ✅ विशेष रूप से Flutter ऐप के लिए JSON डेटा भेजने वाला रूट
+app.get('/api/product-share/json/:id', async (req, res) => {
+    try {
+        const product = await Product.findById(req.params.id);
+        if (!product) return res.status(404).json({ message: "Product not found" });
 
+        const imageUrl = product.images && product.images.length > 0 
+            ? (typeof product.images[0] === 'object' ? product.images[0].url : product.images[0])
+            : 'https://desibazaar0.netlify.app/logo.png';
+
+        res.json({
+            name: product.name,
+            price: product.price,
+            image: imageUrl,
+            // यह URL सोशल मीडिया प्रिव्यू के लिए आपके पुराने HTML रूट पर ले जाएगा
+            url: `https://hdvideo-1.onrender.com/api/product-share/${product._id}`
+        });
+    } catch (err) {
+        res.status(500).json({ message: "Error fetching data" });
+    }
+});
 const IP = '0.0.0.0';
 const PORT = process.env.PORT || 5001;
 
