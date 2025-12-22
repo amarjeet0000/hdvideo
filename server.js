@@ -9732,46 +9732,310 @@ app.get('/product-share/:id', async (req, res) => {
 
 // Product Share API for Meta Tags (WhatsApp Preview)
 app.get('/api/product-share/:id', async (req, res) => {
-    try {
-        const product = await Product.findById(req.params.id);
-        if (!product) return res.status(404).send('Product not found');
+  try {
+    const productId = req.params.id;
+    
+    // 1. Input validation
+    if (!productId || !mongoose.Types.ObjectId.isValid(productId)) {
+      return res.status(400).send(`
+        <!DOCTYPE html>
+        <html>
+        <head><title>Invalid Product</title></head>
+        <body><h1>Invalid Product ID</h1></body>
+        </html>
+      `);
+    }
 
-        const frontendBaseUrl = "https://desibazaar0.netlify.app";
-        const productUrl = `${frontendBaseUrl}/#/product?id=${product._id}`;
+    const product = await Product.findById(productId);
+    if (!product) {
+      return res.status(404).send(`
+        <!DOCTYPE html>
+        <html>
+        <head><title>Product Not Found</title></head>
+        <body><h1>Product Not Found</h1></body>
+        </html>
+      `);
+    }
 
-        // Image extraction logic
-        const imageUrl = (product.images && product.images.length > 0)
-            ? (typeof product.images[0] === 'object' ? product.images[0].url : product.images[0])
-            : `${frontendBaseUrl}/logo.png`;
+    // 2. Environment variables से configuration
+    const FRONTEND_URL = process.env.FRONTEND_URL || "https://desibazaar0.netlify.app";
+    const APP_SCHEME = process.env.APP_SCHEME || "quicksauda://product";
+    const PLAY_STORE = process.env.PLAY_STORE_URL || 
+      "https://play.google.com/store/apps/details?id=com.amarjeet.quicksauda";
+    const APP_STORE = process.env.APP_STORE_URL; // iOS के लिए
+    const FALLBACK_URL = process.env.FALLBACK_URL || PLAY_STORE;
 
-        const sharePageUrl = `https://hdvideo-1.onrender.com/api/product-share/${product._id}`;
+    const productWebUrl = `${FRONTEND_URL}/#/product?id=${productId}`;
+    const appDeepLink = `${APP_SCHEME}?id=${productId}`;
+    
+    const imageUrl = product.images?.[0]?.url ||
+                    product.images?.[0] ||
+                    `${FRONTEND_URL}/logo.png`;
 
-        res.set('Content-Type', 'text/html');
-        res.send(`
+    // 3. Twitter Cards और अन्य meta tags जोड़ें
+    const html = `
+<!DOCTYPE html>
+<html lang="en" prefix="og: http://ogp.me/ns#">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${product.name} - Quick Sauda</title>
+  
+  <!-- Primary Meta Tags -->
+  <meta name="title" content="${product.name}">
+  <meta name="description" content="Buy now for ₹${product.price} on Quick Sauda">
+  
+  <!-- Open Graph / Facebook -->
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="${productWebUrl}">
+  <meta property="og:title" content="${product.name}">
+  <meta property="og:description" content="Price: ₹${product.price} | Order now on Quick Sauda">
+  <meta property="og:image" content="${imageUrl}">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:site_name" content="Quick Sauda">
+  
+  <!-- Twitter -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:url" content="${productWebUrl}">
+  <meta name="twitter:title" content="${product.name}">
+  <meta name="twitter:description" content="Price: ₹${product.price}">
+  <meta name="twitter:image" content="${imageUrl}">
+  
+  <!-- WhatsApp Specific -->
+  <meta property="og:image:type" content="image/jpeg">
+  <meta property="og:image:alt" content="${product.name}">
+  
+  <!-- App Links -->
+  <meta property="al:android:url" content="${appDeepLink}">
+  <meta property="al:android:app_name" content="Quick Sauda">
+  <meta property="al:android:package" content="com.amarjeet.quicksauda">
+  <meta property="al:web:url" content="${productWebUrl}">
+  
+  <link rel="canonical" href="${productWebUrl}">
+  
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { 
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      padding: 20px;
+    }
+    .container {
+      text-align: center;
+      max-width: 500px;
+      width: 100%;
+      background: rgba(255, 255, 255, 0.1);
+      backdrop-filter: blur(10px);
+      border-radius: 20px;
+      padding: 30px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+    }
+    .loader {
+      margin: 20px auto;
+      border: 5px solid rgba(255,255,255,0.3);
+      border-radius: 50%;
+      border-top: 5px solid white;
+      width: 50px;
+      height: 50px;
+      animation: spin 1s linear infinite;
+    }
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    .product-info {
+      margin: 20px 0;
+      background: rgba(255,255,255,0.2);
+      padding: 15px;
+      border-radius: 10px;
+    }
+    .product-name {
+      font-size: 1.5rem;
+      margin-bottom: 10px;
+      font-weight: bold;
+    }
+    .product-price {
+      font-size: 1.8rem;
+      color: #fbbf24;
+      font-weight: bold;
+    }
+    .buttons {
+      margin-top: 20px;
+      display: flex;
+      gap: 10px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+    .btn {
+      padding: 12px 24px;
+      border-radius: 50px;
+      text-decoration: none;
+      font-weight: bold;
+      transition: transform 0.3s, box-shadow 0.3s;
+      display: inline-block;
+    }
+    .btn-primary {
+      background: white;
+      color: #667eea;
+    }
+    .btn-secondary {
+      background: transparent;
+      border: 2px solid white;
+      color: white;
+    }
+    .btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 10px 20px rgba(0,0,0,0.2);
+    }
+    .logo {
+      font-size: 2rem;
+      font-weight: bold;
+      margin-bottom: 20px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="logo">🛒 Quick Sauda</div>
+    
+    <div class="loader"></div>
+    
+    <p style="margin: 20px 0; font-size: 1.2rem;">
+      Opening product in Quick Sauda App...
+    </p>
+    
+    <div class="product-info">
+      <div class="product-name">${product.name}</div>
+      <div class="product-price">₹${product.price}</div>
+      ${product.description ? `<p style="margin-top: 10px; opacity: 0.9;">${product.description.substring(0, 100)}${product.description.length > 100 ? '...' : ''}</p>` : ''}
+    </div>
+    
+    <div class="buttons">
+      <a href="${appDeepLink}" class="btn btn-primary">
+        Open in App
+      </a>
+      <a href="${productWebUrl}" class="btn btn-secondary">
+        View on Web
+      </a>
+    </div>
+    
+    <p style="margin-top: 20px; font-size: 0.9rem; opacity: 0.8;">
+      If the app doesn't open, 
+      <a href="${FALLBACK_URL}" style="color: #fbbf24; text-decoration: underline;">
+        download it here
+      </a>
+    </p>
+  </div>
+
+  <script>
+    // User agent detection for better redirection
+    const userAgent = navigator.userAgent || navigator.vendor || window.opera;
+    
+    // iOS detection
+    const isIOS = /iPad|iPhone|iPod/.test(userAgent) && !window.MSStream;
+    
+    // Android detection
+    const isAndroid = /android/i.test(userAgent);
+    
+    // Redirect with intelligent fallback
+    (function() {
+      const start = Date.now();
+      const timeout = 2000; // 2 seconds timeout
+      
+      // Try deep linking
+      window.location.href = "${appDeepLink}";
+      
+      // Fallback based on platform
+      setTimeout(() => {
+        if (Date.now() - start < timeout) {
+          if (isIOS && "${APP_STORE}") {
+            window.location.href = "${APP_STORE}";
+          } else {
+            window.location.href = "${FALLBACK_URL}";
+          }
+        }
+      }, 1500);
+      
+      // Display manual buttons if still on page after 3 seconds
+      setTimeout(() => {
+        const manualDiv = document.createElement('div');
+        manualDiv.innerHTML = \`
+          <div style="margin-top: 20px; padding: 15px; background: rgba(255,255,255,0.1); border-radius: 10px;">
+            <p style="margin-bottom: 10px;">Having trouble opening?</p>
+            <div style="display: flex; gap: 10px; justify-content: center;">
+              <a href="${appDeepLink}" style="padding: 10px 20px; background: white; color: #667eea; border-radius: 5px; text-decoration: none;">
+                Tap to Open
+              </a>
+            </div>
+          </div>
+        \`;
+        document.querySelector('.container').appendChild(manualDiv);
+      }, 3000);
+    })();
+  </script>
+</body>
+</html>`;
+
+    // 4. Cache headers
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=3600'); // 1 hour cache
+    res.send(html);
+
+  } catch (error) {
+    console.error('Error in product share page:', error);
+    
+    const errorHtml = `
 <!DOCTYPE html>
 <html>
 <head>
-    <meta charset="UTF-8">
-    <title>${product.name} | Quick Sauda</title>
-    <meta property="og:title" content="${product.name}" />
-    <meta property="og:description" content="Sirf ₹${product.price} mein kharidiye ${product.name} – Quick Sauda par!" />
-    <meta property="og:image" content="${imageUrl}" />
-    <meta property="og:url" content="${sharePageUrl}" />
-    <meta property="og:type" content="product" />
-    <meta property="og:site_name" content="Quick Sauda" />
-    <script>
-        setTimeout(() => { window.location.replace("${productUrl}"); }, 1500);
-    </script>
-</head>
-<body style="text-align:center;font-family:sans-serif;padding-top:100px;">
-    <h3>Quick Sauda</h3>
-    <p>Redirecting to product details...</p>
-</body>
-</html>`);
-    } catch (err) {
-        res.status(500).send("Server Error");
+  <title>Error - Quick Sauda</title>
+  <style>
+    body { 
+      font-family: sans-serif; 
+      text-align: center; 
+      padding: 50px; 
+      background: #f8f9fa;
+      color: #333;
     }
+    .error-container { 
+      max-width: 500px; 
+      margin: 0 auto; 
+      background: white;
+      padding: 30px;
+      border-radius: 10px;
+      box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+    }
+    h1 { color: #e74c3c; }
+    a { 
+      display: inline-block; 
+      margin-top: 20px; 
+      padding: 10px 20px; 
+      background: #3498db; 
+      color: white; 
+      text-decoration: none; 
+      border-radius: 5px;
+    }
+  </style>
+</head>
+<body>
+  <div class="error-container">
+    <h1>⚠️ Something went wrong</h1>
+    <p>We're unable to load this product at the moment.</p>
+    <a href="https://desibazaar0.netlify.app">Go to Homepage</a>
+  </div>
+</body>
+</html>`;
+    
+    res.status(500).send(errorHtml);
+  }
 });
+
 
 // ✅ विशेष रूप से Flutter ऐप के लिए JSON डेटा भेजने वाला रूट
 app.get('/api/product-share/json/:id', async (req, res) => {
