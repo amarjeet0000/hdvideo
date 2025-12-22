@@ -9774,6 +9774,82 @@ app.get('/api/product-share/:id', async (req, res) => {
 });
 
 // ✅ विशेष रूप से Flutter ऐप के लिए JSON डेटा भेजने वाला रूट
+app.get('/api/product-share/json/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        // 1. ID validation
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            return res.status(400).json({ 
+                message: "Invalid product ID format" 
+            });
+        }
+
+        const product = await Product.findById(id);
+        
+        if (!product) {
+            return res.status(404).json({ 
+                message: "Product not found",
+                id: id
+            });
+        }
+
+        // 2. Image URL extraction with better handling
+        const getImageUrl = (images) => {
+            if (!images || !Array.isArray(images) || images.length === 0) {
+                return 'https://desibazaar0.netlify.app/logo.png';
+            }
+            
+            const firstImage = images[0];
+            if (typeof firstImage === 'object' && firstImage.url) {
+                return firstImage.url;
+            } else if (typeof firstImage === 'string') {
+                return firstImage;
+            }
+            
+            return 'https://desibazaar0.netlify.app/logo.png';
+        };
+
+        // 3. Default domain URL (environment variable से लेने के लिए)
+        const DOMAIN_URL = process.env.DOMAIN_URL || 'https://hdvideo-1.onrender.com';
+        
+        // 4. Response data structure
+        const responseData = {
+            success: true,
+            data: {
+                id: product._id,
+                name: product.name,
+                price: product.price,
+                currency: product.currency || '₹', // Default currency
+                image: getImageUrl(product.images),
+                url: `${DOMAIN_URL}/api/product-share/${product._id}`,
+                // Additional useful fields for social media
+                description: product.description || product.name,
+                category: product.category,
+                brand: product.brand
+            },
+            timestamp: new Date().toISOString()
+        };
+
+        // 5. Cache control headers for CDN/API caching
+        res.setHeader('Cache-Control', 'public, max-age=3600'); // 1 hour cache
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        
+        res.json(responseData);
+
+    } catch (err) {
+        console.error(`Error fetching product ${req.params.id}:`, err);
+        
+        // 6. Better error handling
+        const statusCode = err.name === 'CastError' ? 400 : 500;
+        
+        res.status(statusCode).json({
+            success: false,
+            message: "Error fetching product data",
+            error: process.env.NODE_ENV === 'development' ? err.message : undefined
+        });
+    }
+});
 
 
 const IP = '0.0.0.0';
