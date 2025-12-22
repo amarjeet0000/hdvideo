@@ -9729,6 +9729,44 @@ app.get('/product-share/:id', async (req, res) => {
         res.status(500).send("Error generating share link");
     }
 });
+
+// Product Share API for Meta Tags (WhatsApp Preview)
+app.get('/api/product-share/:id', async (req, res) => {
+    try {
+        const productId = req.params.id;
+        // Apne Database se product fetch karein
+        const product = await Product.findById(productId); 
+
+        if (!product) {
+            return res.status(404).send('Product not found');
+        }
+
+        // Ye HTML generate karega taaki WhatsApp preview dikh sake
+        res.send(`
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>${product.name}</title>
+                <meta property="og:title" content="${product.name}" />
+                <meta property="og:description" content="Price: ₹${product.price} - Order now on Quick Sauda!" />
+                <meta property="og:image" content="${product.images[0].url}" />
+                <meta property="og:url" content="https://your-netlify-site.netlify.app/#/product?id=${product._id}" />
+                <meta property="og:type" content="website" />
+                <script>
+                    // User jab link pe click karega toh asli website pe redirect ho jayega
+                    window.location.href = "https://your-netlify-site.netlify.app/#/product?id=${product._id}";
+                </script>
+            </head>
+            <body>
+                Redirecting to Quick Sauda...
+            </body>
+            </html>
+        `);
+    } catch (err) {
+        res.status(500).send('Server Error');
+    }
+});
+
 const IP = '0.0.0.0';
 const PORT = process.env.PORT || 5001;
 
