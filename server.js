@@ -9771,11 +9771,14 @@ app.get('/api/product-share/:id', async (req, res) => {
     const productWebUrl = `${FRONTEND_URL}/#/product?id=${productId}`;
     const appDeepLink = `quicksauda://product?id=${productId}`;
     
-    // Android Intent URL (MOST RELIABLE FOR ANDROID)
+    // Android Intent URL
     const androidIntentUrl = `intent://product/${productId}#Intent;scheme=quicksauda;package=${ANDROID_PACKAGE};S.browser_fallback_url=${encodeURIComponent(`https://play.google.com/store/apps/details?id=${ANDROID_PACKAGE}`)};end;`;
     
-    // Universal Link for iOS (if configured)
-    const universalLink = `https://quicksauda.app/product/${productId}`;
+    // Universal Link - Facebook/Instagram के लिए यही काम करेगा
+    const universalLink = `https://desibazaar0.netlify.app/#/product?id=${productId}`;
+    
+    // Alternative Universal Link (query parameters के साथ)
+    const universalLinkAlt = `https://desibazaar0.netlify.app/product.html?id=${productId}`;
     
     // Play Store URL
     const PLAY_STORE = `https://play.google.com/store/apps/details?id=${ANDROID_PACKAGE}`;
@@ -9783,7 +9786,284 @@ app.get('/api/product-share/:id', async (req, res) => {
     const imageUrl = product.images?.[0]?.url ||
                     product.images?.[0] ||
                     `${FRONTEND_URL}/logo.png`;
+    
+    // ✅ SOCIAL MEDIA DETECTION
+    const userAgent = req.headers['user-agent'] || '';
+    
+    // Facebook और Instagram detection
+    const isFacebook = /FBAN|FBAV|Facebook/i.test(userAgent);
+    const isInstagram = /Instagram/i.test(userAgent);
+    const isSocialMedia = isFacebook || isInstagram || 
+                         /Twitter|LinkedIn|Snapchat|Pinterest|Telegram|WhatsApp/i.test(userAgent);
+    
+    // ✅ FACEBOOK/INSTAGRAM के लिए UNIVERSAL LINK PAGE
+    if (isSocialMedia) {
+      const socialPlatform = isFacebook ? 'Facebook' : 
+                            isInstagram ? 'Instagram' : 
+                            'Social Media';
+      
+      return res.send(`
+      <!DOCTYPE html>
+      <html lang="en" prefix="og: http://ogp.me/ns#">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        
+        <!-- Primary Meta Tags -->
+        <title>${product.name} - Quick Sauda</title>
+        <meta name="title" content="${product.name}">
+        <meta name="description" content="Buy now for ₹${product.price} | Quick Sauda">
+        
+        <!-- Open Graph / Facebook -->
+        <meta property="og:type" content="website">
+        <meta property="og:url" content="${universalLink}">
+        <meta property="og:title" content="${product.name}">
+        <meta property="og:description" content="Price: ₹${product.price} | Order now on Quick Sauda">
+        <meta property="og:image" content="${imageUrl}">
+        <meta property="og:image:width" content="1200">
+        <meta property="og:image:height" content="630">
+        <meta property="og:site_name" content="Quick Sauda">
+        
+        <!-- Twitter -->
+        <meta property="twitter:card" content="summary_large_image">
+        <meta property="twitter:url" content="${universalLink}">
+        <meta property="twitter:title" content="${product.name}">
+        <meta property="twitter:description" content="Price: ₹${product.price}">
+        <meta property="twitter:image" content="${imageUrl}">
+        
+        <!-- App Links for Universal Links -->
+        <meta property="al:android:url" content="${universalLink}">
+        <meta property="al:android:app_name" content="Quick Sauda">
+        <meta property="al:android:package" content="${ANDROID_PACKAGE}">
+        <meta property="al:ios:url" content="${universalLink}">
+        <meta property="al:ios:app_name" content="Quick Sauda">
+        <meta property="al:web:should_fallback" content="true">
+        <meta property="al:web:url" content="${productWebUrl}">
+        
+        <!-- iOS Smart App Banner -->
+        <meta name="apple-itunes-app" content="app-id=YOUR_IOS_APP_ID, app-argument=${universalLink}">
+        
+        <!-- Auto-redirect to Universal Link -->
+        <meta http-equiv="refresh" content="1; url=${universalLink}" />
+        
+        <style>
+          * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+          }
+          
+          body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            text-align: center;
+            padding: 20px;
+          }
+          
+          .container {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 30px;
+            max-width: 500px;
+            width: 100%;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+          }
+          
+          .logo {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+          }
+          
+          .app-name {
+            font-size: 1.8rem;
+            font-weight: bold;
+            margin-bottom: 5px;
+          }
+          
+          .tagline {
+            opacity: 0.9;
+            margin-bottom: 20px;
+            font-size: 1rem;
+          }
+          
+          .product-card {
+            background: rgba(255, 255, 255, 0.15);
+            border-radius: 15px;
+            padding: 20px;
+            margin: 20px 0;
+            text-align: left;
+          }
+          
+          .product-name {
+            font-size: 1.3rem;
+            margin-bottom: 10px;
+            font-weight: bold;
+          }
+          
+          .product-price {
+            font-size: 1.8rem;
+            color: #fbbf24;
+            font-weight: bold;
+          }
+          
+          .loader {
+            margin: 20px auto;
+            border: 4px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top: 4px solid white;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+          }
+          
+          @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+          }
+          
+          .cta-button {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 15px 30px;
+            background: #fbbf24;
+            color: #333;
+            text-decoration: none;
+            border-radius: 12px;
+            font-weight: bold;
+            font-size: 1.1rem;
+            transition: all 0.3s;
+          }
+          
+          .cta-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(0,0,0,0.2);
+          }
+          
+          .fallback-links {
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid rgba(255,255,255,0.2);
+          }
+          
+          .fallback-links a {
+            display: block;
+            margin: 8px 0;
+            color: #fbbf24;
+            text-decoration: underline;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="logo">🛒</div>
+          <div class="app-name">Quick Sauda</div>
+          <div class="tagline">Instant Grocery Delivery</div>
+          
+          <div class="loader"></div>
+          
+          <p style="margin: 15px 0; font-size: 1.1rem;">
+            Opening ${product.name} in Quick Sauda...
+          </p>
+          
+          <div class="product-card">
+            <div class="product-name">${product.name}</div>
+            <div class="product-price">₹${product.price}</div>
+            ${product.description ? `
+              <div style="margin-top: 10px; opacity: 0.9; font-size: 0.95rem;">
+                ${product.description.substring(0, 100)}${product.description.length > 100 ? '...' : ''}
+              </div>
+            ` : ''}
+          </div>
+          
+          <a href="${universalLink}" class="cta-button" id="openButton">
+            Open ${product.name}
+          </a>
+          
+          <div class="fallback-links">
+            <p style="font-size: 0.9rem; opacity: 0.8; margin-bottom: 10px;">
+              Having trouble? Try these:
+            </p>
+            <a href="${productWebUrl}">Open in Web Browser</a>
+            <a href="${PLAY_STORE}">Download Quick Sauda App</a>
+          </div>
+        </div>
+        
+        <script>
+          // Platform detection
+          const userAgent = navigator.userAgent || navigator.vendor || window.opera;
+          const isAndroid = /android/i.test(userAgent);
+          const isIOS = /iPad|iPhone|iPod/.test(userAgent) && !window.MSStream;
+          
+          // Detect social media in-app browsers
+          const isFacebookInApp = /FBAN|FBAV/i.test(userAgent);
+          const isInstagramInApp = /Instagram/i.test(userAgent);
+          const isSocialMediaInApp = isFacebookInApp || isInstagramInApp;
+          
+          // Configuration
+          const CONFIG = {
+            universalLink: "${universalLink}",
+            productWebUrl: "${productWebUrl}",
+            playStoreUrl: "${PLAY_STORE}",
+            appStoreUrl: "https://apps.apple.com/app/idYOUR_IOS_APP_ID"
+          };
+          
+          // Function to open with best method
+          function openWithBestMethod() {
+            // Social media browsers में सिर्फ Universal Link ही काम करता है
+            window.location.href = CONFIG.universalLink;
+          }
+          
+          // Auto-attempt to open
+          (function init() {
+            // Immediate attempt
+            openWithBestMethod();
+            
+            // Fallback after 1 second
+            setTimeout(() => {
+              if (document.hasFocus()) {
+                // Still on page, show manual button
+                document.querySelector('.loader').style.display = 'none';
+                document.querySelector('.cta-button').style.display = 'inline-block';
+              }
+            }, 1000);
+            
+            // Manual button click
+            document.getElementById('openButton').addEventListener('click', function(e) {
+              e.preventDefault();
+              openWithBestMethod();
+            });
+            
+            // Add click tracking
+            document.addEventListener('click', function() {
+              // User interacted with page
+              console.log('User clicked on page');
+            });
+            
+            // Prevent going back to this page
+            if (window.history && window.history.replaceState) {
+              window.history.replaceState(null, null, window.location.href);
+            }
+          })();
+          
+          // Visibility change detection
+          document.addEventListener('visibilitychange', function() {
+            if (document.hidden) {
+              console.log('App may have opened');
+            }
+          });
+        </script>
+      </body>
+      </html>
+      `);
+    }
 
+    // ✅ REGULAR BROWSERS के लिए ORIGINAL SMART PAGE
     const html = `
 <!DOCTYPE html>
 <html lang="en">
@@ -9792,7 +10072,7 @@ app.get('/api/product-share/:id', async (req, res) => {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${product.name} - Quick Sauda</title>
   
-  <!-- Open Graph Tags for WhatsApp/Telegram -->
+  <!-- Open Graph Tags -->
   <meta property="og:title" content="${product.name}">
   <meta property="og:description" content="₹${product.price} - Order now on Quick Sauda">
   <meta property="og:image" content="${imageUrl}">
@@ -9808,6 +10088,8 @@ app.get('/api/product-share/:id', async (req, res) => {
   <meta property="al:android:app_name" content="Quick Sauda">
   <meta property="al:android:package" content="${ANDROID_PACKAGE}">
   <meta property="al:web:url" content="${productWebUrl}">
+  <meta property="al:ios:url" content="${universalLink}">
+  <meta property="al:ios:app_name" content="Quick Sauda">
   
   <style>
     * {
@@ -9983,8 +10265,12 @@ app.get('/api/product-share/:id', async (req, res) => {
     
     <div class="fallback-message" id="fallbackMessage">
       <p>If the app doesn't open automatically:</p>
-      <a href="${appDeepLink}" class="manual-link" id="manualLink">
-        Tap to Open Product
+      <a href="${universalLink}" class="manual-link" id="manualLink">
+        Tap to Open Product (Universal Link)
+      </a>
+      <br>
+      <a href="${appDeepLink}" class="manual-link" style="background: #667eea; margin-top: 8px;">
+        Tap to Open Product (Deep Link)
       </a>
     </div>
   </div>
@@ -9995,6 +10281,11 @@ app.get('/api/product-share/:id', async (req, res) => {
     const isAndroid = /android/i.test(userAgent);
     const isIOS = /iPad|iPhone|iPod/.test(userAgent) && !window.MSStream;
     
+    // Detect social media in-app browsers
+    const isFacebookInApp = /FBAN|FBAV/i.test(userAgent);
+    const isInstagramInApp = /Instagram/i.test(userAgent);
+    const isSocialMediaInApp = isFacebookInApp || isInstagramInApp;
+    
     // Configuration
     const CONFIG = {
       appDeepLink: "${appDeepLink}",
@@ -10002,8 +10293,8 @@ app.get('/api/product-share/:id', async (req, res) => {
       universalLink: "${universalLink}",
       productWebUrl: "${productWebUrl}",
       playStoreUrl: "${PLAY_STORE}",
-      timeout: 2000, // 2 seconds timeout
-      checkInterval: 100 // Check every 100ms
+      timeout: 2000,
+      checkInterval: 100
     };
     
     // State
@@ -10012,43 +10303,38 @@ app.get('/api/product-share/:id', async (req, res) => {
     
     // Function to check if app opened successfully
     function checkIfAppOpened() {
-      // If page is hidden or blurred, app likely opened
       if (document.hidden || !document.hasFocus()) {
         appOpened = true;
         return true;
       }
       
-      // If too much time passed, assume app didn't open
       if (Date.now() - startTime > CONFIG.timeout) {
         return false;
       }
       
-      return null; // Still checking
+      return null;
     }
     
     // Function to open app with the BEST method for each platform
     function openAppWithBestMethod() {
+      // Social media browsers में Universal Link use करें
+      if (isSocialMediaInApp) {
+        window.location.href = CONFIG.universalLink;
+        return;
+      }
+      
       if (isAndroid) {
-        // ANDROID: Use Intent URL (most reliable)
-        // If app installed: opens directly
-        // If not installed: goes to Play Store
         window.location.href = CONFIG.androidIntentUrl;
-        
       } else if (isIOS) {
-        // iOS: Try multiple methods
-        // 1. First try Universal Link (if configured)
         if (CONFIG.universalLink && CONFIG.universalLink !== '') {
           window.location.href = CONFIG.universalLink;
         }
-        // 2. Fallback to Deep Link
         setTimeout(() => {
           if (!appOpened) {
             window.location.href = CONFIG.appDeepLink;
           }
         }, 300);
-        
       } else {
-        // DESKTOP: Just open web version
         window.location.href = CONFIG.productWebUrl;
         appOpened = true;
       }
@@ -10062,7 +10348,7 @@ app.get('/api/product-share/:id', async (req, res) => {
       document.getElementById('fallbackMessage').style.display = 'block';
     }
     
-    // Function to manually open app (user clicked button)
+    // Function to manually open app
     function openInApp() {
       document.getElementById('statusText').textContent = 'Trying to open app...';
       document.getElementById('loading').style.display = 'block';
@@ -10073,7 +10359,6 @@ app.get('/api/product-share/:id', async (req, res) => {
       
       openAppWithBestMethod();
       
-      // Check again
       setTimeout(() => {
         if (!checkIfAppOpened()) {
           showFallbackOptions();
@@ -10086,30 +10371,32 @@ app.get('/api/product-share/:id', async (req, res) => {
       window.location.href = CONFIG.playStoreUrl;
     }
     
-    // MAIN EXECUTION - Auto open app when page loads
+    // MAIN EXECUTION
     (function init() {
-      // Try to open app immediately
+      // Social media में Instant Universal Link redirect
+      if (isSocialMediaInApp) {
+        document.getElementById('statusText').textContent = 'Opening via Universal Link...';
+        setTimeout(() => {
+          window.location.href = CONFIG.universalLink;
+        }, 100);
+        return;
+      }
+      
       openAppWithBestMethod();
       
-      // Start checking if app opened
       const checkInterval = setInterval(() => {
         const status = checkIfAppOpened();
         
         if (status === true) {
-          // App opened successfully
           clearInterval(checkInterval);
           console.log('App opened successfully!');
-          
         } else if (status === false) {
-          // App didn't open, show fallback
           clearInterval(checkInterval);
           showFallbackOptions();
           console.log('Showing fallback options');
         }
-        // If status is null, continue checking
       }, CONFIG.checkInterval);
       
-      // Final timeout safety
       setTimeout(() => {
         clearInterval(checkInterval);
         if (!appOpened) {
@@ -10117,30 +10404,25 @@ app.get('/api/product-share/:id', async (req, res) => {
         }
       }, CONFIG.timeout + 1000);
       
-      // Handle visibility changes (for iOS)
       document.addEventListener('visibilitychange', () => {
         if (document.hidden) {
           appOpened = true;
         }
       });
       
-      // Handle blur events (app takes focus)
       window.addEventListener('blur', () => {
         appOpened = true;
       });
       
-      // Prevent back button from returning to this page
       if (window.history && window.history.replaceState) {
         window.history.replaceState(null, null, window.location.href);
       }
     })();
     
-    // User initiated app open (click on manual link)
     document.getElementById('manualLink').addEventListener('click', function(e) {
       e.preventDefault();
-      window.location.href = CONFIG.appDeepLink;
+      window.location.href = CONFIG.universalLink;
       
-      // Show loading again
       document.getElementById('actionButtons').style.display = 'none';
       document.getElementById('fallbackMessage').style.display = 'none';
       document.getElementById('loading').style.display = 'block';
@@ -10151,7 +10433,7 @@ app.get('/api/product-share/:id', async (req, res) => {
 </html>`;
 
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.setHeader('Cache-Control', 'public, max-age=1800'); // 30 minutes cache
+    res.setHeader('Cache-Control', 'public, max-age=1800');
     res.send(html);
 
   } catch (error) {
