@@ -20,6 +20,7 @@ const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const { log } = require('console');
 
 
+
 // --- NEW LIBRARIES ---
 const cron = require('node-cron');
 const PDFDocument = require('pdfkit');
@@ -34,6 +35,8 @@ const qrcode = require('qrcode');
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+
 
 
 
@@ -52,6 +55,18 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
   secure: true
 });
+
+const rateLimit = require('express-rate-limit');
+
+// General limit for profile updates to prevent abuse
+const profileUpdateLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour window
+  max: 10, // Start with 10 updates per hour per IP
+  message: { message: "Too many profile updates. Please try again later." }
+});
+
+
+
 
 // --- CONSTANTS FOR DYNAMIC DELIVERY AND TAX (UPDATED) ---
 // --- DYNAMIC DELIVERY CONFIGURATION ---
@@ -82,23 +97,32 @@ mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopol
 // --------- Multer with Cloudinary Storage ----------
 const storage = new CloudinaryStorage({
   cloudinary: cloudinary,
-  params: {
-    folder: (req, file) => {
-      if (req.originalUrl.includes('products')) return 'ecommerce/products';
-      if (req.originalUrl.includes('categories')) return 'ecommerce/categories';
-      if (req.originalUrl.includes('subcategories')) return 'ecommerce/subcategories';
-      if (req.originalUrl.includes('banners')) return 'ecommerce/banners';
-      if (req.originalUrl.includes('splash')) return 'ecommerce/splash';
-      return 'ecommerce/general';
-    },
-    resource_type: (req, file) => {
-      if (file.mimetype.startsWith('video')) return 'video';
-      return 'image';
-    },
-    allowed_formats: ['jpg', 'png', 'jpeg', 'gif', 'webp', 'mp4', 'mov', 'webm'],
+  params: async (req, file) => {
+    // Folder logic
+    let folderPath = 'ecommerce/general';
+    if (req.originalUrl.includes('products')) folderPath = 'ecommerce/products';
+    else if (req.originalUrl.includes('categories')) folderPath = 'ecommerce/categories';
+    else if (req.originalUrl.includes('subcategories')) folderPath = 'ecommerce/subcategories';
+    else if (req.originalUrl.includes('banners')) folderPath = 'ecommerce/banners';
+    else if (req.originalUrl.includes('splash')) folderPath = 'ecommerce/splash';
+
+    // Resource type logic (Image vs Video)
+    const isVideo = file.mimetype.startsWith('video');
+
+    return {
+      folder: folderPath,
+      resource_type: isVideo ? 'video' : 'image',
+      allowed_formats: ['jpg', 'png', 'jpeg', 'gif', 'webp', 'mp4', 'mov', 'webm'],
+      // Agar video hai toh transformation bhi add kar sakte hain
+      public_id: Date.now() + '-' + file.originalname.split('.')[0],
+    };
   },
 });
-const upload = multer({ storage });
+
+const upload = multer({ 
+  storage: storage,
+  limits: { fileSize: 20 * 1024 * 1024 } // 20MB limit (Video ke liye zaroori hai)
+});
 const uploadSingleMedia = upload.single('media');
 
 const productUpload = upload.fields([
@@ -433,6 +457,17 @@ const printJobSchema = new mongoose.Schema({
 
 const PrintJob = mongoose.model('PrintJob', printJobSchema);
 
+const auditLogSchema = new mongoose.Schema({
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    action: { type: String, required: true }, // उदा: 'FAILED_LOGIN', 'WALLET_RECHARGE'
+    status: { type: String, enum: ['Success', 'Warning', 'Critical'], default: 'Success' },
+    ipAddress: String,
+    userAgent: String,
+    details: Object, // अतिरिक्त जानकारी के लिए
+    timestamp: { type: Date, default: Date.now }
+}, { timestamps: true });
+
+const AuditLog = mongoose.model('AuditLog', auditLogSchema);
 const printableFormSchema = new mongoose.Schema({
   seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   title: { type: String, required: true }, // उदा: "बिहार आय प्रमाण पत्र फॉर्म"
@@ -550,7 +585,7 @@ const rideSchema = new mongoose.Schema({
 
 // 3. Wallet Transaction Schema
 const walletTransactionSchema = new mongoose.Schema({
-    // ✅ Driver और Seller दोनों के लिए (Optional रखें)
+    // ✅ Driver और Seller दोनों के लिए
     driver: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, 
     seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, 
 
@@ -558,15 +593,20 @@ const walletTransactionSchema = new mongoose.Schema({
     rideId: { type: mongoose.Schema.Types.ObjectId, ref: 'Ride' },
     orderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order' },
 
+    // 🛡️ सुरक्षा: Unique Payment ID (हैक रोकने के लिए)
+    // 'unique: true' और 'sparse: true' का मतलब है कि एक Payment ID दोबारा इस्तेमाल नहीं हो पाएगी
+    razorpayPaymentId: { type: String, unique: true, sparse: true },
+
     type: { type: String, enum: ['Credit', 'Debit'], required: true },
-    amount: Number,
+    amount: { type: Number, required: true },
     balanceBefore: Number,
     balanceAfter: Number,
-    description: String
+    description: String,
+    
+    // ✅ ट्रांजैक्शन का स्टेटस ट्रैक करने के लिए
+    status: { type: String, enum: ['Pending', 'Success', 'Failed'], default: 'Success' }
 }, { timestamps: true });
 
-// ✅ SAHI CODE
-const Ride = mongoose.model('Ride', rideSchema);
 const WalletTransaction = mongoose.model('WalletTransaction', walletTransactionSchema);
 
 
@@ -1181,6 +1221,21 @@ if (serviceCategoryCount === 0) {
   }
 }
 
+const logActivity = async (req, action, status, details = {}) => {
+    try {
+        await AuditLog.create({
+            userId: req.user ? req.user._id : null,
+            action,
+            status,
+            ipAddress: req.ip || req.headers['x-forwarded-for'],
+            userAgent: req.headers['user-agent'],
+            details
+        });
+    } catch (err) {
+        console.error("Audit Log Failed:", err.message);
+    }
+};
+
 const printStorage = new CloudinaryStorage({
   cloudinary: cloudinary,
   params: {
@@ -1637,43 +1692,39 @@ app.get('/api/auth/profile', protect, async (req, res) => {
   }
 });
 
+
+
 // ✅ UPDATED: Update Profile (Fixed to read lat/lng from pickupAddress)
+// ✅ SECURITY-ENHANCED: Update Profile
 app.put('/api/auth/profile', protect, async (req, res) => {
   try {
-    // 1. Extract lat/lng along with other fields
     const { name, phone, pincodes, pickupAddress, lat, lng } = req.body;
     
-    const user = await User.findById(req.user._id);
+    // Use select('-password') as an extra layer of safety during fetch
+    const user = await User.findById(req.user._id).select('-password');
     if (!user) return res.status(404).json({ message: 'User not found' });
 
     if (name) user.name = name;
     if (phone) user.phone = phone;
     
-    // Check if 'pincodes' property is present
     if (pincodes !== undefined) { 
         user.pincodes = Array.isArray(pincodes) ? pincodes : []; 
     } 
 
-    // ✅ CRITICAL FIX: Extract coordinates correctly
-    // Flutter sends them INSIDE pickupAddress, so we check there too.
+    // ✅ ROBUST EXTRACTION: Handle lat/lng from root or nested object
     const latitude = lat || (pickupAddress ? pickupAddress.lat : null);
     const longitude = lng || (pickupAddress ? pickupAddress.lng : null);
 
-    // Save Location Coordinates (GeoJSON)
     if (latitude && longitude) {
         user.location = {
             type: 'Point',
-            // MongoDB expects [Longitude, Latitude]
+            // MongoDB GeoJSON expects [Longitude, Latitude]
             coordinates: [parseFloat(longitude), parseFloat(latitude)] 
         };
-        console.log(`📍 Location Saved: [${longitude}, ${latitude}]`);
     }
 
-    // Update Text Address Fields
     if (pickupAddress) {
-      // Use existing values if new ones aren't provided (Partial Update Safety)
       const currentAddress = user.pickupAddress || {};
-      
       user.pickupAddress = {
         street: pickupAddress.street || currentAddress.street,
         village: pickupAddress.village || currentAddress.village,
@@ -1681,17 +1732,20 @@ app.put('/api/auth/profile', protect, async (req, res) => {
         city: pickupAddress.city || currentAddress.city,
         state: pickupAddress.state || currentAddress.state,
         pincode: pickupAddress.pincode || currentAddress.pincode,
-        
-        // Mark as set if essential fields exist
         isSet: !!((pickupAddress.street || currentAddress.street) && 
                   (pickupAddress.pincode || currentAddress.pincode))
       };
     }
 
     await user.save();
-    res.json(user);
+
+    // 🛡️ DATA SANITIZATION: Convert to object and ensure password is gone
+    const safeUserResponse = user.toObject();
+    delete safeUserResponse.password; // Double check
+
+    res.json(safeUserResponse);
   } catch (err) {
-    console.error('Error updating profile:', err.message);
+    console.error('🛡️ Profile Update Error:', err.message);
     res.status(500).json({ message: 'Error updating profile' });
   }
 });
@@ -1727,6 +1781,9 @@ app.post('/api/auth/save-fcm-token', protect, async (req, res) => {
     res.status(500).json({ message: 'Error saving FCM token', error: err.message });
   }
 });
+
+
+
 
 
 // --------------------------------------------------------------------------------
@@ -8224,15 +8281,15 @@ app.post('/api/wallet/create-order', protect, async (req, res) => {
 // 2. Verify Payment & Credit Wallet
 app.post('/api/wallet/verify-recharge', protect, async (req, res) => {
     try {
-        const { razorpay_order_id, razorpay_payment_id, razorpay_signature, amount } = req.body;
+        // नोट: हम body से 'amount' नहीं ले रहे हैं (सुरक्षा के लिए)
+        const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
         const user = req.user;
 
-        // ✅ 1. Role Validation: Allow both Drivers and Sellers
         if (user.role !== 'driver' && user.role !== 'seller') {
-             return res.status(403).json({ message: 'Wallet feature is only for drivers and sellers' });
+            return res.status(403).json({ message: 'Wallet feature is only for drivers and sellers' });
         }
 
-        // ✅ 2. Verify Razorpay Signature
+        // 🛡️ 1. Signature Verification (Same as before)
         const shasum = crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET);
         shasum.update(`${razorpay_order_id}|${razorpay_payment_id}`);
         const digest = shasum.digest('hex');
@@ -8241,35 +8298,54 @@ app.post('/api/wallet/verify-recharge', protect, async (req, res) => {
             return res.status(400).json({ message: 'Transaction verification failed' });
         }
 
-        // ✅ 3. Update Wallet Balance
-        const rechargeAmount = parseFloat(amount);
-        const balanceBefore = user.walletBalance;
-        user.walletBalance += rechargeAmount;
+        // 🛡️ 2. CRITICAL SECURITY: Fetch Actual Amount from Razorpay API
+        // यह सुनिश्चित करता है कि यूजर ने अमाउंट के साथ छेड़छाड़ नहीं की है
+        const paymentDetails = await razorpay.payments.fetch(razorpay_payment_id);
 
-        // ✅ 4. Driver Specific Logic: Unlock if balance covers minimum
-        // (Sellers don't usually get "locked" from the app, they just can't add products)
-        if (user.role === 'driver' && user.walletBalance >= MIN_DRIVER_BALANCE) {
+        if (paymentDetails.status !== 'captured') {
+            return res.status(400).json({ message: 'Payment not captured or failed' });
+        }
+
+        // Razorpay अमाउंट को 'paise' में देता है, इसे 'rupees' में बदलें
+        const verifiedAmount = paymentDetails.amount / 100; 
+
+        // 🛡️ 3. Idempotency Check: क्या यह Payment ID पहले इस्तेमाल हो चुकी है?
+        const existingTxn = await WalletTransaction.findOne({ razorpayPaymentId: razorpay_payment_id });
+        if (existingTxn) {
+            return res.status(400).json({ message: 'This payment has already been credited to a wallet' });
+        }
+
+        // 4. Update Balance using Verified Amount
+        const balanceBefore = user.walletBalance || 0;
+        user.walletBalance = balanceBefore + verifiedAmount;
+
+        if (user.role === 'driver' && user.walletBalance >= (global.MIN_DRIVER_BALANCE || 100)) {
             user.isLocked = false;
         }
 
         await user.save();
 
-        // ✅ 5. Log Transaction (Dynamic based on Role)
+        // 5. Log Transaction with Unique Payment ID
         await WalletTransaction.create({
-            driver: user.role === 'driver' ? user._id : undefined, // Only set if driver
-            seller: user.role === 'seller' ? user._id : undefined, // Only set if seller
+            driver: user.role === 'driver' ? user._id : undefined,
+            seller: user.role === 'seller' ? user._id : undefined,
             type: 'Credit',
-            amount: rechargeAmount,
+            amount: verifiedAmount,
             balanceBefore,
             balanceAfter: user.walletBalance,
-            description: `Wallet Recharge (Txn: ${razorpay_payment_id})`
+            razorpayPaymentId: razorpay_payment_id, // इसे Schema में 'unique' रखें
+            description: `Wallet Recharge (Verified Txn: ${razorpay_payment_id})`
         });
 
-        res.json({ message: 'Wallet recharged successfully!', newBalance: user.walletBalance });
+        res.json({ 
+            success: true, 
+            message: 'Wallet recharged safely!', 
+            newBalance: user.walletBalance 
+        });
 
     } catch (err) {
-        console.error("Verify Recharge Error:", err);
-        res.status(500).json({ message: 'Verification failed' });
+        console.error("Hacker Prevention Error:", err);
+        res.status(500).json({ message: 'Internal Server Error' });
     }
 });
 
