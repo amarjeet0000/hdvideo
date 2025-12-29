@@ -2984,6 +2984,10 @@ app.post('/api/orders', protect, async (req, res) => {
     const shippingAddress = await Address.findById(shippingAddressId);
     if (!shippingAddress) return res.status(404).json({ message: 'Shipping address not found' });
 
+    // ✅ IMPROVEMENT: Format a complete label address including Name and Phone
+    // This ensures the Seller sees EXACTLY who to deliver to on the PDF label.
+    const labelFormattedAddress = `${shippingAddress.name}\n${shippingAddress.street}, ${shippingAddress.village || ''}\n${shippingAddress.city}, ${shippingAddress.state} - ${shippingAddress.pincode}\nPhone: ${shippingAddress.phone}`;
+
     const ordersBySeller = new Map();
     let calculatedTotalCartAmount = 0; 
 
@@ -3101,7 +3105,6 @@ app.post('/api/orders', protect, async (req, res) => {
       });
     }
 
-    const fullAddress = `${shippingAddress.street}, ${shippingAddress.city}, ${shippingAddress.state} - ${shippingAddress.pincode}`;
     const createdOrders = [];
 
     // 8. Create Seller Sub-Orders & Commission Logic
@@ -3122,7 +3125,7 @@ app.post('/api/orders', protect, async (req, res) => {
         user: req.user._id,
         seller: sellerData.seller,
         orderItems: sellerData.orderItems, 
-        shippingAddress: fullAddress,
+        shippingAddress: labelFormattedAddress, // ✅ SAVED WITH NAME AND PHONE
         pincode: shippingAddress.pincode,
         paymentMethod: effectivePaymentMethod,
         totalAmount: parseFloat(sellerData.totalAmount.toFixed(2)), 
@@ -3163,14 +3166,14 @@ app.post('/api/orders', protect, async (req, res) => {
             );
         }
 
-        // --- SELLER NOTIFICATIONS (With Customer Details) ---
+        // --- SELLER NOTIFICATIONS ---
         const sellerPushMsg = `New Order #${orderIdShort} from ${req.user.name}: ₹${order.totalAmount.toFixed(2)}`;
         const sellerWhatsAppMsg = `📦 *New COD Order!* (#${orderIdShort})\n\n` +
                                   `👤 *Customer:* ${req.user.name}\n` +
                                   `📞 *Contact:* ${req.user.phone}\n\n` +
                                   `🛍️ *Items:*\n${itemsDetail}\n\n` +
                                   `💵 *Collect Amount:* ₹${order.totalAmount.toFixed(2)}\n\n` +
-                                  `📍 *Address:* ${fullAddress}`;
+                                  `📍 *Address:* ${shippingAddress.street}, ${shippingAddress.city}`;
 
         await sendWhatsApp(sellerData.seller.phone, sellerWhatsAppMsg);
         
@@ -4777,7 +4780,10 @@ app.delete('/api/seller/products/:id', protect, authorizeRole('seller', 'admin')
 
 app.get('/api/seller/orders/:id/shipping-label', protect, authorizeRole('seller'), async (req, res) => {
   try {
+    // UPDATED: We no longer strictly need to populate 'user' for the 'SHIP TO' section 
+    // because the specific delivery name and address are stored in order.shippingAddress
     const order = await Order.findById(req.params.id).populate('user', 'name phone');
+    
     if (!order) {
       return res.status(404).json({ message: 'Order not found' });
     }
@@ -4788,12 +4794,12 @@ app.get('/api/seller/orders/:id/shipping-label', protect, authorizeRole('seller'
 
     const sellerAddress = req.user.pickupAddress;
     if (!sellerAddress || !sellerAddress.isSet || !sellerAddress.pincode) {
-      return res.status(400).json({ message: 'Seller pickup address is not set in your profile. Please update it first.' });
+      return res.status(400).json({ message: 'Seller pickup address is not set. Please update profile.' });
     }
 
-    const customerAddressString = order.shippingAddress;
-    const customerName = order.user.name;
-    const customerPhone = order.user.phone;
+    // The order.shippingAddress field should contain the full formatted string 
+    // including the Name and Phone Number captured at the time of order.
+    const customerFullDetails = order.shippingAddress;
     const orderId = order._id.toString();
 
     const barcodePng = await bwipjs.toBuffer({
@@ -4817,6 +4823,7 @@ app.get('/api/seller/orders/:id/shipping-label', protect, authorizeRole('seller'
 
     doc.pipe(res);
 
+    // Header Details
     doc.fontSize(14).font('Helvetica-Bold').text(`Order: #${orderId.slice(-8)}`, { align: 'center' });
     doc.fontSize(10).font('Helvetica').text(`Payment: ${order.paymentMethod.toUpperCase()}`, { align: 'center' });
 
@@ -4825,6 +4832,7 @@ app.get('/api/seller/orders/:id/shipping-label', protect, authorizeRole('seller'
     }
     doc.moveDown(1);
 
+    // SHIP FROM (Seller Details)
     doc.fontSize(10).font('Helvetica-Bold').text('SHIP FROM:');
     doc.fontSize(10).font('Helvetica').text(req.user.name);
     doc.text(sellerAddress.street);
@@ -4835,11 +4843,17 @@ app.get('/api/seller/orders/:id/shipping-label', protect, authorizeRole('seller'
 
     doc.moveDown(2);
 
+    // SHIP TO (User Delivery Details)
+    // UPDATED: Printing the exact delivery data provided by the user during checkout
     doc.rect(15, 170, 258, 120).stroke();
     doc.fontSize(12).font('Helvetica-Bold').text('SHIP TO:', 20, 175);
-    doc.fontSize(14).font('Helvetica-Bold').text(customerName, 20, 195);
-    doc.fontSize(12).font('Helvetica').text(`Phone: ${customerPhone}`, 20, 215);
-    doc.text(customerAddressString, 20, 235, { width: 248 });
+    
+    // We print the stored shippingAddress string which contains the user's 
+    // chosen delivery name, phone, and address details.
+    doc.fontSize(11).font('Helvetica').text(customerFullDetails, 20, 195, { 
+        width: 248,
+        align: 'left'
+    });
 
     doc.moveDown(6);
 
@@ -4858,7 +4872,6 @@ app.get('/api/seller/orders/:id/shipping-label', protect, authorizeRole('seller'
     }
   }
 });
-
 app.get('/api/delivery/available-orders', protect, authorizeRole('delivery'), async (req, res) => {
   try {
     const myPincodes = req.user.pincodes;
