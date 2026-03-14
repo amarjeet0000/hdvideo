@@ -20,7 +20,6 @@ const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const { log } = require('console');
 
 
-
 // --- NEW LIBRARIES ---
 const cron = require('node-cron');
 const PDFDocument = require('pdfkit');
@@ -35,8 +34,6 @@ const qrcode = require('qrcode');
 const app = express();
 app.use(cors());
 app.use(express.json());
-
-
 
 
 
@@ -55,18 +52,6 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
   secure: true
 });
-
-const rateLimit = require('express-rate-limit');
-
-// General limit for profile updates to prevent abuse
-const profileUpdateLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, // 1 hour window
-  max: 10, // Start with 10 updates per hour per IP
-  message: { message: "Too many profile updates. Please try again later." }
-});
-
-
-
 
 // --- CONSTANTS FOR DYNAMIC DELIVERY AND TAX (UPDATED) ---
 // --- DYNAMIC DELIVERY CONFIGURATION ---
@@ -97,32 +82,23 @@ mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopol
 // --------- Multer with Cloudinary Storage ----------
 const storage = new CloudinaryStorage({
   cloudinary: cloudinary,
-  params: async (req, file) => {
-    // Folder logic
-    let folderPath = 'ecommerce/general';
-    if (req.originalUrl.includes('products')) folderPath = 'ecommerce/products';
-    else if (req.originalUrl.includes('categories')) folderPath = 'ecommerce/categories';
-    else if (req.originalUrl.includes('subcategories')) folderPath = 'ecommerce/subcategories';
-    else if (req.originalUrl.includes('banners')) folderPath = 'ecommerce/banners';
-    else if (req.originalUrl.includes('splash')) folderPath = 'ecommerce/splash';
-
-    // Resource type logic (Image vs Video)
-    const isVideo = file.mimetype.startsWith('video');
-
-    return {
-      folder: folderPath,
-      resource_type: isVideo ? 'video' : 'image',
-      allowed_formats: ['jpg', 'png', 'jpeg', 'gif', 'webp', 'mp4', 'mov', 'webm'],
-      // Agar video hai toh transformation bhi add kar sakte hain
-      public_id: Date.now() + '-' + file.originalname.split('.')[0],
-    };
+  params: {
+    folder: (req, file) => {
+      if (req.originalUrl.includes('products')) return 'ecommerce/products';
+      if (req.originalUrl.includes('categories')) return 'ecommerce/categories';
+      if (req.originalUrl.includes('subcategories')) return 'ecommerce/subcategories';
+      if (req.originalUrl.includes('banners')) return 'ecommerce/banners';
+      if (req.originalUrl.includes('splash')) return 'ecommerce/splash';
+      return 'ecommerce/general';
+    },
+    resource_type: (req, file) => {
+      if (file.mimetype.startsWith('video')) return 'video';
+      return 'image';
+    },
+    allowed_formats: ['jpg', 'png', 'jpeg', 'gif', 'webp', 'mp4', 'mov', 'webm'],
   },
 });
-
-const upload = multer({ 
-  storage: storage,
-  limits: { fileSize: 20 * 1024 * 1024 } // 20MB limit (Video ke liye zaroori hai)
-});
+const upload = multer({ storage });
 const uploadSingleMedia = upload.single('media');
 
 const productUpload = upload.fields([
@@ -457,17 +433,6 @@ const printJobSchema = new mongoose.Schema({
 
 const PrintJob = mongoose.model('PrintJob', printJobSchema);
 
-const auditLogSchema = new mongoose.Schema({
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-    action: { type: String, required: true }, // उदा: 'FAILED_LOGIN', 'WALLET_RECHARGE'
-    status: { type: String, enum: ['Success', 'Warning', 'Critical'], default: 'Success' },
-    ipAddress: String,
-    userAgent: String,
-    details: Object, // अतिरिक्त जानकारी के लिए
-    timestamp: { type: Date, default: Date.now }
-}, { timestamps: true });
-
-const AuditLog = mongoose.model('AuditLog', auditLogSchema);
 const printableFormSchema = new mongoose.Schema({
   seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   title: { type: String, required: true }, // उदा: "बिहार आय प्रमाण पत्र फॉर्म"
@@ -585,7 +550,7 @@ const rideSchema = new mongoose.Schema({
 
 // 3. Wallet Transaction Schema
 const walletTransactionSchema = new mongoose.Schema({
-    // ✅ Driver और Seller दोनों के लिए
+    // ✅ Driver और Seller दोनों के लिए (Optional रखें)
     driver: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, 
     seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, 
 
@@ -593,20 +558,15 @@ const walletTransactionSchema = new mongoose.Schema({
     rideId: { type: mongoose.Schema.Types.ObjectId, ref: 'Ride' },
     orderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order' },
 
-    // 🛡️ सुरक्षा: Unique Payment ID (हैक रोकने के लिए)
-    // 'unique: true' और 'sparse: true' का मतलब है कि एक Payment ID दोबारा इस्तेमाल नहीं हो पाएगी
-    razorpayPaymentId: { type: String, unique: true, sparse: true },
-
     type: { type: String, enum: ['Credit', 'Debit'], required: true },
-    amount: { type: Number, required: true },
+    amount: Number,
     balanceBefore: Number,
     balanceAfter: Number,
-    description: String,
-    
-    // ✅ ट्रांजैक्शन का स्टेटस ट्रैक करने के लिए
-    status: { type: String, enum: ['Pending', 'Success', 'Failed'], default: 'Success' }
+    description: String
 }, { timestamps: true });
 
+// ✅ SAHI CODE
+const Ride = mongoose.model('Ride', rideSchema);
 const WalletTransaction = mongoose.model('WalletTransaction', walletTransactionSchema);
 
 
@@ -1221,21 +1181,6 @@ if (serviceCategoryCount === 0) {
   }
 }
 
-const logActivity = async (req, action, status, details = {}) => {
-    try {
-        await AuditLog.create({
-            userId: req.user ? req.user._id : null,
-            action,
-            status,
-            ipAddress: req.ip || req.headers['x-forwarded-for'],
-            userAgent: req.headers['user-agent'],
-            details
-        });
-    } catch (err) {
-        console.error("Audit Log Failed:", err.message);
-    }
-};
-
 const printStorage = new CloudinaryStorage({
   cloudinary: cloudinary,
   params: {
@@ -1692,39 +1637,43 @@ app.get('/api/auth/profile', protect, async (req, res) => {
   }
 });
 
-
-
 // ✅ UPDATED: Update Profile (Fixed to read lat/lng from pickupAddress)
-// ✅ SECURITY-ENHANCED: Update Profile
 app.put('/api/auth/profile', protect, async (req, res) => {
   try {
+    // 1. Extract lat/lng along with other fields
     const { name, phone, pincodes, pickupAddress, lat, lng } = req.body;
     
-    // Use select('-password') as an extra layer of safety during fetch
-    const user = await User.findById(req.user._id).select('-password');
+    const user = await User.findById(req.user._id);
     if (!user) return res.status(404).json({ message: 'User not found' });
 
     if (name) user.name = name;
     if (phone) user.phone = phone;
     
+    // Check if 'pincodes' property is present
     if (pincodes !== undefined) { 
         user.pincodes = Array.isArray(pincodes) ? pincodes : []; 
     } 
 
-    // ✅ ROBUST EXTRACTION: Handle lat/lng from root or nested object
+    // ✅ CRITICAL FIX: Extract coordinates correctly
+    // Flutter sends them INSIDE pickupAddress, so we check there too.
     const latitude = lat || (pickupAddress ? pickupAddress.lat : null);
     const longitude = lng || (pickupAddress ? pickupAddress.lng : null);
 
+    // Save Location Coordinates (GeoJSON)
     if (latitude && longitude) {
         user.location = {
             type: 'Point',
-            // MongoDB GeoJSON expects [Longitude, Latitude]
+            // MongoDB expects [Longitude, Latitude]
             coordinates: [parseFloat(longitude), parseFloat(latitude)] 
         };
+        console.log(`📍 Location Saved: [${longitude}, ${latitude}]`);
     }
 
+    // Update Text Address Fields
     if (pickupAddress) {
+      // Use existing values if new ones aren't provided (Partial Update Safety)
       const currentAddress = user.pickupAddress || {};
+      
       user.pickupAddress = {
         street: pickupAddress.street || currentAddress.street,
         village: pickupAddress.village || currentAddress.village,
@@ -1732,20 +1681,17 @@ app.put('/api/auth/profile', protect, async (req, res) => {
         city: pickupAddress.city || currentAddress.city,
         state: pickupAddress.state || currentAddress.state,
         pincode: pickupAddress.pincode || currentAddress.pincode,
+        
+        // Mark as set if essential fields exist
         isSet: !!((pickupAddress.street || currentAddress.street) && 
                   (pickupAddress.pincode || currentAddress.pincode))
       };
     }
 
     await user.save();
-
-    // 🛡️ DATA SANITIZATION: Convert to object and ensure password is gone
-    const safeUserResponse = user.toObject();
-    delete safeUserResponse.password; // Double check
-
-    res.json(safeUserResponse);
+    res.json(user);
   } catch (err) {
-    console.error('🛡️ Profile Update Error:', err.message);
+    console.error('Error updating profile:', err.message);
     res.status(500).json({ message: 'Error updating profile' });
   }
 });
@@ -1781,9 +1727,6 @@ app.post('/api/auth/save-fcm-token', protect, async (req, res) => {
     res.status(500).json({ message: 'Error saving FCM token', error: err.message });
   }
 });
-
-
-
 
 
 // --------------------------------------------------------------------------------
@@ -2941,21 +2884,20 @@ app.post('/api/orders/calculate-summary', protect, async (req, res) => {
 // ============================================================
 // 📦 CREATE ORDER ENDPOINT (Full Logic)
 // ============================================================
-
 // ============================================================
-// 📦 CREATE ORDER ENDPOINT (Full Integrated Logic)
+// 📦 CREATE ORDER ENDPOINT (Full Logic)
 // ============================================================
 // ============================================================
-// 📦 CREATE ORDER ENDPOINT (Full Integrated Logic)
+// 📦 CREATE ORDER ENDPOINT (Updated with Admin Control)
 // ============================================================
 app.post('/api/orders', protect, async (req, res) => {
   try {
     const { shippingAddressId, paymentMethod, couponCode } = req.body;
 
-    // 1. Fetch Cart with nested Seller and Product details
+    // 1. Cart Fetch
     const cart = await Cart.findOne({ user: req.user._id }).populate({
       path: 'items.product',
-      select: 'name price originalPrice variants category seller lowStockThreshold stock unit', 
+      select: 'name price originalPrice variants category seller lowStockThreshold stock', 
       populate: {
         path: 'seller',
         select: 'pincodes name phone fcmToken walletBalance location' 
@@ -2966,52 +2908,63 @@ app.post('/api/orders', protect, async (req, res) => {
       return res.status(400).json({ message: 'Cart is empty' });
     }
 
-    // 2. Fetch Admin Settings
+    // ============================================================
+    // ⚙️ FETCH ADMIN SETTINGS
+    // ============================================================
     const appSettings = await AppSettings.findOne({ singleton: true });
+    
+    // अगर Admin ने allowPrintCOD true किया है, तो COD मिलेगा, वरना नहीं।
+    // Default false (सुरक्षा के लिए)
     const isPrintCODAllowed = appSettings ? appSettings.allowPrintCOD : false; 
-    const COMMISSION_RATE = appSettings ? appSettings.platformCommissionRate : 0.05; 
 
-    // 3. Block COD for Print Jobs if disabled by Admin
+    // ============================================================
+    // 🚫 CHECK: Block COD for Print Jobs (If Admin Disabled it)
+    // ============================================================
     const hasPrintJob = cart.items.some(item => item.isPrintJob === true);
+    
     if (hasPrintJob && (paymentMethod === 'cod' || paymentMethod === 'razorpay_cod')) {
+        // अगर कार्ट में प्रिंट जॉब है और यूजर ने COD चुना है
+        // तो चेक करो कि क्या Admin ने परमिशन दी है?
         if (!isPrintCODAllowed) {
             return res.status(400).json({ 
                 message: 'Cash on Delivery is currently disabled for Print orders. Please pay online.' 
             });
         }
     }
+    // ============================================================
 
     const shippingAddress = await Address.findById(shippingAddressId);
     if (!shippingAddress) return res.status(404).json({ message: 'Shipping address not found' });
 
-    // ✅ IMPROVEMENT: Format a complete label address including Name and Phone
-    // This ensures the Seller sees EXACTLY who to deliver to on the PDF label.
-    const labelFormattedAddress = `${shippingAddress.name}\n${shippingAddress.street}, ${shippingAddress.village || ''}\n${shippingAddress.city}, ${shippingAddress.state} - ${shippingAddress.pincode}\nPhone: ${shippingAddress.phone}`;
-
+    // --- Pre-order validation and grouping ---
     const ordersBySeller = new Map();
     let calculatedTotalCartAmount = 0; 
 
-    // 4. Group Items by Seller and Validate Stock
+    // ✅ Group Items by Seller
     for (const item of cart.items) {
       const product = item.product;
+      
       if (!product || !product.seller) {
-        return res.status(400).json({ message: `Invalid product or seller in cart.` });
+        return res.status(400).json({ message: `An item in your cart is invalid or its seller is inactive.` });
       }
 
-      const sellerId = product.seller._id.toString();
-      if (!ordersBySeller.has(sellerId)) {
-        ordersBySeller.set(sellerId, {
-          seller: product.seller,
-          orderItems: [],
-          totalAmount: 0,
-          calculatedShippingFee: 0 
-        });
-      }
-      const sellerOrder = ordersBySeller.get(sellerId);
-
-      // Scenario A: Print Job Logic
+      // ... (बाकी का कोड सेम रहेगा - Print Job Logic & Standard Product Logic) ...
+      // ... (SCENARIO 1: PRINT JOB LOGIC) ...
       if (item.isPrintJob && item.printMeta) {
+          const sellerId = product.seller._id.toString();
+          
+          if (!ordersBySeller.has(sellerId)) {
+            ordersBySeller.set(sellerId, {
+              seller: product.seller,
+              orderItems: [],
+              totalAmount: 0,
+              calculatedShippingFee: 0 
+            });
+          }
+
+          const sellerOrder = ordersBySeller.get(sellerId);
           const jobCost = Number(item.printMeta.totalCost) || 0; 
+
           sellerOrder.orderItems.push({
             product: product._id,
             name: item.printMeta.originalName || "Print Document",
@@ -3021,13 +2974,16 @@ app.post('/api/orders', protect, async (req, res) => {
             isPrintJob: true,
             printMeta: item.printMeta,
             category: product.category,
+            selectedColor: null,
+            selectedSize: null,
           });
+
           sellerOrder.totalAmount += jobCost;
           calculatedTotalCartAmount += jobCost;
           continue; 
       }
 
-      // Scenario B: Standard Product Logic (Variant Aware)
+      // ... (SCENARIO 2: STANDARD PRODUCT LOGIC) ...
       let itemPrice = product.price; 
       let itemOriginalPrice = product.originalPrice; 
       
@@ -3036,19 +2992,37 @@ app.post('/api/orders', protect, async (req, res) => {
               (v.color === item.selectedColor || (!v.color && !item.selectedColor)) && 
               (v.size === item.selectedSize || (!v.size && !item.selectedSize))
           );
-          if (!selectedVariant) return res.status(400).json({ message: `Invalid variant for: ${product.name}.` });
-          
+          if (!selectedVariant) {
+             return res.status(400).json({ message: `Invalid variant combination selected for product: ${product.name}.` });
+          }
           itemPrice = selectedVariant.price;
           itemOriginalPrice = selectedVariant.originalPrice;
-          if (selectedVariant.stock < item.qty) return res.status(400).json({ message: `Out of stock: ${product.name}` });
+          
+          if (selectedVariant.stock < item.qty) {
+            return res.status(400).json({ message: `Insufficient stock for product: ${product.name} (Variant).` });
+          }
       } else {
-          if (product.stock < item.qty) return res.status(400).json({ message: `Out of stock: ${product.name}` });
+          if (product.stock < item.qty) {
+            return res.status(400).json({ message: `Insufficient stock for product: ${product.name}` });
+          }
       }
 
       if (!product.seller.pincodes.includes(shippingAddress.pincode)) {
-        return res.status(400).json({ message: `Delivery unavailable for: "${product.name}"` });
+        return res.status(400).json({ message: `Sorry, delivery not available at your location for the product: "${product.name}"` });
       }
 
+      const sellerId = product.seller._id.toString();
+      if (!ordersBySeller.has(sellerId)) {
+        ordersBySeller.set(sellerId, {
+          seller: product.seller,
+          orderItems: [],
+          totalAmount: 0,
+          calculatedShippingFee: 0
+        });
+      }
+
+      const sellerOrder = ordersBySeller.get(sellerId);
+      
       sellerOrder.orderItems.push({
         product: product._id,
         name: product.name,
@@ -3058,7 +3032,6 @@ app.post('/api/orders', protect, async (req, res) => {
         category: product.category,
         selectedColor: item.selectedColor,
         selectedSize: item.selectedSize,
-        unit: product.unit || 'pcs',
         isPrintJob: false 
       });
 
@@ -3066,36 +3039,64 @@ app.post('/api/orders', protect, async (req, res) => {
       calculatedTotalCartAmount += itemPrice * item.qty;
     }
     
-    // 5. Calculate Totals and Shipping
-    const deliveryConfig = appSettings ? appSettings.deliveryConfig : {}; 
+    // --- 🚚 Calculate Shipping Fee ---
     let totalShippingFee = 0;
+    // (Use appSettings here too if needed for dynamic fee)
+    const deliveryConfig = appSettings ? appSettings.deliveryConfig : {}; 
+
     for (const [sellerId, sellerData] of ordersBySeller.entries()) {
-        let fee = (shippingAddress.lat && sellerData.seller.location?.coordinates) 
-            ? getDynamicDeliveryFee(getDistanceFromLatLonInKm(shippingAddress.lat, shippingAddress.lng, sellerData.seller.location.coordinates[1], sellerData.seller.location.coordinates[0]), deliveryConfig)
-            : calculateShippingFee(shippingAddress.pincode);
+        let fee = 0;
+        if (shippingAddress.lat && shippingAddress.lng && sellerData.seller.location && sellerData.seller.location.coordinates) {
+            const uLat = parseFloat(shippingAddress.lat);
+            const uLng = parseFloat(shippingAddress.lng);
+            const sLng = sellerData.seller.location.coordinates[0];
+            const sLat = sellerData.seller.location.coordinates[1];
+
+            const dist = getDistanceFromLatLonInKm(uLat, uLng, sLat, sLng);
+            fee = getDynamicDeliveryFee(dist, deliveryConfig); 
+        } else {
+            fee = calculateShippingFee(shippingAddress.pincode);
+        }
         sellerData.calculatedShippingFee = fee;
         totalShippingFee += fee;
     }
 
     const totalCartAmount = calculatedTotalCartAmount; 
+    
+    // --- Coupon & Tax ---
+    let discountAmount = 0;
     const GST_RATE_VAL = (typeof GST_RATE !== 'undefined') ? GST_RATE : 0;
     const totalTaxAmount = totalCartAmount * GST_RATE_VAL;
     
-    // 6. Apply Coupon
-    let discountAmount = 0;
     if (couponCode) {
-      const coupon = await Coupon.findOne({ code: couponCode, isActive: true, expiryDate: { $gt: new Date() }, minPurchaseAmount: { $lte: totalCartAmount } });
+      const coupon = await Coupon.findOne({
+        code: couponCode,
+        isActive: true,
+        expiryDate: { $gt: new Date() },
+        minPurchaseAmount: { $lte: totalCartAmount }
+      });
+
       if (coupon) {
-        discountAmount = coupon.discountType === 'percentage' 
-          ? Math.min(totalCartAmount * (coupon.discountValue / 100), coupon.maxDiscountAmount || Infinity)
-          : coupon.discountValue;
+        if (coupon.discountType === 'percentage') {
+          discountAmount = totalCartAmount * (coupon.discountValue / 100);
+          if (coupon.maxDiscountAmount && discountAmount > coupon.maxDiscountAmount) {
+            discountAmount = coupon.maxDiscountAmount;
+          }
+        } else if (coupon.discountType === 'fixed') {
+          discountAmount = coupon.discountValue;
+        }
       }
     }
     
-    const finalAmountForPayment = Math.max(0, totalCartAmount + totalShippingFee + totalTaxAmount - discountAmount);
-    const effectivePaymentMethod = (paymentMethod === 'razorpay' && finalAmountForPayment <= 0) ? 'cod' : paymentMethod;
+    let finalAmountForPayment = Math.max(0, totalCartAmount + totalShippingFee + totalTaxAmount - discountAmount);
+    
+    // Payment Method Check
+    let effectivePaymentMethod = paymentMethod;
+    if (paymentMethod === 'razorpay' && finalAmountForPayment <= 0) {
+      effectivePaymentMethod = 'cod';
+    }
 
-    // 7. Razorpay Order Initiation
+    // Razorpay Order Creation
     let razorpayOrder = null;
     if (effectivePaymentMethod === 'razorpay') {
       razorpayOrder = await razorpay.orders.create({
@@ -3105,19 +3106,41 @@ app.post('/api/orders', protect, async (req, res) => {
       });
     }
 
+    let fullAddress = `${shippingAddress.street}`;
+    if (shippingAddress.landmark) fullAddress += `, ${shippingAddress.landmark}`;
+    if (shippingAddress.village) fullAddress += `, ${shippingAddress.village}`;
+    fullAddress += `, ${shippingAddress.city}, ${shippingAddress.state} - ${shippingAddress.pincode}`;
+    
     const createdOrders = [];
+    const COMMISSION_RATE = appSettings ? appSettings.platformCommissionRate : 0.05; 
 
-    // 8. Create Seller Sub-Orders & Commission Logic
+    // Coupon Split Variables
+    let remainingDiscount = discountAmount;
+    let remainingTaxAmount = totalTaxAmount;
+
+    // --- Create Sub-Orders for Each Seller ---
     for (const [sellerId, sellerData] of ordersBySeller.entries()) {
-      const proportion = totalCartAmount > 0 ? sellerData.totalAmount / totalCartAmount : 0; 
-      const sellerDiscount = discountAmount * proportion;
-      const sellerTaxAmount = totalTaxAmount * proportion;
+      
+      const proportion = (totalCartAmount > 0) ? sellerData.totalAmount / totalCartAmount : 0; 
+
+      const sellerDiscount = remainingDiscount * proportion;
+      const sellerTaxAmount = remainingTaxAmount * proportion;
+
+      remainingDiscount -= sellerDiscount;
+      remainingTaxAmount -= sellerTaxAmount;
 
       const isCodOrFree = effectivePaymentMethod === 'cod' || finalAmountForPayment === 0;
-      const commissionAmount = parseFloat((sellerData.totalAmount * COMMISSION_RATE).toFixed(2));
       
+      const totalAmountFloat = parseFloat((sellerData.totalAmount || 0).toFixed(2));
+      const taxAmountFloat = parseFloat((sellerTaxAmount || 0).toFixed(2));
+      const discountAmountFloat = parseFloat((sellerDiscount || 0).toFixed(2));
+      const sellerShippingFee = sellerData.calculatedShippingFee; 
+      
+      // 💰 COMMISSION DEDUCTION
+      const commissionAmount = parseFloat((totalAmountFloat * COMMISSION_RATE).toFixed(2));
       const sellerUser = await User.findById(sellerId);
       const balanceBefore = sellerUser.walletBalance;
+      
       sellerUser.walletBalance -= commissionAmount; 
       await sellerUser.save();
 
@@ -3125,14 +3148,15 @@ app.post('/api/orders', protect, async (req, res) => {
         user: req.user._id,
         seller: sellerData.seller,
         orderItems: sellerData.orderItems, 
-        shippingAddress: labelFormattedAddress, // ✅ SAVED WITH NAME AND PHONE
+        shippingAddress: fullAddress,
         pincode: shippingAddress.pincode,
         paymentMethod: effectivePaymentMethod,
-        totalAmount: parseFloat(sellerData.totalAmount.toFixed(2)), 
-        taxAmount: parseFloat(sellerTaxAmount.toFixed(2)), 
+        totalAmount: totalAmountFloat, 
+        taxRate: GST_RATE_VAL,
+        taxAmount: taxAmountFloat, 
         couponApplied: couponCode,
-        discountAmount: parseFloat(sellerDiscount.toFixed(2)), 
-        shippingFee: sellerData.calculatedShippingFee, 
+        discountAmount: discountAmountFloat, 
+        shippingFee: sellerShippingFee, 
         paymentId: razorpayOrder ? razorpayOrder.id : (isCodOrFree ? `cod_${crypto.randomBytes(8).toString('hex')}` : undefined),
         paymentStatus: isCodOrFree ? 'completed' : 'pending',
         deliveryStatus: isCodOrFree ? 'Pending' : 'Payment Pending',
@@ -3141,78 +3165,95 @@ app.post('/api/orders', protect, async (req, res) => {
       await order.save();
       createdOrders.push(order);
 
-      // Wallet log
+      // Wallet Log
       await WalletTransaction.create({
-          seller: sellerId, orderId: order._id, type: 'Debit', amount: commissionAmount,
-          balanceBefore, balanceAfter: sellerUser.walletBalance,
+          seller: sellerId,
+          orderId: order._id,
+          type: 'Debit',
+          amount: commissionAmount,
+          balanceBefore: balanceBefore,
+          balanceAfter: sellerUser.walletBalance,
           description: `Platform Commission (Order #${order._id.toString().slice(-6)})`
       });
 
-      // 9. Handle Post-Order Logic for COD (Stock & Notifications)
+      const orderIdShort = order._id.toString().slice(-6);
+
+      // --- Post-creation actions (STOCK UPDATE FIX) ---
       if (isCodOrFree) {
-        const orderIdShort = order._id.toString().slice(-6);
-        
-        // Detailed Item List (Name | Rate/Unit | Qty)
-        const itemsDetail = sellerData.orderItems.map(i => 
-            `- ${i.name} | ₹${i.price}/${i.unit || 'pcs'} (Qty: ${i.qty})`
-        ).join('\n');
-
-        // Variant-Aware Stock Update
         for(const item of sellerData.orderItems) {
-            if (item.isPrintJob) continue;
-            await Product.findOneAndUpdate(
-                { _id: item.product, "variants": { $elemMatch: { color: item.selectedColor || null, size: item.selectedSize || null } } },
-                { $inc: { "variants.$.stock": -item.qty, "stock": -item.qty } }
-            );
+            if (item.isPrintJob) continue; // Skip stock update for print jobs
+
+            const productDoc = await Product.findById(item.product);
+            if (productDoc && productDoc.variants && productDoc.variants.length > 0) {
+                await Product.findOneAndUpdate(
+                    { _id: item.product, "variants": { $elemMatch: { color: item.selectedColor || null, size: item.selectedSize || null } } },
+                    { $inc: { "variants.$.stock": -item.qty, "stock": -item.qty } }
+                );
+            } else {
+                await Product.findByIdAndUpdate(item.product, { $inc: { stock: -item.qty } });
+            }
+
+            // Low Stock Alert
+            const updatedProduct = await Product.findById(item.product).populate('seller', 'fcmToken phone'); 
+            let currentStock = updatedProduct.stock;
+            if (updatedProduct.variants && updatedProduct.variants.length > 0) {
+                 const v = updatedProduct.variants.find(v => (v.color === item.selectedColor || (!v.color && !item.selectedColor)) && (v.size === item.selectedSize || (!v.size && !item.selectedSize)));
+                 if (v) currentStock = v.stock;
+            }
+            if (updatedProduct && currentStock <= updatedProduct.lowStockThreshold) {
+                const alertMsg = `⚠️ Low Stock Alert: "${updatedProduct.name}" is running low (${currentStock} left).`;
+                if (updatedProduct.seller.fcmToken) {
+                    await sendPushNotification([updatedProduct.seller.fcmToken], 'Stock Alert 📉', alertMsg, { type: 'LOW_STOCK' });
+                }
+            }
         }
 
-        // --- SELLER NOTIFICATIONS ---
-        const sellerPushMsg = `New Order #${orderIdShort} from ${req.user.name}: ₹${order.totalAmount.toFixed(2)}`;
-        const sellerWhatsAppMsg = `📦 *New COD Order!* (#${orderIdShort})\n\n` +
-                                  `👤 *Customer:* ${req.user.name}\n` +
-                                  `📞 *Contact:* ${req.user.phone}\n\n` +
-                                  `🛍️ *Items:*\n${itemsDetail}\n\n` +
-                                  `💵 *Collect Amount:* ₹${order.totalAmount.toFixed(2)}\n\n` +
-                                  `📍 *Address:* ${shippingAddress.street}, ${shippingAddress.city}`;
-
-        await sendWhatsApp(sellerData.seller.phone, sellerWhatsAppMsg);
+        // Notifications & Delivery Assignment (Same as before)
+        const userMessage = `✅ Your COD order #${orderIdShort} has been successfully placed!`;
+        const sellerMessage = `🎉 New Order (COD)!\nOrder #${orderIdShort}. Subtotal: ₹${totalAmountFloat.toFixed(2)}.`;
         
-        if (sellerData.seller.fcmToken) {
-            await sendPushNotification(
-                [sellerData.seller.fcmToken],
-                'New COD Order! 🚚',
-                sellerPushMsg,
-                { orderId: order._id.toString(), type: 'NEW_ORDER' }
-            );
-        }
+        await sendAndSavePersonalNotification(req.user._id, 'Order Placed! 🎉', `Order #${orderIdShort} placed.`, { orderId: order._id.toString(), type: 'ORDER_PLACED' });
+        await sendWhatsApp(req.user.phone, userMessage);
+        await sendWhatsApp(sellerData.seller.phone, sellerMessage);
+        await notifyAdmin(`Admin Alert: New COD order #${orderIdShort} placed.`);
 
-        await sendAndSavePersonalNotification(req.user._id, 'Order Placed! 🎉', `Order #${orderIdShort} placed successfully.`, { orderId: order._id.toString(), type: 'ORDER_PLACED' });
-
-        // Delivery Assignment
         try {
-            await DeliveryAssignment.create({ order: order._id, status: 'Pending', pincode: shippingAddress.pincode });
-            const nearbyDeliveryBoys = await User.find({ role: 'delivery', approved: true, pincodes: shippingAddress.pincode }).select('fcmToken');
+            const orderPincode = shippingAddress.pincode;
+            await DeliveryAssignment.create({
+              order: order._id, deliveryBoy: null, status: 'Pending', pincode: orderPincode, history: [{ status: 'Pending' }]
+            });
+            const nearbyDeliveryBoys = await User.find({ role: 'delivery', approved: true, pincodes: orderPincode }).select('fcmToken');
             const deliveryTokens = nearbyDeliveryBoys.map(db => db.fcmToken).filter(Boolean);
             if (deliveryTokens.length > 0) {
-              await sendPushNotification(deliveryTokens, 'New Delivery Available! 🛵', `New order #${orderIdShort} in ${shippingAddress.pincode}.`, { orderId: order._id.toString(), type: 'NEW_DELIVERY_AVAILABLE' });
+              await sendPushNotification(deliveryTokens, 'New Delivery Available! 🛵', `New order #${orderIdShort} in ${orderPincode}.`, { orderId: order._id.toString(), type: 'NEW_DELIVERY_AVAILABLE' });
             }
-        } catch (e) { console.error("Delivery Assignment Error:", e.message); }
+        } catch (deliveryErr) { console.error('Delivery Assign Error:', deliveryErr.message); }
+        
+      } else {
+        const userMessage = `🔔 Your order #${orderIdShort} is awaiting payment.`;
+        await sendWhatsApp(req.user.phone, userMessage);
       }
     }
 
-    if (effectivePaymentMethod === 'cod') await Cart.deleteOne({ user: req.user._id }); 
+    if (effectivePaymentMethod === 'cod') {
+      await Cart.deleteOne({ user: req.user._id }); 
+    }
 
     res.status(201).json({
       message: effectivePaymentMethod === 'razorpay' ? 'Order initiated.' : 'Orders created successfully',
       orders: createdOrders.map(o => o._id),
       razorpayOrder: razorpayOrder ? { id: razorpayOrder.id, amount: razorpayOrder.amount, key_id: process.env.RAZORPAY_KEY_ID } : undefined,
+      user: { name: req.user.name, email: req.user.email, phone: req.user.phone },
+      paymentMethod: effectivePaymentMethod,
       grandTotal: finalAmountForPayment,
     });
 
   } catch (err) {
+    console.error('Create order error:', err.message);
     res.status(500).json({ message: 'Error creating order', error: err.message });
   }
 });
+
 app.get('/api/orders', protect, async (req, res) => {
   try {
     const orders = await Order.find({ user: req.user._id })
@@ -3566,150 +3607,103 @@ app.put('/api/orders/:id/submit-upi', protect, async (req, res) => {
  * @param {string} order_id - The Razorpay Order ID.
  * @param {string} payment_id - The Razorpay Payment ID.
  */
-// ✅ FINAL UPDATED: handleSuccessfulPayment (With populate and unit details)
 async function handleSuccessfulPayment(order_id, payment_id) {
     console.log(`Handling successful payment for Razorpay Order ID: ${order_id}`);
-    
-    // Sabhi pending orders fetch karein (Populate orderItems for better details)
     const orders = await Order.find({ paymentId: order_id, paymentStatus: 'pending' });
 
     if (!orders || orders.length === 0) {
-        console.log(`No pending orders found for Razorpay Order ID: ${order_id}.`);
-        return;
+      console.log(`No pending orders found for Razorpay Order ID: ${order_id}. Might be already processed.`);
+      return;
     }
     
     const paymentHistoryEntries = [];
     let customerId = orders[0].user;
     
-    // Customer details pehle hi fetch kar lein seller notification mein naam dikhane ke liye
-    const customerInfo = await User.findById(customerId).select('name phone fcmToken');
-
     for (const order of orders) {
-        // --- STEP 1: Update Order Status ---
-        order.paymentStatus = 'completed';
-        order.deliveryStatus = 'Pending';
-        order.history.push({ 
-            status: 'Payment Completed', 
-            note: 'Razorpay verification successful.' 
+      // 1. Update Order Status
+      order.paymentStatus = 'completed';
+      order.deliveryStatus = 'Pending';
+      order.history.push({ status: 'Payment Completed', note: 'Razorpay verification successful.' });
+      order.paymentId = payment_id;
+      await order.save();
+      
+      // 2. Deduct Stock
+     // ✅ FIXED: Decrease Variant Stock AND Main Stock
+for (const item of order.orderItems) {
+    const productDoc = await Product.findById(item.product);
+
+    if (productDoc && productDoc.variants && productDoc.variants.length > 0) {
+        await Product.findOneAndUpdate(
+            {
+                _id: item.product,
+                "variants": {
+                    $elemMatch: {
+                        color: item.selectedColor || null,
+                        size: item.selectedSize || null
+                    }
+                }
+            },
+            { $inc: { "variants.$.stock": -item.qty, "stock": -item.qty } }
+        );
+    } else {
+        await Product.findByIdAndUpdate(item.product, { $inc: { stock: -item.qty } });
+    }
+}
+      // 3. Create Delivery Assignment
+      try {
+        const orderPincode = order.pincode;
+        await DeliveryAssignment.create({
+          order: order._id,
+          deliveryBoy: null,
+          status: 'Pending',
+          pincode: orderPincode,
+          history: [{ status: 'Pending' }]
         });
-        order.paymentId = payment_id;
-        await order.save();
 
-        // --- STEP 2: Detailed Seller Notification ---
-        // Items detail with Rate and Unit (agar available ho)
-        const itemsDetail = order.orderItems.map(item => 
-            `- ${item.name} | ₹${item.price}/${item.unit || 'pcs'} (Qty: ${item.qty})`
-        ).join('\n');
-
-        const seller = await User.findById(order.seller).select('phone fcmToken name');
+        const nearbyDeliveryBoys = await User.find({ role: 'delivery', approved: true, pincodes: orderPincode }).select('fcmToken');
+        const deliveryTokens = nearbyDeliveryBoys.map(db => db.fcmToken).filter(Boolean);
         
-        const sellerMessage = `🎉 *New Paid Order!* (#${order._id.toString().slice(-6)})\n\n` +
-                              `👤 *Customer:* ${customerInfo?.name || 'Customer'}\n` +
-                              `📞 *Contact:* ${customerInfo?.phone || 'N/A'}\n\n` +
-                              `📦 *Items:*\n${itemsDetail}\n\n` +
-                              `💰 *Total Amount:* ₹${order.totalAmount.toFixed(2)}\n` +
-                              `📍 *Pincode:* ${order.pincode}\n\n` +
-                              `Kripya dashboard mein order process karein.`;
-
-        // Notification to Seller
-        if (seller) {
-            await sendWhatsApp(seller.phone, sellerMessage);
-            if (seller.fcmToken) {
-                await sendPushNotification(
-                    [seller.fcmToken],
-                    'New Paid Order! 🛍️',
-                    `Order from ${customerInfo?.name || 'User'} for ₹${order.totalAmount.toFixed(2)}`,
-                    { orderId: order._id.toString(), type: 'NEW_ORDER' }
-                );
-            }
+        if (deliveryTokens.length > 0) {
+          await sendPushNotification(
+            deliveryTokens,
+            'New Delivery Available! 🛵',
+            `A new paid order (#${order._id.toString().slice(-6)}) is available for pickup.`,
+            { orderId: order._id.toString(), type: 'NEW_DELIVERY_AVAILABLE' }
+          );
         }
+      } catch (deliveryErr) {
+        console.error('Failed to create delivery assignment or notify boys:', deliveryErr.message);
+      }
 
-        // --- STEP 3: Deduct Stock (Variant Aware) ---
-        for (const item of order.orderItems) {
-            if (item.isPrintJob) continue; // Print jobs ka stock nahi hota
+      // 4. Send Seller Notifications
+      const seller = await User.findById(order.seller).select('phone fcmToken name');
+      const sellerMessage = `🎉 New Paid Order!\nYou've received a new order #${order._id.toString().slice(-6)}. Item Total: ₹${order.totalAmount.toFixed(2)}.`;
+      await sendWhatsApp(seller.phone, sellerMessage);
 
-            const productDoc = await Product.findById(item.product);
-
-            if (productDoc && productDoc.variants && productDoc.variants.length > 0) {
-                await Product.findOneAndUpdate(
-                    {
-                        _id: item.product,
-                        "variants": {
-                            $elemMatch: {
-                                color: item.selectedColor || null,
-                                size: item.selectedSize || null
-                            }
-                        }
-                    },
-                    { $inc: { "variants.$.stock": -item.qty, "stock": -item.qty } }
-                );
-            } else {
-                await Product.findByIdAndUpdate(item.product, { $inc: { stock: -item.qty } });
-            }
-        }
-
-        // --- STEP 4: Create Delivery Assignment ---
-        try {
-            const orderPincode = order.pincode;
-            await DeliveryAssignment.create({
-                order: order._id,
-                deliveryBoy: null,
-                status: 'Pending',
-                pincode: orderPincode,
-                history: [{ status: 'Pending' }]
-            });
-
-            // Nearby Delivery Boys Notification
-            const nearbyDeliveryBoys = await User.find({ 
-                role: 'delivery', 
-                approved: true, 
-                pincodes: orderPincode 
-            }).select('fcmToken');
-            
-            const deliveryTokens = nearbyDeliveryBoys.map(db => db.fcmToken).filter(Boolean);
-            
-            if (deliveryTokens.length > 0) {
-                await sendPushNotification(
-                    deliveryTokens,
-                    'New Delivery Available! 🛵',
-                    `New paid order in ${orderPincode}. Open app to accept.`,
-                    { orderId: order._id.toString(), type: 'NEW_DELIVERY_AVAILABLE' }
-                );
-            }
-        } catch (deliveryErr) {
-            console.error('Delivery Error:', deliveryErr.message);
-        }
-
-        // --- STEP 5: Payment History ---
-        paymentHistoryEntries.push({
-            user: customerId,
-            order: order._id,
-            razorpayOrderId: order_id,
-            razorpayPaymentId: payment_id,
-            amount: order.totalAmount,
-            status: 'completed',
-        });
+      // 5. Add to Payment History
+      paymentHistoryEntries.push({
+        user: order.user,
+        order: order._id,
+        razorpayOrderId: order_id,
+        razorpayPaymentId: payment_id,
+        amount: order.totalAmount,
+        status: 'completed',
+      });
     }
     
     await PaymentHistory.insertMany(paymentHistoryEntries);
     
-    // --- STEP 6: Clear Cart ---
+    // 6. Clear Cart
     await Cart.deleteOne({ user: customerId });
     
-    // --- STEP 7: Final Customer Confirmation ---
+    // 7. Final User Notification
+    const customerInfo = await User.findById(customerId).select('name phone fcmToken');
     if (customerInfo) {
-        const customerMsg = `✅ Your payment has been confirmed and your order is being processed! Thank you, ${customerInfo.name}!`;
-        await sendWhatsApp(customerInfo.phone, customerMsg);
-        if (customerInfo.fcmToken) {
-            await sendPushNotification(
-                [customerInfo.fcmToken], 
-                'Payment Confirmed! ✅', 
-                `Your order #${orders[0]._id.toString().slice(-6)} is being processed!`,
-                { type: 'ORDER_UPDATE' }
-            );
-        }
+      await sendWhatsApp(customerInfo.phone, `✅ Your payment has been confirmed and your order is being processed! Thank you, ${customerInfo.name}!`);
+      await sendPushNotification(customerInfo.fcmToken, 'Payment Confirmed! ✅', `Your order is now being processed!`);
     }
 }
+
 /**
  * Handles all logic for a failed payment.
  * @param {string} order_id - The Razorpay Order ID.
@@ -4780,10 +4774,7 @@ app.delete('/api/seller/products/:id', protect, authorizeRole('seller', 'admin')
 
 app.get('/api/seller/orders/:id/shipping-label', protect, authorizeRole('seller'), async (req, res) => {
   try {
-    // UPDATED: We no longer strictly need to populate 'user' for the 'SHIP TO' section 
-    // because the specific delivery name and address are stored in order.shippingAddress
     const order = await Order.findById(req.params.id).populate('user', 'name phone');
-    
     if (!order) {
       return res.status(404).json({ message: 'Order not found' });
     }
@@ -4794,12 +4785,12 @@ app.get('/api/seller/orders/:id/shipping-label', protect, authorizeRole('seller'
 
     const sellerAddress = req.user.pickupAddress;
     if (!sellerAddress || !sellerAddress.isSet || !sellerAddress.pincode) {
-      return res.status(400).json({ message: 'Seller pickup address is not set. Please update profile.' });
+      return res.status(400).json({ message: 'Seller pickup address is not set in your profile. Please update it first.' });
     }
 
-    // The order.shippingAddress field should contain the full formatted string 
-    // including the Name and Phone Number captured at the time of order.
-    const customerFullDetails = order.shippingAddress;
+    const customerAddressString = order.shippingAddress;
+    const customerName = order.user.name;
+    const customerPhone = order.user.phone;
     const orderId = order._id.toString();
 
     const barcodePng = await bwipjs.toBuffer({
@@ -4823,7 +4814,6 @@ app.get('/api/seller/orders/:id/shipping-label', protect, authorizeRole('seller'
 
     doc.pipe(res);
 
-    // Header Details
     doc.fontSize(14).font('Helvetica-Bold').text(`Order: #${orderId.slice(-8)}`, { align: 'center' });
     doc.fontSize(10).font('Helvetica').text(`Payment: ${order.paymentMethod.toUpperCase()}`, { align: 'center' });
 
@@ -4832,7 +4822,6 @@ app.get('/api/seller/orders/:id/shipping-label', protect, authorizeRole('seller'
     }
     doc.moveDown(1);
 
-    // SHIP FROM (Seller Details)
     doc.fontSize(10).font('Helvetica-Bold').text('SHIP FROM:');
     doc.fontSize(10).font('Helvetica').text(req.user.name);
     doc.text(sellerAddress.street);
@@ -4843,17 +4832,11 @@ app.get('/api/seller/orders/:id/shipping-label', protect, authorizeRole('seller'
 
     doc.moveDown(2);
 
-    // SHIP TO (User Delivery Details)
-    // UPDATED: Printing the exact delivery data provided by the user during checkout
     doc.rect(15, 170, 258, 120).stroke();
     doc.fontSize(12).font('Helvetica-Bold').text('SHIP TO:', 20, 175);
-    
-    // We print the stored shippingAddress string which contains the user's 
-    // chosen delivery name, phone, and address details.
-    doc.fontSize(11).font('Helvetica').text(customerFullDetails, 20, 195, { 
-        width: 248,
-        align: 'left'
-    });
+    doc.fontSize(14).font('Helvetica-Bold').text(customerName, 20, 195);
+    doc.fontSize(12).font('Helvetica').text(`Phone: ${customerPhone}`, 20, 215);
+    doc.text(customerAddressString, 20, 235, { width: 248 });
 
     doc.moveDown(6);
 
@@ -4872,6 +4855,7 @@ app.get('/api/seller/orders/:id/shipping-label', protect, authorizeRole('seller'
     }
   }
 });
+
 app.get('/api/delivery/available-orders', protect, authorizeRole('delivery'), async (req, res) => {
   try {
     const myPincodes = req.user.pincodes;
@@ -6788,163 +6772,144 @@ app.post('/api/orders/buy-now-summary', protect, async (req, res) => {
 
 
 // ✅ NEW: Endpoint to place an order for a single "Buy Now" item
-// ✅ FULL UPDATED: Buy Now logic with Notifications, Commission, and Stock logic
-// ✅ FULL UPDATED: Buy Now logic with detailed Notifications and Commission
 app.post('/api/orders/buy-now', protect, async (req, res) => {
-    const { productId, variantId, qty = 1, shippingAddressId, paymentMethod, couponCode } = req.body;
+    // 1. Change the input from productId to variantId
+    const { variantId, qty = 1, shippingAddressId, paymentMethod, couponCode } = req.body;
 
+    // We'll use a transaction for atomicity, which is crucial for stock management
     const session = await mongoose.startSession();
     session.startTransaction();
 
     try {
-        // 1. Fetch Product and Shipping Address
-        const product = await Product.findById(productId).populate('seller').session(session);
-        const shippingAddress = await Address.findById(shippingAddressId).session(session);
+        // 2. Lookup the Variant and populate its parent Product and Seller
+        const variant = await Variant.findById(variantId)
+            .populate('product') // Populate the parent product
+            .session(session); // Use session for consistent reads
 
-        if (!product) throw new Error('Product not found');
-        if (!shippingAddress) throw new Error('Shipping address not found');
-
-        // 2. Find specific variant from nested array
-        const variant = product.variants.id(variantId);
-        if (!variant) throw new Error('Selected variant not found');
-
-        // 3. Stock & Pincode Validations
-        if (variant.stock < qty) throw new Error(`Insufficient stock for ${product.name}`);
-        if (!product.seller.pincodes.includes(shippingAddress.pincode)) {
-            throw new Error(`Delivery not available at your location (${shippingAddress.pincode}).`);
+        if (!variant || !variant.product) {
+            await session.abortTransaction();
+            return res.status(404).json({ message: 'Product variant not found.' });
         }
 
-        // 4. Pricing & App Settings
-        const itemsTotal = variant.price * qty;
-        const appSettings = await AppSettings.findOne({ singleton: true }).session(session);
-        const deliveryFee = calculateShippingFee(shippingAddress.pincode);
-        const GST_RATE_VAL = (typeof GST_RATE !== 'undefined') ? GST_RATE : 0;
-        const taxAmount = itemsTotal * GST_RATE_VAL;
+        // Assign to product/seller for cleaner code, consistent with original logic
+        const product = variant.product;
+        // Since we need seller info (pincodes), we need another lookup or to populate deeper
+        const seller = await User.findById(product.seller).select('pincodes name phone fcmToken').session(session);
+
+        const shippingAddress = await Address.findById(shippingAddressId).session(session);
+
+        // Validations
+        if (!shippingAddress) {
+            await session.abortTransaction();
+            return res.status(404).json({ message: 'Shipping address not found.' });
+        }
         
-        let discountAmount = 0; // Coupon logic yahan merge karein
+        // Stock check now uses variant.stock
+        if (variant.stock < qty) {
+            await session.abortTransaction();
+            return res.status(400).json({ message: `Insufficient stock for ${product.name} (Variant: ${variant.color}, ${variant.size})` });
+        }
+        
+        // Pincode check uses the fetched seller object
+        if (!seller.pincodes.includes(shippingAddress.pincode)) {
+             await session.abortTransaction();
+             return res.status(400).json({ message: `Delivery not available for ${product.name} at your location.` });
+        }
+        
+        // Calculations now use variant.price
+        const itemsTotal = variant.price * qty;
+        let discountAmount = 0;
+        const shippingFee = calculateShippingFee(shippingAddress.pincode);
+        const taxAmount = itemsTotal * GST_RATE;
 
-        const finalAmountForPayment = Math.max(0, itemsTotal + deliveryFee + taxAmount - discountAmount);
-        const effectivePaymentMethod = (paymentMethod === 'razorpay' && finalAmountForPayment <= 0) ? 'cod' : paymentMethod;
+        // ... (Coupon Logic remains here)
+        
+        let finalAmountForPayment = Math.max(0, itemsTotal + shippingFee + taxAmount - discountAmount);
+        
+        let effectivePaymentMethod = paymentMethod;
+        if (paymentMethod === 'razorpay' && finalAmountForPayment <= 0) {
+            effectivePaymentMethod = 'cod';
+        }
 
-        // 5. Razorpay Initiation
         let razorpayOrder = null;
         if (effectivePaymentMethod === 'razorpay') {
             razorpayOrder = await razorpay.orders.create({
                 amount: Math.round(finalAmountForPayment * 100),
                 currency: 'INR',
-                receipt: `rcpt_bn_${crypto.randomBytes(4).toString('hex')}`,
+                receipt: `rcpt_buynow_${crypto.randomBytes(4).toString('hex')}`,
             });
         }
-
+        
         const isCodOrFree = effectivePaymentMethod === 'cod' || finalAmountForPayment === 0;
 
-        // 6. Platform Commission (Wallet Deduction)
-        const COMMISSION_RATE = appSettings ? appSettings.platformCommissionRate : 0.05;
-        const commissionAmount = parseFloat((itemsTotal * COMMISSION_RATE).toFixed(2));
-        const sellerUser = await User.findById(product.seller._id).session(session);
-        
-        const balanceBefore = sellerUser.walletBalance;
-        sellerUser.walletBalance -= commissionAmount;
-        await sellerUser.save({ session });
-
-        // 7. Save Order Document
         const order = new Order({
             user: req.user._id,
-            seller: product.seller._id,
+            seller: seller._id, // Use the fetched seller
             orderItems: [{
                 product: product._id,
                 name: product.name,
                 qty: qty,
-                price: variant.price,
-                originalPrice: variant.originalPrice || product.originalPrice,
-                selectedColor: variant.color,
-                selectedSize: variant.size,
-                unit: product.unit || 'pcs', // Important for notification
-                isPrintJob: false
+                price: variant.price, // Use variant's price
+                originalPrice: product.originalPrice,
+                category: product.category,
+                // 4. SAVE COLOR AND SIZE ATTRIBUTES HERE!
+                variantId: variant._id, 
+                color: variant.color,
+                size: variant.size,
+                // Assuming variant has a 'sku' field
+                sku: variant.sku, 
             }],
             shippingAddress: `${shippingAddress.street}, ${shippingAddress.city}, ${shippingAddress.state} - ${shippingAddress.pincode}`,
             pincode: shippingAddress.pincode,
             paymentMethod: effectivePaymentMethod,
             totalAmount: itemsTotal,
             taxAmount,
+            couponApplied: couponCode,
             discountAmount,
-            shippingFee: deliveryFee,
+            shippingFee,
             paymentId: razorpayOrder ? razorpayOrder.id : (isCodOrFree ? `cod_${crypto.randomBytes(8).toString('hex')}` : undefined),
             paymentStatus: isCodOrFree ? 'completed' : 'pending',
             deliveryStatus: isCodOrFree ? 'Pending' : 'Payment Pending',
             history: [{ status: isCodOrFree ? 'Pending' : 'Payment Pending' }]
         });
-        await order.save({ session });
+        
+        await order.save({ session }); // Save the order within the transaction
 
-        // 8. Log Commission Transaction
-        await WalletTransaction.create([{
-            seller: product.seller._id,
-            orderId: order._id,
-            type: 'Debit',
-            amount: commissionAmount,
-            balanceBefore,
-            balanceAfter: sellerUser.walletBalance,
-            description: `Commission for Buy Now #${order._id.toString().slice(-6)}`
-        }], { session });
-
-        // 9. Post-Order Logic (Stock, WhatsApp, FCM)
         if (isCodOrFree) {
-            // Decrement Stock
-            variant.stock -= qty;
-            await product.save({ session });
-
-            const orderIdShort = order._id.toString().slice(-6);
+            // 3. Atomically decrement stock on the Variant model
+            const updatedVariant = await Variant.findOneAndUpdate(
+                { _id: variant._id, stock: { $gte: qty } },
+                { $inc: { stock: -qty } },
+                { new: true, session }
+            );
             
-            // --- DETAILED NOTIFICATION MESSAGE ---
-            const itemString = `${product.name} | ₹${variant.price}/${product.unit || 'pcs'} (Qty: ${qty})`;
-            const sellerPushMsg = `New Buy Now Order #${orderIdShort} for ₹${order.totalAmount.toFixed(2)}`;
-            // ✅ UPDATED: Detailed Notifications for Buy Now
-            const sellerWhatsAppMsg = `🎉 *New Buy Now Order!* (#${orderIdShort})\n\n` +
-                          `👤 *Customer:* ${req.user.name}\n` +
-                          `📞 *Contact:* ${req.user.phone}\n\n` +
-                          `📦 *Item:* ${product.name} | ₹${variant.price} (Qty: ${qty})\n` +
-                          `💰 *Collect:* ₹${order.totalAmount.toFixed(2)}`;
-
-             await sendWhatsApp(sellerUser.phone, sellerWhatsAppMsg);
-
-            // Push Notification to Seller
-            if (sellerUser.fcmToken) {
-                await sendPushNotification(
-                    [sellerUser.fcmToken],
-                    'New Order Received! 🛍️',
-                    sellerPushMsg,
-                    { orderId: order._id.toString(), type: 'NEW_ORDER' }
-                );
+            if (!updatedVariant) {
+                await session.abortTransaction();
+                return res.status(409).json({ message: `Concurrency error: Insufficient stock for ${product.name}. Please try again.` });
             }
-
-            // Create Delivery Assignment & Notify Delivery Boys
-            await DeliveryAssignment.create([{
-                order: order._id, status: 'Pending', pincode: shippingAddress.pincode
-            }], { session });
-
-            const deliveryBoys = await User.find({ role: 'delivery', approved: true, pincodes: shippingAddress.pincode }).select('fcmToken');
-            const deliveryTokens = deliveryBoys.map(db => db.fcmToken).filter(Boolean);
-            if (deliveryTokens.length > 0) {
-              await sendPushNotification(deliveryTokens, 'New Delivery Available! 🛵', `New order in ${shippingAddress.pincode}.`, { orderId: order._id.toString(), type: 'NEW_DELIVERY_AVAILABLE' });
-            }
+            // Send notifications, etc.
         }
 
-        await session.commitTransaction();
+        await session.commitTransaction(); // Commit all changes if successful
         session.endSession();
 
         res.status(201).json({
-            message: effectivePaymentMethod === 'razorpay' ? 'Order initiated.' : 'Order placed successfully.',
+            message: effectivePaymentMethod === 'razorpay' ? 'Order initiated, awaiting payment.' : 'Order created successfully.',
             orders: [order._id],
             razorpayOrder: razorpayOrder ? { id: razorpayOrder.id, amount: razorpayOrder.amount, key_id: process.env.RAZORPAY_KEY_ID } : undefined,
-            grandTotal: finalAmountForPayment
         });
 
     } catch (err) {
-        if (session.inTransaction()) await session.abortTransaction();
+        if (session.inTransaction()) {
+            await session.abortTransaction(); // Rollback on error
+        }
         session.endSession();
-        res.status(500).json({ message: err.message });
+        res.status(500).json({ message: 'Error placing Buy Now order', error: err.message });
     }
 });
+
+// [NEW] API Endpoint for a customer to initiate a return request
+// server.js
 
 // [NEW] API Endpoint for a customer to initiate a return request
 app.post('/api/orders/:id/return-request', protect, async (req, res) => {
@@ -7794,7 +7759,7 @@ app.delete('/api/services/:id', protect, authorizeRole('provider', 'admin'), asy
 // --------------------------------------------------------------------------------
 
 // Constants
-const MIN_DRIVER_BALANCE = 00;
+const MIN_DRIVER_BALANCE = 0;
 const COMMISSION_PERCENTAGE = 10; // 10% Platform fee
 
 // 1. Update Driver Location & Status (Online/Offline)
@@ -8294,15 +8259,15 @@ app.post('/api/wallet/create-order', protect, async (req, res) => {
 // 2. Verify Payment & Credit Wallet
 app.post('/api/wallet/verify-recharge', protect, async (req, res) => {
     try {
-        // नोट: हम body से 'amount' नहीं ले रहे हैं (सुरक्षा के लिए)
-        const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
+        const { razorpay_order_id, razorpay_payment_id, razorpay_signature, amount } = req.body;
         const user = req.user;
 
+        // ✅ 1. Role Validation: Allow both Drivers and Sellers
         if (user.role !== 'driver' && user.role !== 'seller') {
-            return res.status(403).json({ message: 'Wallet feature is only for drivers and sellers' });
+             return res.status(403).json({ message: 'Wallet feature is only for drivers and sellers' });
         }
 
-        // 🛡️ 1. Signature Verification (Same as before)
+        // ✅ 2. Verify Razorpay Signature
         const shasum = crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET);
         shasum.update(`${razorpay_order_id}|${razorpay_payment_id}`);
         const digest = shasum.digest('hex');
@@ -8311,54 +8276,35 @@ app.post('/api/wallet/verify-recharge', protect, async (req, res) => {
             return res.status(400).json({ message: 'Transaction verification failed' });
         }
 
-        // 🛡️ 2. CRITICAL SECURITY: Fetch Actual Amount from Razorpay API
-        // यह सुनिश्चित करता है कि यूजर ने अमाउंट के साथ छेड़छाड़ नहीं की है
-        const paymentDetails = await razorpay.payments.fetch(razorpay_payment_id);
+        // ✅ 3. Update Wallet Balance
+        const rechargeAmount = parseFloat(amount);
+        const balanceBefore = user.walletBalance;
+        user.walletBalance += rechargeAmount;
 
-        if (paymentDetails.status !== 'captured') {
-            return res.status(400).json({ message: 'Payment not captured or failed' });
-        }
-
-        // Razorpay अमाउंट को 'paise' में देता है, इसे 'rupees' में बदलें
-        const verifiedAmount = paymentDetails.amount / 100; 
-
-        // 🛡️ 3. Idempotency Check: क्या यह Payment ID पहले इस्तेमाल हो चुकी है?
-        const existingTxn = await WalletTransaction.findOne({ razorpayPaymentId: razorpay_payment_id });
-        if (existingTxn) {
-            return res.status(400).json({ message: 'This payment has already been credited to a wallet' });
-        }
-
-        // 4. Update Balance using Verified Amount
-        const balanceBefore = user.walletBalance || 0;
-        user.walletBalance = balanceBefore + verifiedAmount;
-
-        if (user.role === 'driver' && user.walletBalance >= (global.MIN_DRIVER_BALANCE || 100)) {
+        // ✅ 4. Driver Specific Logic: Unlock if balance covers minimum
+        // (Sellers don't usually get "locked" from the app, they just can't add products)
+        if (user.role === 'driver' && user.walletBalance >= MIN_DRIVER_BALANCE) {
             user.isLocked = false;
         }
 
         await user.save();
 
-        // 5. Log Transaction with Unique Payment ID
+        // ✅ 5. Log Transaction (Dynamic based on Role)
         await WalletTransaction.create({
-            driver: user.role === 'driver' ? user._id : undefined,
-            seller: user.role === 'seller' ? user._id : undefined,
+            driver: user.role === 'driver' ? user._id : undefined, // Only set if driver
+            seller: user.role === 'seller' ? user._id : undefined, // Only set if seller
             type: 'Credit',
-            amount: verifiedAmount,
+            amount: rechargeAmount,
             balanceBefore,
             balanceAfter: user.walletBalance,
-            razorpayPaymentId: razorpay_payment_id, // इसे Schema में 'unique' रखें
-            description: `Wallet Recharge (Verified Txn: ${razorpay_payment_id})`
+            description: `Wallet Recharge (Txn: ${razorpay_payment_id})`
         });
 
-        res.json({ 
-            success: true, 
-            message: 'Wallet recharged safely!', 
-            newBalance: user.walletBalance 
-        });
+        res.json({ message: 'Wallet recharged successfully!', newBalance: user.walletBalance });
 
     } catch (err) {
-        console.error("Hacker Prevention Error:", err);
-        res.status(500).json({ message: 'Internal Server Error' });
+        console.error("Verify Recharge Error:", err);
+        res.status(500).json({ message: 'Verification failed' });
     }
 });
 
@@ -9316,12 +9262,12 @@ app.put('/api/admin/print/settle-payout/:jobId', protect, authorizeRole('admin')
 
 // ✅ NEW ROUTE: Submit Print Job (Matches Flutter App)
 // ✅ NEW ROUTE: Submit Print Job (Fixed & Cleaned)
-// ✅ FULL UPDATED ROUTE: Submit Print Job (With Robust Seller Notifications)
 app.post('/api/print/jobs', protect, uploadPrint.single('document'), async (req, res) => {
   try {
-    console.log("📥 Print Job Request Body:", req.body); 
+    console.log("📥 Print Job Request Body:", req.body); // Debug log
 
     // 1. Extract Data (Robust check for sellerId)
+    // Sometimes Flutter sends 'seller', sometimes 'sellerId'. We check both.
     const sellerId = req.body.sellerId || req.body.seller; 
     const { copies, printType, sideType, paperSize, instructions } = req.body;
 
@@ -9331,18 +9277,21 @@ app.post('/api/print/jobs', protect, uploadPrint.single('document'), async (req,
     }
     
     if (!sellerId) {
-      console.error("❌ FAILURE: Seller ID is missing.");
-      return res.status(400).json({ message: "Seller ID is required." });
+      console.error("❌ FAILURE: Seller ID is missing. Frontend sent:", req.body);
+      return res.status(400).json({ message: "Seller ID is required. Check Flutter request keys." });
     }
 
     // 3. Fetch App Settings for Pricing
     const settings = await AppSettings.findOne({ singleton: true });
+    
+    // Default rates if settings missing
     const bwRate = settings?.printConfig?.bwRatePerPage || 2;
     const colorRate = settings?.printConfig?.colorRatePerPage || 10;
     const adminCommissionRate = settings?.printConfig?.adminPrintCommission || 0.10;
 
     // 4. Calculate Cost
     const numCopies = parseInt(copies) || 1;
+    // Handle case sensitivity for 'Color' vs 'color'
     const isColor = printType && printType.toLowerCase() === 'color';
     const rate = isColor ? colorRate : bwRate;
     
@@ -9353,7 +9302,7 @@ app.post('/api/print/jobs', protect, uploadPrint.single('document'), async (req,
     // 5. Create Job in DB
     const newJob = await PrintJob.create({
       user: req.user._id,
-      seller: sellerId,
+      seller: sellerId, // valid sellerId from step 1
       originalName: req.file.originalname,
       fileUrl: req.file.path,
       publicId: req.file.filename,
@@ -9365,38 +9314,20 @@ app.post('/api/print/jobs', protect, uploadPrint.single('document'), async (req,
       printCost: totalCost,
       sellerEarnings: sellerShare,
       status: 'Pending',
-      paymentStatus: 'pending'
+      paymentStatus: 'pending' // Usually pending until paid
     });
 
     console.log("✅ Print Job Created Successfully:", newJob._id);
 
-    // 6. ✅ DETAILED NOTIFICATION LOGIC (Updated for WhatsApp & Push)
-    // Hum seller ka 'phone' aur 'fcmToken' dono fetch karenge
-    const sellerUser = await User.findById(sellerId).select('phone fcmToken name');
-    
-    if (sellerUser) {
-        const sellerPushMsg = `New Print Job! 🖨️ Earn ₹${sellerShare.toFixed(2)}`;
-        const sellerWhatsAppMsg = `🖨️ *New Print Request!*\n\n` +
-                                  `📄 File: ${req.file.originalname}\n` +
-                                  `🔢 Copies: ${numCopies}\n` +
-                                  `🎨 Type: ${printType.toUpperCase()}\n` +
-                                  `💰 Earnings: ₹${sellerShare.toFixed(2)}\n\n` +
-                                  `Check dashboard to process.`;
-
-        // A. Send WhatsApp
-        if (sellerUser.phone) {
-            await sendWhatsApp(sellerUser.phone, sellerWhatsAppMsg);
-        }
-
-        // B. Send Push Notification (Ensure token is in array)
-        if (sellerUser.fcmToken) {
-            await sendPushNotification(
-                [sellerUser.fcmToken], 
-                'New Print Job! 🖨️', 
-                sellerPushMsg, 
-                { jobId: newJob._id.toString(), type: 'NEW_PRINT_JOB' }
-            );
-        }
+    // 6. Notify Seller
+    const sellerUser = await User.findById(sellerId).select('fcmToken');
+    if (sellerUser && sellerUser.fcmToken) {
+        await sendPushNotification(
+            [sellerUser.fcmToken], 
+            'New Print Job! 🖨️', 
+            `New document received for printing. Earn ₹${sellerShare.toFixed(2)}`, 
+            { type: 'NEW_PRINT_JOB' }
+        );
     }
 
     // 7. Send Response
@@ -9759,902 +9690,33 @@ app.get('/api/print/library/:sellerId', async (req, res) => {
     }
 });
 
-// Node.js example to generate shareable metadata
-
-app.get('/product-share/:id', async (req, res) => {
-    try {
-        const product = await Product.findById(req.params.id);
-        if (!product) {
-            return res.status(404).send("Product not found");
-        }
-
-        // Image check: Agar array hai toh pehli image, aur handle object structure
-        const imageUrl = product.images && product.images.length > 0 
-            ? (typeof product.images[0] === 'object' ? product.images[0].url : product.images[0])
-            : 'https://desibazaar0.netlify.app/logo.png'; // Default logo fallback
-
-        res.send(`
-            <!DOCTYPE html>
-            <html lang="en">
-                <head>
-                    <meta charset="UTF-8">
-                    <title>${product.name} | Quick Sauda</title>
-                    
-                    <meta property="og:title" content="${product.name}" />
-                    <meta property="og:description" content="Kharidiye ${product.name} sirf ₹${product.price} mein! Quick Sauda par behtareen deals." />
-                    <meta property="og:image" content="${imageUrl}" />
-                    <meta property="og:url" content="https://desibazaar0.netlify.app/product/${req.params.id}" />
-                    <meta property="og:type" content="product" />
-                    <meta property="og:site_name" content="Quick Sauda">
-                    
-                    <meta name="twitter:card" content="summary_large_image">
-                    <meta name="twitter:title" content="${product.name}">
-                    <meta name="twitter:description" content="Buy on Quick Sauda">
-                    <meta name="twitter:image" content="${imageUrl}">
-
-                    <style>
-                        body { font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; text-align: center; background: #f8f9fa; }
-                        .loader { border: 4px solid #f3f3f3; border-top: 4px solid #004aad; border-radius: 50%; width: 40px; height: 40px; animation: spin 2s linear infinite; margin-bottom: 10px; }
-                        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-                    </style>
-                </head>
-                <body>
-                    <div>
-                        <div class="loader"></div>
-                        <h3>Opening Quick Sauda App...</h3>
-                        <p>If not redirected, <a href="https://desibazaar0.netlify.app/product/${req.params.id}">click here</a>.</p>
-                    </div>
-
-                    <script>
-                        // Deep Link attempt: Yeh user ko seedha app mein le jayega
-                        setTimeout(function() {
-                            window.location.href = "https://desibazaar0.netlify.app/product/${req.params.id}";
-                        }, 500);
-                    </script>
-                </body>
-            </html>
-        `);
-    } catch (err) {
-        res.status(500).send("Error generating share link");
-    }
+app.get('/api/ping', (req, res) => {
+    res.status(200).send('Pong! Server is awake. 🚀');
 });
 
-// Product Share API for Meta Tags (WhatsApp Preview)
-app.get('/api/product-share/:id', async (req, res) => {
-  try {
-    const productId = req.params.id;
-    
-    // Validation
-    if (!productId || !mongoose.Types.ObjectId.isValid(productId)) {
-      return res.status(400).send(`
-        <!DOCTYPE html>
-        <html>
-        <head><title>Invalid Product</title></head>
-        <body>
-          <h1>Invalid Product ID</h1>
-          <a href="https://desibazaar0.netlify.app">Go to Home</a>
-        </body>
-        </html>
-      `);
-    }
+// 2. Cron Job to hit the Ping API every 5 minutes
 
-    const product = await Product.findById(productId);
-    if (!product) {
-      return res.status(404).send(`
-        <!DOCTYPE html>
-        <html>
-        <head><title>Product Not Found</title></head>
-        <body>
-          <h1>Product Not Found</h1>
-          <a href="https://desibazaar0.netlify.app">Go to Home</a>
-        </body>
-        </html>
-      `);
-    }
 
-    // Configuration
-    const FRONTEND_URL = process.env.FRONTEND_URL || "https://desibazaar0.netlify.app";
-    const ANDROID_PACKAGE = "com.amarjeet.quicksauda";
+cron.schedule('*/5 * * * *', () => {
+    // अपनी लाइव वेबसाइट का URL .env में BACKEND_URL नाम से डालें (e.g., https://my-app.onrender.com)
+    // अगर .env में नहीं है, तो यह localhost का उपयोग करेगा
+    const backendUrl = process.env.BACKEND_URL || `http://localhost:${PORT}`;
     
-    // Deep Links
-    const productWebUrl = `${FRONTEND_URL}/#/product?id=${productId}`;
-    const appDeepLink = `quicksauda://product?id=${productId}`;
-    
-    // Android Intent URL
-    const androidIntentUrl = `intent://product/${productId}#Intent;scheme=quicksauda;package=${ANDROID_PACKAGE};S.browser_fallback_url=${encodeURIComponent(`https://play.google.com/store/apps/details?id=${ANDROID_PACKAGE}`)};end;`;
-    
-    // Universal Link - Facebook/Instagram के लिए यही काम करेगा
-    const universalLink = `https://desibazaar0.netlify.app/#/product?id=${productId}`;
-    
-    // Alternative Universal Link (query parameters के साथ)
-    const universalLinkAlt = `https://desibazaar0.netlify.app/product.html?id=${productId}`;
-    
-    // Play Store URL
-    const PLAY_STORE = `https://play.google.com/store/apps/details?id=${ANDROID_PACKAGE}`;
+    console.log(`⏰ Sending Keep-Alive Ping to: ${backendUrl}/api/ping`);
 
-    const imageUrl = product.images?.[0]?.url ||
-                    product.images?.[0] ||
-                    `${FRONTEND_URL}/logo.png`;
-    
-    // ✅ SOCIAL MEDIA DETECTION
-    const userAgent = req.headers['user-agent'] || '';
-    
-    // Facebook और Instagram detection
-    const isFacebook = /FBAN|FBAV|Facebook/i.test(userAgent);
-    const isInstagram = /Instagram/i.test(userAgent);
-    const isSocialMedia = isFacebook || isInstagram || 
-                         /Twitter|LinkedIn|Snapchat|Pinterest|Telegram|WhatsApp/i.test(userAgent);
-    
-    // ✅ FACEBOOK/INSTAGRAM के लिए UNIVERSAL LINK PAGE
-    if (isSocialMedia) {
-      const socialPlatform = isFacebook ? 'Facebook' : 
-                            isInstagram ? 'Instagram' : 
-                            'Social Media';
-      
-      return res.send(`
-      <!DOCTYPE html>
-      <html lang="en" prefix="og: http://ogp.me/ns#">
-      <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        
-        <!-- Primary Meta Tags -->
-        <title>${product.name} - Quick Sauda</title>
-        <meta name="title" content="${product.name}">
-        <meta name="description" content="Buy now for ₹${product.price} | Quick Sauda">
-        
-        <!-- Open Graph / Facebook -->
-        <meta property="og:type" content="website">
-        <meta property="og:url" content="${universalLink}">
-        <meta property="og:title" content="${product.name}">
-        <meta property="og:description" content="Price: ₹${product.price} | Order now on Quick Sauda">
-        <meta property="og:image" content="${imageUrl}">
-        <meta property="og:image:width" content="1200">
-        <meta property="og:image:height" content="630">
-        <meta property="og:site_name" content="Quick Sauda">
-        
-        <!-- Twitter -->
-        <meta property="twitter:card" content="summary_large_image">
-        <meta property="twitter:url" content="${universalLink}">
-        <meta property="twitter:title" content="${product.name}">
-        <meta property="twitter:description" content="Price: ₹${product.price}">
-        <meta property="twitter:image" content="${imageUrl}">
-        
-        <!-- App Links for Universal Links -->
-        <meta property="al:android:url" content="${universalLink}">
-        <meta property="al:android:app_name" content="Quick Sauda">
-        <meta property="al:android:package" content="${ANDROID_PACKAGE}">
-        <meta property="al:ios:url" content="${universalLink}">
-        <meta property="al:ios:app_name" content="Quick Sauda">
-        <meta property="al:web:should_fallback" content="true">
-        <meta property="al:web:url" content="${productWebUrl}">
-        
-        <!-- iOS Smart App Banner -->
-        <meta name="apple-itunes-app" content="app-id=YOUR_IOS_APP_ID, app-argument=${universalLink}">
-        
-        <!-- Auto-redirect to Universal Link -->
-        <meta http-equiv="refresh" content="1; url=${universalLink}" />
-        
-        <style>
-          * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-          }
-          
-          body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: white;
-            text-align: center;
-            padding: 20px;
-          }
-          
-          .container {
-            background: rgba(255, 255, 255, 0.1);
-            backdrop-filter: blur(10px);
-            border-radius: 20px;
-            padding: 30px;
-            max-width: 500px;
-            width: 100%;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-          }
-          
-          .logo {
-            font-size: 2.5rem;
-            margin-bottom: 10px;
-          }
-          
-          .app-name {
-            font-size: 1.8rem;
-            font-weight: bold;
-            margin-bottom: 5px;
-          }
-          
-          .tagline {
-            opacity: 0.9;
-            margin-bottom: 20px;
-            font-size: 1rem;
-          }
-          
-          .product-card {
-            background: rgba(255, 255, 255, 0.15);
-            border-radius: 15px;
-            padding: 20px;
-            margin: 20px 0;
-            text-align: left;
-          }
-          
-          .product-name {
-            font-size: 1.3rem;
-            margin-bottom: 10px;
-            font-weight: bold;
-          }
-          
-          .product-price {
-            font-size: 1.8rem;
-            color: #fbbf24;
-            font-weight: bold;
-          }
-          
-          .loader {
-            margin: 20px auto;
-            border: 4px solid rgba(255, 255, 255, 0.3);
-            border-radius: 50%;
-            border-top: 4px solid white;
-            width: 40px;
-            height: 40px;
-            animation: spin 1s linear infinite;
-          }
-          
-          @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-          }
-          
-          .cta-button {
-            display: inline-block;
-            margin-top: 20px;
-            padding: 15px 30px;
-            background: #fbbf24;
-            color: #333;
-            text-decoration: none;
-            border-radius: 12px;
-            font-weight: bold;
-            font-size: 1.1rem;
-            transition: all 0.3s;
-          }
-          
-          .cta-button:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 20px rgba(0,0,0,0.2);
-          }
-          
-          .fallback-links {
-            margin-top: 20px;
-            padding-top: 20px;
-            border-top: 1px solid rgba(255,255,255,0.2);
-          }
-          
-          .fallback-links a {
-            display: block;
-            margin: 8px 0;
-            color: #fbbf24;
-            text-decoration: underline;
-          }
-        </style>
-      </head>
-      <body>
-        <div class="container">
-          <div class="logo">🛒</div>
-          <div class="app-name">Quick Sauda</div>
-          <div class="tagline">Instant Grocery Delivery</div>
-          
-          <div class="loader"></div>
-          
-          <p style="margin: 15px 0; font-size: 1.1rem;">
-            Opening ${product.name} in Quick Sauda...
-          </p>
-          
-          <div class="product-card">
-            <div class="product-name">${product.name}</div>
-            <div class="product-price">₹${product.price}</div>
-            ${product.description ? `
-              <div style="margin-top: 10px; opacity: 0.9; font-size: 0.95rem;">
-                ${product.description.substring(0, 100)}${product.description.length > 100 ? '...' : ''}
-              </div>
-            ` : ''}
-          </div>
-          
-          <a href="${universalLink}" class="cta-button" id="openButton">
-            Open ${product.name}
-          </a>
-          
-          <div class="fallback-links">
-            <p style="font-size: 0.9rem; opacity: 0.8; margin-bottom: 10px;">
-              Having trouble? Try these:
-            </p>
-            <a href="${productWebUrl}">Open in Web Browser</a>
-            <a href="${PLAY_STORE}">Download Quick Sauda App</a>
-          </div>
-        </div>
-        
-        <script>
-          // Platform detection
-          const userAgent = navigator.userAgent || navigator.vendor || window.opera;
-          const isAndroid = /android/i.test(userAgent);
-          const isIOS = /iPad|iPhone|iPod/.test(userAgent) && !window.MSStream;
-          
-          // Detect social media in-app browsers
-          const isFacebookInApp = /FBAN|FBAV/i.test(userAgent);
-          const isInstagramInApp = /Instagram/i.test(userAgent);
-          const isSocialMediaInApp = isFacebookInApp || isInstagramInApp;
-          
-          // Configuration
-          const CONFIG = {
-            universalLink: "${universalLink}",
-            productWebUrl: "${productWebUrl}",
-            playStoreUrl: "${PLAY_STORE}",
-            appStoreUrl: "https://apps.apple.com/app/idYOUR_IOS_APP_ID"
-          };
-          
-          // Function to open with best method
-          function openWithBestMethod() {
-            // Social media browsers में सिर्फ Universal Link ही काम करता है
-            window.location.href = CONFIG.universalLink;
-          }
-          
-          // Auto-attempt to open
-          (function init() {
-            // Immediate attempt
-            openWithBestMethod();
-            
-            // Fallback after 1 second
-            setTimeout(() => {
-              if (document.hasFocus()) {
-                // Still on page, show manual button
-                document.querySelector('.loader').style.display = 'none';
-                document.querySelector('.cta-button').style.display = 'inline-block';
-              }
-            }, 1000);
-            
-            // Manual button click
-            document.getElementById('openButton').addEventListener('click', function(e) {
-              e.preventDefault();
-              openWithBestMethod();
-            });
-            
-            // Add click tracking
-            document.addEventListener('click', function() {
-              // User interacted with page
-              console.log('User clicked on page');
-            });
-            
-            // Prevent going back to this page
-            if (window.history && window.history.replaceState) {
-              window.history.replaceState(null, null, window.location.href);
-            }
-          })();
-          
-          // Visibility change detection
-          document.addEventListener('visibilitychange', function() {
-            if (document.hidden) {
-              console.log('App may have opened');
-            }
-          });
-        </script>
-      </body>
-      </html>
-      `);
-    }
+    const client = backendUrl.startsWith('https') ? https : http;
 
-    // ✅ REGULAR BROWSERS के लिए ORIGINAL SMART PAGE
-    const html = `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${product.name} - Quick Sauda</title>
-  
-  <!-- Open Graph Tags -->
-  <meta property="og:title" content="${product.name}">
-  <meta property="og:description" content="₹${product.price} - Order now on Quick Sauda">
-  <meta property="og:image" content="${imageUrl}">
-  <meta property="og:url" content="${productWebUrl}">
-  <meta property="og:type" content="product">
-  
-  <!-- iOS Meta Tags -->
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black">
-  
-  <!-- App Links -->
-  <meta property="al:android:url" content="${appDeepLink}">
-  <meta property="al:android:app_name" content="Quick Sauda">
-  <meta property="al:android:package" content="${ANDROID_PACKAGE}">
-  <meta property="al:web:url" content="${productWebUrl}">
-  <meta property="al:ios:url" content="${universalLink}">
-  <meta property="al:ios:app_name" content="Quick Sauda">
-  
-  <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-    
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 20px;
-      color: white;
-    }
-    
-    .container {
-      background: rgba(255, 255, 255, 0.1);
-      backdrop-filter: blur(10px);
-      border-radius: 20px;
-      padding: 30px;
-      max-width: 500px;
-      width: 100%;
-      text-align: center;
-      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-    }
-    
-    .logo {
-      font-size: 2.5rem;
-      margin-bottom: 10px;
-    }
-    
-    .app-name {
-      font-size: 1.8rem;
-      font-weight: bold;
-      margin-bottom: 5px;
-    }
-    
-    .tagline {
-      opacity: 0.9;
-      margin-bottom: 30px;
-      font-size: 1.1rem;
-    }
-    
-    .product-card {
-      background: rgba(255, 255, 255, 0.15);
-      border-radius: 15px;
-      padding: 20px;
-      margin: 25px 0;
-      text-align: left;
-    }
-    
-    .product-name {
-      font-size: 1.3rem;
-      margin-bottom: 10px;
-      font-weight: bold;
-    }
-    
-    .product-price {
-      font-size: 1.8rem;
-      color: #fbbf24;
-      font-weight: bold;
-    }
-    
-    .loading {
-      margin: 20px 0;
-    }
-    
-    .spinner {
-      border: 4px solid rgba(255, 255, 255, 0.3);
-      border-radius: 50%;
-      border-top: 4px solid white;
-      width: 40px;
-      height: 40px;
-      animation: spin 1s linear infinite;
-      margin: 0 auto 15px;
-    }
-    
-    @keyframes spin {
-      0% { transform: rotate(0deg); }
-      100% { transform: rotate(360deg); }
-    }
-    
-    .action-buttons {
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-      margin-top: 25px;
-    }
-    
-    .btn {
-      padding: 16px;
-      border-radius: 12px;
-      text-decoration: none;
-      font-size: 1.1rem;
-      font-weight: bold;
-      transition: all 0.3s;
-      border: none;
-      cursor: pointer;
-    }
-    
-    .btn-primary {
-      background: white;
-      color: #667eea;
-    }
-    
-    .btn-secondary {
-      background: rgba(255, 255, 255, 0.2);
-      color: white;
-      border: 2px solid white;
-    }
-    
-    .btn:hover {
-      transform: translateY(-2px);
-      box-shadow: 0 10px 20px rgba(0,0,0,0.2);
-    }
-    
-    .fallback-message {
-      margin-top: 20px;
-      padding: 15px;
-      background: rgba(255, 255, 255, 0.1);
-      border-radius: 10px;
-      display: none;
-    }
-    
-    .manual-link {
-      display: inline-block;
-      margin-top: 10px;
-      padding: 10px 20px;
-      background: #fbbf24;
-      color: #333;
-      border-radius: 8px;
-      text-decoration: none;
-      font-weight: bold;
-    }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="logo">🛒</div>
-    <div class="app-name">Quick Sauda</div>
-    <div class="tagline">Instant Grocery Delivery</div>
-    
-    <div class="product-card">
-      <div class="product-name">${product.name}</div>
-      <div class="product-price">₹${product.price}</div>
-      ${product.description ? `
-        <div style="margin-top: 10px; opacity: 0.9; font-size: 0.95rem;">
-          ${product.description.substring(0, 120)}${product.description.length > 120 ? '...' : ''}
-        </div>
-      ` : ''}
-    </div>
-    
-    <div class="loading" id="loading">
-      <div class="spinner"></div>
-      <div id="statusText">Opening in Quick Sauda app...</div>
-    </div>
-    
-    <div class="action-buttons" id="actionButtons" style="display: none;">
-      <button onclick="openInApp()" class="btn btn-primary" id="openAppBtn">
-        Open in Quick Sauda App
-      </button>
-      <a href="${productWebUrl}" class="btn btn-secondary">
-        View on Website
-      </a>
-      <button onclick="downloadApp()" class="btn btn-secondary">
-        Download App
-      </button>
-    </div>
-    
-    <div class="fallback-message" id="fallbackMessage">
-      <p>If the app doesn't open automatically:</p>
-      <a href="${universalLink}" class="manual-link" id="manualLink">
-        Tap to Open Product (Universal Link)
-      </a>
-      <br>
-      <a href="${appDeepLink}" class="manual-link" style="background: #667eea; margin-top: 8px;">
-        Tap to Open Product (Deep Link)
-      </a>
-    </div>
-  </div>
-
-  <script>
-    // Platform detection
-    const userAgent = navigator.userAgent || navigator.vendor || window.opera;
-    const isAndroid = /android/i.test(userAgent);
-    const isIOS = /iPad|iPhone|iPod/.test(userAgent) && !window.MSStream;
-    
-    // Detect social media in-app browsers
-    const isFacebookInApp = /FBAN|FBAV/i.test(userAgent);
-    const isInstagramInApp = /Instagram/i.test(userAgent);
-    const isSocialMediaInApp = isFacebookInApp || isInstagramInApp;
-    
-    // Configuration
-    const CONFIG = {
-      appDeepLink: "${appDeepLink}",
-      androidIntentUrl: "${androidIntentUrl}",
-      universalLink: "${universalLink}",
-      productWebUrl: "${productWebUrl}",
-      playStoreUrl: "${PLAY_STORE}",
-      timeout: 2000,
-      checkInterval: 100
-    };
-    
-    // State
-    let appOpened = false;
-    let startTime = Date.now();
-    
-    // Function to check if app opened successfully
-    function checkIfAppOpened() {
-      if (document.hidden || !document.hasFocus()) {
-        appOpened = true;
-        return true;
-      }
-      
-      if (Date.now() - startTime > CONFIG.timeout) {
-        return false;
-      }
-      
-      return null;
-    }
-    
-    // Function to open app with the BEST method for each platform
-    function openAppWithBestMethod() {
-      // Social media browsers में Universal Link use करें
-      if (isSocialMediaInApp) {
-        window.location.href = CONFIG.universalLink;
-        return;
-      }
-      
-      if (isAndroid) {
-        window.location.href = CONFIG.androidIntentUrl;
-      } else if (isIOS) {
-        if (CONFIG.universalLink && CONFIG.universalLink !== '') {
-          window.location.href = CONFIG.universalLink;
+    client.get(`${backendUrl}/api/ping`, (resp) => {
+        if (resp.statusCode === 200) {
+            console.log('✅ Keep-Alive Ping Successful!');
+        } else {
+            console.log(`⚠️ Keep-Alive Ping Failed with Status: ${resp.statusCode}`);
         }
-        setTimeout(() => {
-          if (!appOpened) {
-            window.location.href = CONFIG.appDeepLink;
-          }
-        }, 300);
-      } else {
-        window.location.href = CONFIG.productWebUrl;
-        appOpened = true;
-      }
-    }
-    
-    // Function to show fallback options
-    function showFallbackOptions() {
-      document.getElementById('loading').style.display = 'none';
-      document.getElementById('statusText').textContent = 'Choose an option:';
-      document.getElementById('actionButtons').style.display = 'flex';
-      document.getElementById('fallbackMessage').style.display = 'block';
-    }
-    
-    // Function to manually open app
-    function openInApp() {
-      document.getElementById('statusText').textContent = 'Trying to open app...';
-      document.getElementById('loading').style.display = 'block';
-      document.getElementById('actionButtons').style.display = 'none';
-      
-      startTime = Date.now();
-      appOpened = false;
-      
-      openAppWithBestMethod();
-      
-      setTimeout(() => {
-        if (!checkIfAppOpened()) {
-          showFallbackOptions();
-        }
-      }, CONFIG.timeout);
-    }
-    
-    // Function to download app
-    function downloadApp() {
-      window.location.href = CONFIG.playStoreUrl;
-    }
-    
-    // MAIN EXECUTION
-    (function init() {
-      // Social media में Instant Universal Link redirect
-      if (isSocialMediaInApp) {
-        document.getElementById('statusText').textContent = 'Opening via Universal Link...';
-        setTimeout(() => {
-          window.location.href = CONFIG.universalLink;
-        }, 100);
-        return;
-      }
-      
-      openAppWithBestMethod();
-      
-      const checkInterval = setInterval(() => {
-        const status = checkIfAppOpened();
-        
-        if (status === true) {
-          clearInterval(checkInterval);
-          console.log('App opened successfully!');
-        } else if (status === false) {
-          clearInterval(checkInterval);
-          showFallbackOptions();
-          console.log('Showing fallback options');
-        }
-      }, CONFIG.checkInterval);
-      
-      setTimeout(() => {
-        clearInterval(checkInterval);
-        if (!appOpened) {
-          showFallbackOptions();
-        }
-      }, CONFIG.timeout + 1000);
-      
-      document.addEventListener('visibilitychange', () => {
-        if (document.hidden) {
-          appOpened = true;
-        }
-      });
-      
-      window.addEventListener('blur', () => {
-        appOpened = true;
-      });
-      
-      if (window.history && window.history.replaceState) {
-        window.history.replaceState(null, null, window.location.href);
-      }
-    })();
-    
-    document.getElementById('manualLink').addEventListener('click', function(e) {
-      e.preventDefault();
-      window.location.href = CONFIG.universalLink;
-      
-      document.getElementById('actionButtons').style.display = 'none';
-      document.getElementById('fallbackMessage').style.display = 'none';
-      document.getElementById('loading').style.display = 'block';
-      document.getElementById('statusText').textContent = 'Opening app...';
+    }).on("error", (err) => {
+        console.error("❌ Keep-Alive Ping Error:", err.message);
     });
-  </script>
-</body>
-</html>`;
-
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.setHeader('Cache-Control', 'public, max-age=1800');
-    res.send(html);
-
-  } catch (error) {
-    console.error('Product share error:', error);
-    
-    res.status(500).send(`
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>Error - Quick Sauda</title>
-        <style>
-          body {
-            font-family: sans-serif;
-            text-align: center;
-            padding: 50px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-          }
-          .error-box {
-            background: rgba(255,255,255,0.1);
-            padding: 40px;
-            border-radius: 20px;
-            backdrop-filter: blur(10px);
-            max-width: 500px;
-          }
-          h1 { margin-bottom: 20px; }
-          a {
-            display: inline-block;
-            margin-top: 20px;
-            padding: 12px 30px;
-            background: white;
-            color: #667eea;
-            text-decoration: none;
-            border-radius: 10px;
-            font-weight: bold;
-          }
-        </style>
-      </head>
-      <body>
-        <div class="error-box">
-          <h1>⚠️ Something went wrong</h1>
-          <p>We're unable to load this product right now.</p>
-          <a href="https://desibazaar0.netlify.app">Go to Homepage</a>
-        </div>
-      </body>
-      </html>
-    `);
-  }
 });
 
-
-// ✅ विशेष रूप से Flutter ऐप के लिए JSON डेटा भेजने वाला रूट
-app.get('/api/product-share/json/:id', async (req, res) => {
-    try {
-        const { id } = req.params;
-        
-        // 1. ID validation
-        if (!mongoose.Types.ObjectId.isValid(id)) {
-            return res.status(400).json({ 
-                message: "Invalid product ID format" 
-            });
-        }
-
-        const product = await Product.findById(id);
-        
-        if (!product) {
-            return res.status(404).json({ 
-                message: "Product not found",
-                id: id
-            });
-        }
-
-        // 2. Image URL extraction with better handling
-        const getImageUrl = (images) => {
-            if (!images || !Array.isArray(images) || images.length === 0) {
-                return 'https://desibazaar0.netlify.app/logo.png';
-            }
-            
-            const firstImage = images[0];
-            if (typeof firstImage === 'object' && firstImage.url) {
-                return firstImage.url;
-            } else if (typeof firstImage === 'string') {
-                return firstImage;
-            }
-            
-            return 'https://desibazaar0.netlify.app/logo.png';
-        };
-
-        // 3. Default domain URL (environment variable से लेने के लिए)
-        const DOMAIN_URL = process.env.DOMAIN_URL || 'https://hdvideo-1.onrender.com';
-        
-        // 4. Response data structure
-        const responseData = {
-            success: true,
-            data: {
-                id: product._id,
-                name: product.name,
-                price: product.price,
-                currency: product.currency || '₹', // Default currency
-                image: getImageUrl(product.images),
-                url: `${DOMAIN_URL}/api/product-share/${product._id}`,
-                // Additional useful fields for social media
-                description: product.description || product.name,
-                category: product.category,
-                brand: product.brand
-            },
-            timestamp: new Date().toISOString()
-        };
-
-        // 5. Cache control headers for CDN/API caching
-        res.setHeader('Cache-Control', 'public, max-age=3600'); // 1 hour cache
-        res.setHeader('Content-Type', 'application/json; charset=utf-8');
-        
-        res.json(responseData);
-
-    } catch (err) {
-        console.error(`Error fetching product ${req.params.id}:`, err);
-        
-        // 6. Better error handling
-        const statusCode = err.name === 'CastError' ? 400 : 500;
-        
-        res.status(statusCode).json({
-            success: false,
-            message: "Error fetching product data",
-            error: process.env.NODE_ENV === 'development' ? err.message : undefined
-        });
-    }
-});
 
 
 const IP = '0.0.0.0';
