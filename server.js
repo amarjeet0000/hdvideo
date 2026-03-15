@@ -1,4 +1,6 @@
 
+const IP = '0.0.0.0';
+const PORT = process.env.PORT || 5001;
 
 // server.js - Full E-Commerce Backend (Patched with all new features + Delivery Module + Tax/GST + Razorpay Webhook)
 
@@ -18,7 +20,7 @@ const fs = require('fs').promises;
 const cloudinary = require('cloudinary').v2;
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const { log } = require('console');
-
+const rateLimit = require('express-rate-limit'); // 👈 Yeh NAYI line add karein
 
 // --- NEW LIBRARIES ---
 const cron = require('node-cron');
@@ -33,7 +35,44 @@ const qrcode = require('qrcode');
 // Initialize Express app
 const app = express();
 app.use(cors());
-app.use(express.json());
+// Initialize Express app with raw body saver for Webhooks
+app.use(express.json({
+  verify: (req, res, buf) => {
+    req.rawBody = buf.toString(); 
+  }
+}));
+// Initialize Express app
+
+
+// Initialize Express app
+
+// 🛡️ SECURITY: IP Rate Limiting (Max 500 requests per second)
+const globalLimiter = rateLimit({
+  windowMs: 1000, // 1 second ka time window
+  max: 500, // Har IP ko sirf 500 request allow karega
+  message: { message: 'Too many requests from this IP, please try again later.' },
+  standardHeaders: true, 
+  legacyHeaders: false,
+});
+
+// 🛡️ SECURITY: Strict limit for OTP APIs (3 requests per minute)
+const otpLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 Minute
+  max: 3, // Ek IP se 1 minute mein sirf 3 OTP ja sakte hain
+  message: { message: 'Too many OTP requests. Please wait a minute before trying again.' }
+});
+
+// Agar aapka server cloud (AWS, Render, Hostinger) par hai, toh yeh zaroori hai:
+app.set('trust proxy', 1);
+
+// Limiter ko app par apply karein
+app.use(globalLimiter);
+app.use('/api/auth/send-otp-register', otpLimiter);
+app.use('/api/auth/forgot-password', otpLimiter);
+
+
+
+
 
 
 
@@ -3773,13 +3812,21 @@ app.post('/api/payment/verify', async (req, res) => {
 });
 
 // --- [NEW] RAZORPAY WEBHOOK HANDLER ---
+// --- [NEW] RAZORPAY WEBHOOK HANDLER ---
 app.post('/api/payment/razorpay-webhook', async (req, res) => {
     const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
     console.log('Razorpay webhook called!');
 
     try {
         const shasum = crypto.createHmac('sha256', secret);
-        shasum.update(JSON.stringify(req.body));
+        
+        // 🚨 CRITICAL FIX: Use req.rawBody, NOT JSON.stringify(req.body)
+        if (!req.rawBody) {
+             console.error("rawBody is missing! Make sure you updated your express.json() middleware.");
+             return res.status(400).send("Webhook error: Missing raw body.");
+        }
+        shasum.update(req.rawBody);
+        
         const digest = shasum.digest('hex');
 
         if (digest === req.headers['x-razorpay-signature']) {
@@ -3834,7 +3881,6 @@ app.post('/api/payment/razorpay-webhook', async (req, res) => {
         res.status(500).send('Webhook processing error');
     }
 });
-
 
 app.get('/api/payment/history', protect, async (req, res) => {
   try {
@@ -6772,57 +6818,74 @@ app.post('/api/orders/buy-now-summary', protect, async (req, res) => {
 
 
 // ✅ NEW: Endpoint to place an order for a single "Buy Now" item
+// ✅ FIXED: Endpoint to place an order for a single "Buy Now" item
 app.post('/api/orders/buy-now', protect, async (req, res) => {
-    // 1. Change the input from productId to variantId
     const { variantId, qty = 1, shippingAddressId, paymentMethod, couponCode } = req.body;
 
-    // We'll use a transaction for atomicity, which is crucial for stock management
     const session = await mongoose.startSession();
     session.startTransaction();
 
     try {
-        // 2. Lookup the Variant and populate its parent Product and Seller
-        const variant = await Variant.findById(variantId)
-            .populate('product') // Populate the parent product
-            .session(session); // Use session for consistent reads
+        // 1. Lookup the Product that contains this Variant
+        const product = await Product.findOne({ "variants._id": variantId }).session(session);
 
-        if (!variant || !variant.product) {
+        if (!product) {
             await session.abortTransaction();
-            return res.status(404).json({ message: 'Product variant not found.' });
+            session.endSession();
+            return res.status(404).json({ message: 'Product or variant not found.' });
         }
 
-        // Assign to product/seller for cleaner code, consistent with original logic
-        const product = variant.product;
-        // Since we need seller info (pincodes), we need another lookup or to populate deeper
+        // 2. Extract the specific variant
+        const variant = product.variants.id(variantId);
+        
+        // 3. Fetch the seller and address
         const seller = await User.findById(product.seller).select('pincodes name phone fcmToken').session(session);
-
         const shippingAddress = await Address.findById(shippingAddressId).session(session);
 
         // Validations
         if (!shippingAddress) {
             await session.abortTransaction();
+            session.endSession();
             return res.status(404).json({ message: 'Shipping address not found.' });
         }
         
-        // Stock check now uses variant.stock
         if (variant.stock < qty) {
             await session.abortTransaction();
-            return res.status(400).json({ message: `Insufficient stock for ${product.name} (Variant: ${variant.color}, ${variant.size})` });
+            session.endSession();
+            return res.status(400).json({ message: `Insufficient stock for ${product.name} (Variant: ${variant.color || ''}, ${variant.size || ''})` });
         }
         
-        // Pincode check uses the fetched seller object
         if (!seller.pincodes.includes(shippingAddress.pincode)) {
              await session.abortTransaction();
+             session.endSession();
              return res.status(400).json({ message: `Delivery not available for ${product.name} at your location.` });
         }
         
-        // Calculations now use variant.price
+        // Calculations
         const itemsTotal = variant.price * qty;
         let discountAmount = 0;
         const shippingFee = calculateShippingFee(shippingAddress.pincode);
         const taxAmount = itemsTotal * GST_RATE;
 
-        // ... (Coupon Logic remains here)
+        // Coupon Logic
+        if (couponCode) {
+            const coupon = await Coupon.findOne({
+                code: couponCode,
+                isActive: true,
+                expiryDate: { $gt: new Date() },
+                minPurchaseAmount: { $lte: itemsTotal }
+            });
+            if (coupon) {
+                if (coupon.discountType === 'percentage') {
+                    discountAmount = itemsTotal * (coupon.discountValue / 100);
+                    if (coupon.maxDiscountAmount && discountAmount > coupon.maxDiscountAmount) {
+                        discountAmount = coupon.maxDiscountAmount;
+                    }
+                } else if (coupon.discountType === 'fixed') {
+                    discountAmount = coupon.discountValue;
+                }
+            }
+        }
         
         let finalAmountForPayment = Math.max(0, itemsTotal + shippingFee + taxAmount - discountAmount);
         
@@ -6836,7 +6899,7 @@ app.post('/api/orders/buy-now', protect, async (req, res) => {
             razorpayOrder = await razorpay.orders.create({
                 amount: Math.round(finalAmountForPayment * 100),
                 currency: 'INR',
-                receipt: `rcpt_buynow_${crypto.randomBytes(4).toString('hex')}`,
+                receipt: `rcpt_bn_${crypto.randomBytes(4).toString('hex')}`,
             });
         }
         
@@ -6844,20 +6907,18 @@ app.post('/api/orders/buy-now', protect, async (req, res) => {
 
         const order = new Order({
             user: req.user._id,
-            seller: seller._id, // Use the fetched seller
+            seller: seller._id,
             orderItems: [{
                 product: product._id,
                 name: product.name,
                 qty: qty,
-                price: variant.price, // Use variant's price
-                originalPrice: product.originalPrice,
+                price: variant.price, 
+                originalPrice: variant.originalPrice || product.originalPrice,
                 category: product.category,
-                // 4. SAVE COLOR AND SIZE ATTRIBUTES HERE!
                 variantId: variant._id, 
                 color: variant.color,
                 size: variant.size,
-                // Assuming variant has a 'sku' field
-                sku: variant.sku, 
+                sku: variant.sku || product.sku, 
             }],
             shippingAddress: `${shippingAddress.street}, ${shippingAddress.city}, ${shippingAddress.state} - ${shippingAddress.pincode}`,
             pincode: shippingAddress.pincode,
@@ -6873,24 +6934,29 @@ app.post('/api/orders/buy-now', protect, async (req, res) => {
             history: [{ status: isCodOrFree ? 'Pending' : 'Payment Pending' }]
         });
         
-        await order.save({ session }); // Save the order within the transaction
+        await order.save({ session });
 
         if (isCodOrFree) {
-            // 3. Atomically decrement stock on the Variant model
-            const updatedVariant = await Variant.findOneAndUpdate(
-                { _id: variant._id, stock: { $gte: qty } },
-                { $inc: { stock: -qty } },
+            // 🚨 CRITICAL FIX: Atomically decrement stock on the Product's variant array AND main stock
+            const updatedProduct = await Product.findOneAndUpdate(
+                { _id: product._id, "variants._id": variant._id, "variants.stock": { $gte: qty } },
+                { 
+                    $inc: { 
+                        "variants.$.stock": -qty,
+                        "stock": -qty
+                    } 
+                },
                 { new: true, session }
             );
             
-            if (!updatedVariant) {
+            if (!updatedProduct) {
                 await session.abortTransaction();
+                session.endSession();
                 return res.status(409).json({ message: `Concurrency error: Insufficient stock for ${product.name}. Please try again.` });
             }
-            // Send notifications, etc.
         }
 
-        await session.commitTransaction(); // Commit all changes if successful
+        await session.commitTransaction(); 
         session.endSession();
 
         res.status(201).json({
@@ -6901,7 +6967,7 @@ app.post('/api/orders/buy-now', protect, async (req, res) => {
 
     } catch (err) {
         if (session.inTransaction()) {
-            await session.abortTransaction(); // Rollback on error
+            await session.abortTransaction();
         }
         session.endSession();
         res.status(500).json({ message: 'Error placing Buy Now order', error: err.message });
@@ -9719,8 +9785,7 @@ cron.schedule('*/5 * * * *', () => {
 
 
 
-const IP = '0.0.0.0';
-const PORT = process.env.PORT || 5001;
+
 
 app.listen(PORT, IP, () => {
   console.log(`🚀 Server running on http://${IP}:${PORT}`);
